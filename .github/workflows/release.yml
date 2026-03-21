@@ -41,6 +41,9 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
