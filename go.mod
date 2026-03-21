@@ -1,4 +1,4 @@
-module traceguard
+module github.com/L1ghtn1ng/traceguard
 
 go 1.26
 

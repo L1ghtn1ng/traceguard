@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
 func TestEnricherIndexesPodsByUID(t *testing.T) {

@@ -6,13 +6,13 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"traceguard/internal/blocklist"
-	"traceguard/internal/config"
-	"traceguard/internal/ebpf"
-	"traceguard/internal/eventsink"
-	"traceguard/internal/kubeinfo"
-	"traceguard/internal/processinfo"
-	"traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
+	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
+	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/kubeinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
 func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, reloadCh <-chan struct{}) error {

@@ -8,13 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"traceguard/internal/app"
-	"traceguard/internal/config"
-	"traceguard/internal/doctor"
-	"traceguard/internal/eventsink"
-	"traceguard/internal/logging"
-	"traceguard/internal/telemetry"
-	"traceguard/internal/version"
+	"github.com/L1ghtn1ng/traceguard/internal/app"
+	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/doctor"
+	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/logging"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/version"
 )
 
 func main() {

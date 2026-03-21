@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"traceguard/internal/logging"
-	"traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/logging"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
 func TestRecorderWritesArchive(t *testing.T) {

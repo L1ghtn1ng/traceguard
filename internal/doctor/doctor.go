@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"traceguard/internal/config"
-	"traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
 func Run(cfg config.Config, w io.Writer) error {
