@@ -1,0 +1,34 @@
+[Unit]
+Description=TraceGuard DNS and exec monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/traceguard/traceguard.env
+ExecStart=/usr/bin/traceguard
+Restart=on-failure
+RestartSec=5s
+StateDirectory=traceguard
+LogsDirectory=traceguard
+WorkingDirectory=/var/lib/traceguard
+User=root
+Group=root
+UMask=0027
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/traceguard /var/log/traceguard
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

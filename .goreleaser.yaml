@@ -1,0 +1,82 @@
+version: 2
+
+project_name: traceguard
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./internal/ebpf
+    - go test ./...
+
+gomod:
+  proxy: true
+  env:
+    - GOPROXY=https://proxy.golang.org,direct
+    - GOSUMDB=sum.golang.org
+
+builds:
+  - id: traceguard
+    main: ./cmd/traceguard
+    binary: traceguard
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - ids:
+      - traceguard
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - packaging/systemd/traceguard.service
+      - packaging/default/traceguard.env
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - id: archive
+    artifacts: archive
+
+nfpms:
+  - id: traceguard-packages
+    ids:
+      - traceguard
+    package_name: traceguard
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats:
+      - deb
+      - rpm
+      - archlinux
+    description: |
+      TraceGuard observes DNS lookups and exec activity with eBPF and can block
+      exact-match DNS domains from a local or remote six-hour-refreshed blocklist.
+    license: MIT
+    maintainer: TraceGuard Maintainers <maintainers@example.invalid>
+    section: admin
+    priority: optional
+    bindir: /usr/bin
+    contents:
+      - src: packaging/systemd/traceguard.service
+        dst: '{{ if eq .Format "deb" }}/lib/systemd/system/traceguard.service{{ else }}/usr/lib/systemd/system/traceguard.service{{ end }}'
+      - src: packaging/default/traceguard.env
+        dst: /etc/traceguard/traceguard.env
+        type: config|noreplace
+      - src: README.md
+        dst: /usr/share/doc/traceguard/README.md
+      - src: LICENSE
+        dst: /usr/share/licenses/traceguard/LICENSE
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
