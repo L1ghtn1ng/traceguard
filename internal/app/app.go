@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -301,7 +302,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 }
 
 func IsPermissionError(err error) bool {
-	return err == ebpf.ErrInsufficientPrivileges
+	return errors.Is(err, ebpf.ErrInsufficientPrivileges)
 }
 
 func resolverHost(index *atomic.Pointer[map[string]string], event ebpf.Event) string {

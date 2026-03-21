@@ -12,6 +12,7 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 var ErrInsufficientPrivileges = errors.New("insufficient privileges to attach eBPF programs; run as root or grant CAP_BPF,CAP_NET_ADMIN,CAP_PERFMON,CAP_SYS_RESOURCE")
@@ -86,8 +87,8 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 	if err != nil {
 		reader.Close()
 		objects.Close()
-		if errors.Is(err, os.ErrPermission) {
-			return nil, ErrInsufficientPrivileges
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach DNS cgroup egress program: %v", ErrInsufficientPrivileges, err)
 		}
 		return nil, fmt.Errorf("attach DNS cgroup egress program: %w", err)
 	}
@@ -101,6 +102,9 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		cgroupLink.Close()
 		reader.Close()
 		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach connect4 program: %v", ErrInsufficientPrivileges, err)
+		}
 		return nil, fmt.Errorf("attach connect4 program: %w", err)
 	}
 
@@ -114,6 +118,9 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		cgroupLink.Close()
 		reader.Close()
 		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach connect6 program: %v", ErrInsufficientPrivileges, err)
+		}
 		return nil, fmt.Errorf("attach connect6 program: %w", err)
 	}
 
@@ -124,6 +131,9 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		cgroupLink.Close()
 		reader.Close()
 		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach execve tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
+		}
 		return nil, fmt.Errorf("attach execve tracepoint: %w", err)
 	}
 
@@ -135,6 +145,9 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		cgroupLink.Close()
 		reader.Close()
 		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach execveat tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
+		}
 		return nil, fmt.Errorf("attach execveat tracepoint: %w", err)
 	}
 
@@ -143,6 +156,10 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		links:   []link.Link{cgroupLink, connect4Link, connect6Link, execveLink, execveatLink},
 		reader:  reader,
 	}, nil
+}
+
+func isPermissionDenied(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES)
 }
 
 func (m *Monitor) Close() error {

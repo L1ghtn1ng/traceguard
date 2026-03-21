@@ -49,6 +49,7 @@ The user-space service:
 - Linux with cgroup v2 mounted at `/sys/fs/cgroup`
 - eBPF support for cgroup egress and tracepoints
 - privileges equivalent to `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_PERFMON`, and `CAP_SYS_RESOURCE`
+- tracepoint perf-event access for `execve` probes, which may require lowering `kernel.perf_event_paranoid` when `CAP_PERFMON` is unavailable
 - Go 1.26
 - `clang` for `go generate`
 

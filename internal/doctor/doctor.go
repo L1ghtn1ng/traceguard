@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -8,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -105,6 +108,11 @@ func Run(cfg config.Config, w io.Writer) error {
 
 	euid := os.Geteuid()
 	check(euid == 0, "privileges", fmt.Sprintf("effective_uid=%d", euid))
+	if err := checkTracepointPerfEventAccess(); err != nil {
+		check(false, "tracepoint-perf-event", err.Error())
+	} else {
+		check(true, "tracepoint-perf-event", "syscalls/sys_enter_execve")
+	}
 
 	check(cfg.LogFormat == "text" || cfg.LogFormat == "json", "log-format", cfg.LogFormat)
 	check(cfg.ProcessCacheTTL > 0, "process-cache-ttl", cfg.ProcessCacheTTL.String())
@@ -143,4 +151,56 @@ func Summary(err error) string {
 		return "ok"
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+func checkTracepointPerfEventAccess() error {
+	tracefsPath, err := locateTraceFS()
+	if err != nil {
+		return err
+	}
+
+	tracepointIDPath := filepath.Join(tracefsPath, "events", "syscalls", "sys_enter_execve", "id")
+	rawID, err := os.ReadFile(tracepointIDPath)
+	if err != nil {
+		return fmt.Errorf("read tracepoint id: %w", err)
+	}
+
+	tracepointID, err := strconv.ParseUint(strings.TrimSpace(string(rawID)), 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse tracepoint id %q: %w", strings.TrimSpace(string(rawID)), err)
+	}
+
+	attr := unix.PerfEventAttr{
+		Type:        unix.PERF_TYPE_TRACEPOINT,
+		Size:        uint32(unsafe.Sizeof(unix.PerfEventAttr{})),
+		Config:      tracepointID,
+		Sample_type: unix.PERF_SAMPLE_RAW,
+		Sample:      1,
+		Wakeup:      1,
+	}
+
+	fd, err := unix.PerfEventOpen(&attr, -1, 0, -1, unix.PERF_FLAG_FD_CLOEXEC)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			return fmt.Errorf("%w; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid", err)
+		}
+		return fmt.Errorf("open tracepoint perf event: %w", err)
+	}
+	_ = unix.Close(fd)
+
+	return nil
+}
+
+func locateTraceFS() (string, error) {
+	candidates := []string{
+		"/sys/kernel/tracing",
+		"/sys/kernel/debug/tracing",
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(filepath.Join(candidate, "events"))
+		if err == nil && info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("tracefs is not mounted at /sys/kernel/tracing or /sys/kernel/debug/tracing")
 }
