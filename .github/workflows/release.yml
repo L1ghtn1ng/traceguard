@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install --yes clang
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
