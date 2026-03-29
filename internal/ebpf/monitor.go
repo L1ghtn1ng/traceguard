@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -27,8 +28,10 @@ type domainKey struct {
 }
 
 type runtimeSettings struct {
-	BlockEnabled uint8
-	_            [7]byte
+	BlockEnabled      uint8
+	BlockAllDomains   uint8
+	BlockAllResolvers uint8
+	_                 [5]byte
 }
 
 type endpoint4Key struct {
@@ -45,9 +48,25 @@ type endpoint6Key struct {
 	_         uint8
 }
 
+type endpoint4CIDRKey struct {
+	PrefixLen uint32
+	Data      [7]uint8
+}
+
+type endpoint6CIDRKey struct {
+	PrefixLen uint32
+	Data      [19]uint8
+}
+
 type ResolverEndpoint struct {
 	Transport string
 	IP        net.IP
+	Port      uint16
+}
+
+type ResolverCIDR struct {
+	Transport string
+	Prefix    netip.Prefix
 	Port      uint16
 }
 
@@ -176,10 +195,16 @@ func (m *Monitor) Close() error {
 	return errors.Join(errs...)
 }
 
-func (m *Monitor) SetBlockEnabled(enabled bool) error {
+func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers bool) error {
 	value := runtimeSettings{}
 	if enabled {
 		value.BlockEnabled = 1
+	}
+	if blockAllDomains {
+		value.BlockAllDomains = 1
+	}
+	if blockAllResolvers {
+		value.BlockAllResolvers = 1
 	}
 	key := uint32(0)
 	return m.objects.Settings.Put(key, value)
@@ -217,11 +242,15 @@ func (m *Monitor) ReplaceDomainPolicy(blocked, allowed []string) error {
 	return nil
 }
 
-func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint) error {
+func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blockedCIDRs, allowedCIDRs []ResolverCIDR) error {
 	nextBlock4 := make(map[endpoint4Key]struct{})
 	nextBlock6 := make(map[endpoint6Key]struct{})
 	nextAllow4 := make(map[endpoint4Key]struct{})
 	nextAllow6 := make(map[endpoint6Key]struct{})
+	nextBlockCIDR4 := make(map[endpoint4CIDRKey]struct{})
+	nextBlockCIDR6 := make(map[endpoint6CIDRKey]struct{})
+	nextAllowCIDR4 := make(map[endpoint4CIDRKey]struct{})
+	nextAllowCIDR6 := make(map[endpoint6CIDRKey]struct{})
 
 	load := func(endpoints []ResolverEndpoint, ipv4 map[endpoint4Key]struct{}, ipv6 map[endpoint6Key]struct{}) error {
 		for _, endpoint := range endpoints {
@@ -253,10 +282,49 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint) err
 		}
 		return nil
 	}
+	loadCIDRs := func(cidrs []ResolverCIDR, ipv4 map[endpoint4CIDRKey]struct{}, ipv6 map[endpoint6CIDRKey]struct{}) error {
+		for _, endpoint := range cidrs {
+			transport, ok := encodeResolverTransport(endpoint.Transport)
+			if !ok {
+				return fmt.Errorf("unsupported resolver transport %q", endpoint.Transport)
+			}
+			addr := endpoint.Prefix.Addr()
+			if !addr.IsValid() {
+				return fmt.Errorf("invalid endpoint prefix %q", endpoint.Prefix)
+			}
+			if addr.Is4() {
+				ip := addr.As4()
+				key := endpoint4CIDRKey{
+					PrefixLen: uint32(24 + endpoint.Prefix.Bits()),
+					Data:      [7]uint8{transport, uint8(endpoint.Port >> 8), uint8(endpoint.Port)},
+				}
+				copy(key.Data[3:], ip[:])
+				ipv4[key] = struct{}{}
+				continue
+			}
+			if !addr.Is6() {
+				return fmt.Errorf("invalid endpoint prefix %q", endpoint.Prefix)
+			}
+			ip := addr.As16()
+			key := endpoint6CIDRKey{
+				PrefixLen: uint32(24 + endpoint.Prefix.Bits()),
+				Data:      [19]uint8{transport, uint8(endpoint.Port >> 8), uint8(endpoint.Port)},
+			}
+			copy(key.Data[3:], ip[:])
+			ipv6[key] = struct{}{}
+		}
+		return nil
+	}
 	if err := load(blocked, nextBlock4, nextBlock6); err != nil {
 		return err
 	}
 	if err := load(allowed, nextAllow4, nextAllow6); err != nil {
+		return err
+	}
+	if err := loadCIDRs(blockedCIDRs, nextBlockCIDR4, nextBlockCIDR6); err != nil {
+		return err
+	}
+	if err := loadCIDRs(allowedCIDRs, nextAllowCIDR4, nextAllowCIDR6); err != nil {
 		return err
 	}
 
@@ -265,6 +333,12 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint) err
 	}
 	if len(nextBlock6) > endpointMaxEntries || len(nextAllow6) > endpointMaxEntries {
 		return fmt.Errorf("ipv6 resolver endpoints exceed map capacity %d", endpointMaxEntries)
+	}
+	if len(nextBlockCIDR4) > endpointMaxEntries || len(nextAllowCIDR4) > endpointMaxEntries {
+		return fmt.Errorf("ipv4 resolver cidrs exceed map capacity %d", endpointMaxEntries)
+	}
+	if len(nextBlockCIDR6) > endpointMaxEntries || len(nextAllowCIDR6) > endpointMaxEntries {
+		return fmt.Errorf("ipv6 resolver cidrs exceed map capacity %d", endpointMaxEntries)
 	}
 
 	if err := syncMap(m.objects.Endpoint4Rules, nextBlock4); err != nil {
@@ -278,6 +352,18 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint) err
 	}
 	if err := syncMap(m.objects.Endpoint6AllowRules, nextAllow6); err != nil {
 		return fmt.Errorf("sync endpoint6 allow rules: %w", err)
+	}
+	if err := syncMap(m.objects.Endpoint4CidrRules, nextBlockCIDR4); err != nil {
+		return fmt.Errorf("sync endpoint4 block cidr rules: %w", err)
+	}
+	if err := syncMap(m.objects.Endpoint6CidrRules, nextBlockCIDR6); err != nil {
+		return fmt.Errorf("sync endpoint6 block cidr rules: %w", err)
+	}
+	if err := syncMap(m.objects.Endpoint4CidrAllowRules, nextAllowCIDR4); err != nil {
+		return fmt.Errorf("sync endpoint4 allow cidr rules: %w", err)
+	}
+	if err := syncMap(m.objects.Endpoint6CidrAllowRules, nextAllowCIDR6); err != nil {
+		return fmt.Errorf("sync endpoint6 allow cidr rules: %w", err)
 	}
 	return nil
 }

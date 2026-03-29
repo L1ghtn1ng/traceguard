@@ -58,16 +58,21 @@ Notes:
 - blocking is exact-match on normalized DNS QNAMEs for classic UDP/TCP DNS on port 53
 - allow rules are exact-match and take precedence over exact-match block rules
 - suffix rules match a domain and any subdomain, for example `*.example.com` or `suffix:example.com`
+- `*` enables a deny-all policy for DNS names and identifiable resolver traffic, with explicit allow rules punching holes back in
 - DNS QNAME matching is ASCII case-insensitive
 - DoT support is endpoint-based: TraceGuard can detect outbound connections to port 853 and block configured DoT resolver endpoints
 - DoH support is endpoint-based: TraceGuard can detect and block configured HTTPS resolver endpoints, but it cannot recover the encrypted inner DNS query name
-- DoT and DoH endpoint rules are configured with `dot://resolver.example` or `https://resolver.example/dns-query`
+- wildcard resolver mode does not treat every HTTPS connection as DoH; port 443 is only classified when it matches an explicit DoH endpoint rule or CIDR
+- DoT and DoH endpoint rules are configured with `dot://resolver.example` or `https://resolver.example/dns-query`; exact IPv4 and bracketed IPv6 endpoint literals are also supported
+- bare IP literals such as `1.1.1.1` or `[2606:4700:4700::1111]` are treated as resolver exceptions for both DoH on 443 and DoT on 853
+- bare CIDR literals such as `1.1.1.0/24` or `2606:4700:4700::/48` are treated the same way for resolver ranges on DoH 443 and DoT 853
 - logs are written to `/var/log/traceguard/traceguard.log` by default, rotate at 1 GiB, and retain the last 5 rotated files
 - process metadata is cached from `/proc` for 10 minutes by default to reduce lookup overhead
 - Kubernetes enrichment is optional, API-driven, and keyed by the observed pod UID
 - common IPv6 extension headers are parsed before DNS inspection
 - in block mode, segmented TCP DNS queries and fragmented IPv6 DNS packets that cannot be safely inspected are denied instead of allowed
 - exact domain policies are enforceable in kernel block mode; suffix and wildcard domain policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
+- in enforced block mode with `*`, exact domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions; suffix allow rules still require observe or dry-run mode
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and gzip-compressed batches
 
@@ -110,6 +115,18 @@ Allow a resolver hostname even if it appears in a remote blocklist:
 sudo ./traceguard -block \
   -blocklist-url https://security.example/blocklist.txt \
   -allow-domain resolver.corp.example
+```
+
+Deny all DNS names and resolver endpoints, then allow only explicit exceptions:
+
+```bash
+sudo ./traceguard -block \
+  -block-domain '*' \
+  -allow-domain corp.example \
+  -allow-domain 1.1.1.1 \
+  -allow-domain 1.1.1.0/24 \
+  -allow-domain https://1.1.1.1/dns-query \
+  -allow-domain dot://[2606:4700:4700::1111]
 ```
 
 Dry-run the policy without enforcing drops:

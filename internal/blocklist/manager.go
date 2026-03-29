@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,13 +43,23 @@ type EndpointRule struct {
 	Port uint16
 }
 
+type EndpointCIDR struct {
+	Kind   EndpointKind
+	Prefix netip.Prefix
+	Port   uint16
+}
+
 type Rules struct {
-	BlockDomains   []string
-	AllowDomains   []string
-	BlockSuffixes  []string
-	AllowSuffixes  []string
-	BlockEndpoints []EndpointRule
-	AllowEndpoints []EndpointRule
+	BlockAllDomains    bool
+	BlockAllResolvers  bool
+	BlockDomains       []string
+	AllowDomains       []string
+	BlockSuffixes      []string
+	AllowSuffixes      []string
+	BlockEndpoints     []EndpointRule
+	AllowEndpoints     []EndpointRule
+	BlockEndpointCIDRs []EndpointCIDR
+	AllowEndpointCIDRs []EndpointCIDR
 }
 
 type ResolvedEndpoint struct {
@@ -270,6 +281,10 @@ func ParseRules(r io.Reader) (Rules, error) {
 	allowSuffixes := make(map[string]struct{})
 	blockEndpoints := make(map[string]EndpointRule)
 	allowEndpoints := make(map[string]EndpointRule)
+	blockEndpointCIDRs := make(map[string]EndpointCIDR)
+	allowEndpointCIDRs := make(map[string]EndpointCIDR)
+	var blockAllDomains bool
+	var blockAllResolvers bool
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -285,16 +300,21 @@ func ParseRules(r io.Reader) (Rules, error) {
 		}
 
 		if ip := net.ParseIP(fields[0]); ip != nil {
+			parsedRule := false
 			for _, field := range fields[1:] {
 				if strings.HasPrefix(field, "#") {
 					break
 				}
-				addRuleEntry(field, ruleBlock, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints)
+				parsedRule = true
+				addRuleEntry(field, ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
+			}
+			if !parsedRule {
+				addRuleEntry(fields[0], ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
 			}
 			continue
 		}
 
-		addRuleEntry(fields[0], ruleBlock, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints)
+		addRuleEntry(fields[0], ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -302,12 +322,16 @@ func ParseRules(r io.Reader) (Rules, error) {
 	}
 
 	rules := Rules{
-		BlockDomains:   sortedDomains(blockDomains),
-		AllowDomains:   sortedDomains(allowDomains),
-		BlockSuffixes:  sortedDomains(blockSuffixes),
-		AllowSuffixes:  sortedDomains(allowSuffixes),
-		BlockEndpoints: sortedEndpoints(blockEndpoints),
-		AllowEndpoints: sortedEndpoints(allowEndpoints),
+		BlockAllDomains:    blockAllDomains,
+		BlockAllResolvers:  blockAllResolvers,
+		BlockDomains:       sortedDomains(blockDomains),
+		AllowDomains:       sortedDomains(allowDomains),
+		BlockSuffixes:      sortedDomains(blockSuffixes),
+		AllowSuffixes:      sortedDomains(allowSuffixes),
+		BlockEndpoints:     sortedEndpoints(blockEndpoints),
+		AllowEndpoints:     sortedEndpoints(allowEndpoints),
+		BlockEndpointCIDRs: sortedEndpointCIDRs(blockEndpointCIDRs),
+		AllowEndpointCIDRs: sortedEndpointCIDRs(allowEndpointCIDRs),
 	}
 	return rules, nil
 }
@@ -319,8 +343,15 @@ const (
 	ruleAllow
 )
 
-func addRuleEntry(raw string, defaultAction ruleAction, blockDomains, allowDomains, blockSuffixes, allowSuffixes map[string]struct{}, blockEndpoints, allowEndpoints map[string]EndpointRule) {
+func addRuleEntry(raw string, defaultAction ruleAction, blockAllDomains, blockAllResolvers *bool, blockDomains, allowDomains, blockSuffixes, allowSuffixes map[string]struct{}, blockEndpoints, allowEndpoints map[string]EndpointRule, blockEndpointCIDRs, allowEndpointCIDRs map[string]EndpointCIDR) {
 	action, target := splitRulePrefix(raw, defaultAction)
+	if target == "*" {
+		if action == ruleBlock {
+			*blockAllDomains = true
+			*blockAllResolvers = true
+		}
+		return
+	}
 	if suffix, ok := normalizeSuffix(target); ok {
 		if action == ruleAllow {
 			allowSuffixes[suffix] = struct{}{}
@@ -329,14 +360,38 @@ func addRuleEntry(raw string, defaultAction ruleAction, blockDomains, allowDomai
 		blockSuffixes[suffix] = struct{}{}
 		return
 	}
+	if cidrs, ok := normalizeResolverCIDR(target); ok {
+		for _, cidr := range cidrs {
+			if action == ruleAllow {
+				allowEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
+				continue
+			}
+			blockEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
+		}
+		return
+	}
+	if endpoints, ok := normalizeResolverLiteral(target); ok {
+		for _, endpoint := range endpoints {
+			if action == ruleAllow {
+				allowEndpoints[endpointKey(endpoint)] = endpoint
+				continue
+			}
+			blockEndpoints[endpointKey(endpoint)] = endpoint
+		}
+		return
+	}
 	if endpoint, ok := normalizeEndpoint(target); ok {
 		if action == ruleAllow {
 			allowEndpoints[endpointKey(endpoint)] = endpoint
-			allowDomains[endpoint.Host] = struct{}{}
+			if net.ParseIP(endpoint.Host) == nil {
+				allowDomains[endpoint.Host] = struct{}{}
+			}
 			return
 		}
 		blockEndpoints[endpointKey(endpoint)] = endpoint
-		blockDomains[endpoint.Host] = struct{}{}
+		if net.ParseIP(endpoint.Host) == nil {
+			blockDomains[endpoint.Host] = struct{}{}
+		}
 		return
 	}
 	if domain, ok := normalizeDomain(target); ok {
@@ -398,6 +453,36 @@ func sortedEndpoints(values map[string]EndpointRule) []EndpointRule {
 		}
 		if a.Host != b.Host {
 			return strings.Compare(a.Host, b.Host)
+		}
+		switch {
+		case a.Port < b.Port:
+			return -1
+		case a.Port > b.Port:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return out
+}
+
+func sortedEndpointCIDRs(values map[string]EndpointCIDR) []EndpointCIDR {
+	out := make([]EndpointCIDR, 0, len(values))
+	for _, value := range values {
+		out = append(out, value)
+	}
+	slices.SortFunc(out, func(a, b EndpointCIDR) int {
+		if a.Kind != b.Kind {
+			return strings.Compare(string(a.Kind), string(b.Kind))
+		}
+		if a.Prefix.Addr().BitLen() != b.Prefix.Addr().BitLen() {
+			if a.Prefix.Addr().BitLen() < b.Prefix.Addr().BitLen() {
+				return -1
+			}
+			return 1
+		}
+		if a.Prefix.String() != b.Prefix.String() {
+			return strings.Compare(a.Prefix.String(), b.Prefix.String())
 		}
 		switch {
 		case a.Port < b.Port:
@@ -476,6 +561,10 @@ func mergeDomains(groups ...[]string) []string {
 
 func mergeRules(groups ...Rules) Rules {
 	var merged Rules
+	for _, group := range groups {
+		merged.BlockAllDomains = merged.BlockAllDomains || group.BlockAllDomains
+		merged.BlockAllResolvers = merged.BlockAllResolvers || group.BlockAllResolvers
+	}
 	merged.BlockDomains = mergeDomains(func() [][]string {
 		out := make([][]string, 0, len(groups))
 		for _, group := range groups {
@@ -506,6 +595,8 @@ func mergeRules(groups ...Rules) Rules {
 	}()...)
 	merged.BlockEndpoints = mergeEndpointGroups(groups, func(group Rules) []EndpointRule { return group.BlockEndpoints })
 	merged.AllowEndpoints = mergeEndpointGroups(groups, func(group Rules) []EndpointRule { return group.AllowEndpoints })
+	merged.BlockEndpointCIDRs = mergeEndpointCIDRGroups(groups, func(group Rules) []EndpointCIDR { return group.BlockEndpointCIDRs })
+	merged.AllowEndpointCIDRs = mergeEndpointCIDRGroups(groups, func(group Rules) []EndpointCIDR { return group.AllowEndpointCIDRs })
 	return merged
 }
 
@@ -541,10 +632,61 @@ func mergeEndpointGroups(groups []Rules, pick func(Rules) []EndpointRule) []Endp
 	return out
 }
 
+func mergeEndpointCIDRGroups(groups []Rules, pick func(Rules) []EndpointCIDR) []EndpointCIDR {
+	seen := make(map[string]struct{})
+	out := make([]EndpointCIDR, 0)
+	for _, group := range groups {
+		for _, cidr := range pick(group) {
+			key := endpointCIDRKey(cidr)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, cidr)
+		}
+	}
+	slices.SortFunc(out, func(a, b EndpointCIDR) int {
+		if a.Kind != b.Kind {
+			return strings.Compare(string(a.Kind), string(b.Kind))
+		}
+		if a.Prefix.Addr().BitLen() != b.Prefix.Addr().BitLen() {
+			if a.Prefix.Addr().BitLen() < b.Prefix.Addr().BitLen() {
+				return -1
+			}
+			return 1
+		}
+		if a.Prefix.String() != b.Prefix.String() {
+			return strings.Compare(a.Prefix.String(), b.Prefix.String())
+		}
+		switch {
+		case a.Port < b.Port:
+			return -1
+		case a.Port > b.Port:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return out
+}
+
 func ResolveEndpoints(ctx context.Context, endpoints []EndpointRule) ([]ResolvedEndpoint, error) {
 	resolver := net.DefaultResolver
 	dedup := make(map[string]ResolvedEndpoint)
 	for _, endpoint := range endpoints {
+		if ip := net.ParseIP(endpoint.Host); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+			}
+			resolved := ResolvedEndpoint{
+				Kind: endpoint.Kind,
+				Host: endpoint.Host,
+				Port: endpoint.Port,
+				IP:   append(net.IP(nil), ip...),
+			}
+			dedup[resolvedEndpointKey(resolved)] = resolved
+			continue
+		}
 		addrs, err := resolver.LookupIP(ctx, "ip", endpoint.Host)
 		if err != nil {
 			return nil, fmt.Errorf("resolve endpoint host %q: %w", endpoint.Host, err)
@@ -678,7 +820,7 @@ func normalizeEndpoint(raw string) (EndpointRule, bool) {
 		if err != nil {
 			return EndpointRule{}, false
 		}
-		host, ok := normalizeDomain(parsed.Hostname())
+		host, ok := normalizeEndpointHost(parsed.Hostname())
 		if !ok {
 			return EndpointRule{}, false
 		}
@@ -696,7 +838,7 @@ func normalizeEndpoint(raw string) (EndpointRule, bool) {
 		if err != nil {
 			return EndpointRule{}, false
 		}
-		host, ok := normalizeDomain(parsed.Hostname())
+		host, ok := normalizeEndpointHost(parsed.Hostname())
 		if !ok {
 			return EndpointRule{}, false
 		}
@@ -714,8 +856,74 @@ func normalizeEndpoint(raw string) (EndpointRule, bool) {
 	}
 }
 
+func normalizeResolverLiteral(raw string) ([]EndpointRule, bool) {
+	host, ok := normalizeIPLiteral(raw)
+	if !ok {
+		return nil, false
+	}
+	return []EndpointRule{
+		{Kind: EndpointKindDoH, Host: host, Port: 443},
+		{Kind: EndpointKindDoT, Host: host, Port: 853},
+	}, true
+}
+
+func normalizeResolverCIDR(raw string) ([]EndpointCIDR, bool) {
+	prefix, ok := normalizeIPPrefix(raw)
+	if !ok {
+		return nil, false
+	}
+	return []EndpointCIDR{
+		{Kind: EndpointKindDoH, Prefix: prefix, Port: 443},
+		{Kind: EndpointKindDoT, Prefix: prefix, Port: 853},
+	}, true
+}
+
+func normalizeIPLiteral(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	value = strings.TrimPrefix(value, "[")
+	value = strings.TrimSuffix(value, "]")
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return "", false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	return ip.String(), true
+}
+
+func normalizeIPPrefix(raw string) (netip.Prefix, bool) {
+	value := strings.TrimSpace(raw)
+	if !strings.Contains(value, "/") {
+		return netip.Prefix{}, false
+	}
+	if strings.HasPrefix(value, "[") {
+		end := strings.IndexByte(value, ']')
+		if end == -1 || end+1 >= len(value) || value[end+1] != '/' {
+			return netip.Prefix{}, false
+		}
+		value = value[1:end] + value[end+1:]
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return prefix.Masked(), true
+}
+
+func normalizeEndpointHost(raw string) (string, bool) {
+	if ip, ok := normalizeIPLiteral(raw); ok {
+		return ip, true
+	}
+	return normalizeDomain(raw)
+}
+
 func endpointKey(endpoint EndpointRule) string {
 	return fmt.Sprintf("%s|%s|%d", endpoint.Kind, endpoint.Host, endpoint.Port)
+}
+
+func endpointCIDRKey(endpoint EndpointCIDR) string {
+	return fmt.Sprintf("%s|%s|%d", endpoint.Kind, endpoint.Prefix.String(), endpoint.Port)
 }
 
 func resolvedEndpointKey(endpoint ResolvedEndpoint) string {

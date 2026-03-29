@@ -3,6 +3,7 @@ package blocklist
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -15,22 +16,30 @@ const (
 )
 
 type Policy struct {
-	allowDomains   map[string]struct{}
-	blockDomains   map[string]struct{}
-	allowSuffixes  []string
-	blockSuffixes  []string
-	allowEndpoints map[string]struct{}
-	blockEndpoints map[string]struct{}
+	blockAllDomains    bool
+	blockAllResolvers  bool
+	allowDomains       map[string]struct{}
+	blockDomains       map[string]struct{}
+	allowSuffixes      []string
+	blockSuffixes      []string
+	allowEndpoints     map[string]struct{}
+	blockEndpoints     map[string]struct{}
+	allowEndpointCIDRs []EndpointCIDR
+	blockEndpointCIDRs []EndpointCIDR
 }
 
 func NewPolicy(rules Rules, blockResolved, allowResolved []ResolvedEndpoint) *Policy {
 	policy := &Policy{
-		allowDomains:   make(map[string]struct{}, len(rules.AllowDomains)),
-		blockDomains:   make(map[string]struct{}, len(rules.BlockDomains)),
-		allowSuffixes:  append([]string(nil), rules.AllowSuffixes...),
-		blockSuffixes:  append([]string(nil), rules.BlockSuffixes...),
-		allowEndpoints: make(map[string]struct{}, len(allowResolved)),
-		blockEndpoints: make(map[string]struct{}, len(blockResolved)),
+		blockAllDomains:    rules.BlockAllDomains,
+		blockAllResolvers:  rules.BlockAllResolvers,
+		allowDomains:       make(map[string]struct{}, len(rules.AllowDomains)),
+		blockDomains:       make(map[string]struct{}, len(rules.BlockDomains)),
+		allowSuffixes:      append([]string(nil), rules.AllowSuffixes...),
+		blockSuffixes:      append([]string(nil), rules.BlockSuffixes...),
+		allowEndpoints:     make(map[string]struct{}, len(allowResolved)),
+		blockEndpoints:     make(map[string]struct{}, len(blockResolved)),
+		allowEndpointCIDRs: append([]EndpointCIDR(nil), rules.AllowEndpointCIDRs...),
+		blockEndpointCIDRs: append([]EndpointCIDR(nil), rules.BlockEndpointCIDRs...),
 	}
 	for _, domain := range rules.AllowDomains {
 		policy.allowDomains[domain] = struct{}{}
@@ -61,6 +70,9 @@ func (p *Policy) DomainDecision(domain string) Decision {
 	if matchesSuffix(normalized, p.allowSuffixes) {
 		return DecisionAllow
 	}
+	if p.blockAllDomains {
+		return DecisionBlock
+	}
 	if _, blocked := p.blockDomains[normalized]; blocked {
 		return DecisionBlock
 	}
@@ -82,7 +94,17 @@ func (p *Policy) EndpointDecision(transport, address string, port uint16) Decisi
 	if _, allowed := p.allowEndpoints[key]; allowed {
 		return DecisionAllow
 	}
+	addr, err := netip.ParseAddr(address)
+	if err == nil && matchesEndpointCIDR(transport, addr, port, p.allowEndpointCIDRs) {
+		return DecisionAllow
+	}
+	if p.blockAllResolvers {
+		return DecisionBlock
+	}
 	if _, blocked := p.blockEndpoints[key]; blocked {
+		return DecisionBlock
+	}
+	if err == nil && matchesEndpointCIDR(transport, addr, port, p.blockEndpointCIDRs) {
 		return DecisionBlock
 	}
 	return DecisionNone
@@ -98,6 +120,18 @@ func resolvedPolicyKey(transport string, ip net.IP, port uint16) string {
 func matchesSuffix(domain string, suffixes []string) bool {
 	for _, suffix := range suffixes {
 		if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesEndpointCIDR(transport string, addr netip.Addr, port uint16, cidrs []EndpointCIDR) bool {
+	for _, cidr := range cidrs {
+		if string(cidr.Kind) != transport || cidr.Port != port {
+			continue
+		}
+		if cidr.Prefix.Contains(addr) {
 			return true
 		}
 	}

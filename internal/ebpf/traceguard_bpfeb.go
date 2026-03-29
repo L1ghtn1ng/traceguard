@@ -18,12 +18,26 @@ type traceguardDomainKey struct {
 	Domain [256]int8
 }
 
+type traceguardEndpoint4CidrKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [7]uint8
+	_         [1]byte
+}
+
 type traceguardEndpoint4Key struct {
 	_         structs.HostLayout
 	Addr      uint32
 	Port      uint16
 	Transport uint8
 	Pad       uint8
+}
+
+type traceguardEndpoint6CidrKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [19]uint8
+	_         [1]byte
 }
 
 type traceguardEndpoint6Key struct {
@@ -35,9 +49,11 @@ type traceguardEndpoint6Key struct {
 }
 
 type traceguardSettings struct {
-	_            structs.HostLayout
-	BlockEnabled uint8
-	Pad          [7]uint8
+	_                 structs.HostLayout
+	BlockEnabled      uint8
+	BlockAllDomains   uint8
+	BlockAllResolvers uint8
+	Pad               [5]uint8
 }
 
 // loadTraceguard returns the embedded CollectionSpec for traceguard.
@@ -93,14 +109,18 @@ type traceguardProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardMapSpecs struct {
-	Allowlist           *ebpf.MapSpec `ebpf:"allowlist"`
-	Blocklist           *ebpf.MapSpec `ebpf:"blocklist"`
-	Endpoint4AllowRules *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
-	Endpoint4Rules      *ebpf.MapSpec `ebpf:"endpoint4_rules"`
-	Endpoint6AllowRules *ebpf.MapSpec `ebpf:"endpoint6_allow_rules"`
-	Endpoint6Rules      *ebpf.MapSpec `ebpf:"endpoint6_rules"`
-	Events              *ebpf.MapSpec `ebpf:"events"`
-	Settings            *ebpf.MapSpec `ebpf:"settings"`
+	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
+	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
+	Endpoint4AllowRules     *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
+	Endpoint4CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint4_cidr_allow_rules"`
+	Endpoint4CidrRules      *ebpf.MapSpec `ebpf:"endpoint4_cidr_rules"`
+	Endpoint4Rules          *ebpf.MapSpec `ebpf:"endpoint4_rules"`
+	Endpoint6AllowRules     *ebpf.MapSpec `ebpf:"endpoint6_allow_rules"`
+	Endpoint6CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint6_cidr_allow_rules"`
+	Endpoint6CidrRules      *ebpf.MapSpec `ebpf:"endpoint6_cidr_rules"`
+	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
+	Events                  *ebpf.MapSpec `ebpf:"events"`
+	Settings                *ebpf.MapSpec `ebpf:"settings"`
 }
 
 // traceguardVariableSpecs contains global variables before they are loaded into the kernel.
@@ -129,14 +149,18 @@ func (o *traceguardObjects) Close() error {
 //
 // It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardMaps struct {
-	Allowlist           *ebpf.Map `ebpf:"allowlist"`
-	Blocklist           *ebpf.Map `ebpf:"blocklist"`
-	Endpoint4AllowRules *ebpf.Map `ebpf:"endpoint4_allow_rules"`
-	Endpoint4Rules      *ebpf.Map `ebpf:"endpoint4_rules"`
-	Endpoint6AllowRules *ebpf.Map `ebpf:"endpoint6_allow_rules"`
-	Endpoint6Rules      *ebpf.Map `ebpf:"endpoint6_rules"`
-	Events              *ebpf.Map `ebpf:"events"`
-	Settings            *ebpf.Map `ebpf:"settings"`
+	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	Blocklist               *ebpf.Map `ebpf:"blocklist"`
+	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
+	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
+	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
+	Endpoint4Rules          *ebpf.Map `ebpf:"endpoint4_rules"`
+	Endpoint6AllowRules     *ebpf.Map `ebpf:"endpoint6_allow_rules"`
+	Endpoint6CidrAllowRules *ebpf.Map `ebpf:"endpoint6_cidr_allow_rules"`
+	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
+	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
+	Events                  *ebpf.Map `ebpf:"events"`
+	Settings                *ebpf.Map `ebpf:"settings"`
 }
 
 func (m *traceguardMaps) Close() error {
@@ -144,8 +168,12 @@ func (m *traceguardMaps) Close() error {
 		m.Allowlist,
 		m.Blocklist,
 		m.Endpoint4AllowRules,
+		m.Endpoint4CidrAllowRules,
+		m.Endpoint4CidrRules,
 		m.Endpoint4Rules,
 		m.Endpoint6AllowRules,
+		m.Endpoint6CidrAllowRules,
+		m.Endpoint6CidrRules,
 		m.Endpoint6Rules,
 		m.Events,
 		m.Settings,

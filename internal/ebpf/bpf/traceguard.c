@@ -39,13 +39,25 @@ struct endpoint6_key {
 	__u8 _pad;
 };
 
+struct endpoint4_cidr_key {
+	__u32 prefixlen;
+	__u8 data[7];
+};
+
+struct endpoint6_cidr_key {
+	__u32 prefixlen;
+	__u8 data[19];
+};
+
 struct domain_key {
 	char domain[DOMAIN_KEY_SIZE];
 };
 
 struct settings {
 	__u8 block_enabled;
-	__u8 _pad[7];
+	__u8 block_all_domains;
+	__u8 block_all_resolvers;
+	__u8 _pad[5];
 };
 
 struct event {
@@ -133,6 +145,22 @@ struct {
 } endpoint4_allow_rules SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 8192);
+	__type(key, struct endpoint4_cidr_key);
+	__type(value, __u8);
+} endpoint4_cidr_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 8192);
+	__type(key, struct endpoint4_cidr_key);
+	__type(value, __u8);
+} endpoint4_cidr_allow_rules SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 8192);
 	__type(key, struct endpoint6_key);
@@ -145,6 +173,22 @@ struct {
 	__type(key, struct endpoint6_key);
 	__type(value, __u8);
 } endpoint6_allow_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 8192);
+	__type(key, struct endpoint6_cidr_key);
+	__type(value, __u8);
+} endpoint6_cidr_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, 8192);
+	__type(key, struct endpoint6_cidr_key);
+	__type(value, __u8);
+} endpoint6_cidr_allow_rules SEC(".maps");
 
 static __always_inline void init_event(struct event *event, __u32 kind, __u8 transport)
 {
@@ -161,6 +205,69 @@ static __always_inline int is_block_enabled(void)
 	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
 
 	return cfg && cfg->block_enabled;
+}
+
+static __always_inline int block_all_domains_enabled(void)
+{
+	__u32 zero = 0;
+	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+
+	return cfg && cfg->block_all_domains;
+}
+
+static __always_inline void init_endpoint4_cidr_key(struct endpoint4_cidr_key *key, __u32 addr, __u16 port, __u8 transport)
+{
+	__builtin_memset(key, 0, sizeof(*key));
+	key->prefixlen = 24 + 32;
+	key->data[0] = transport;
+	key->data[1] = (__u8)(port >> 8);
+	key->data[2] = (__u8)(port & 0xff);
+	key->data[3] = (__u8)(addr & 0xff);
+	key->data[4] = (__u8)((addr >> 8) & 0xff);
+	key->data[5] = (__u8)((addr >> 16) & 0xff);
+	key->data[6] = (__u8)((addr >> 24) & 0xff);
+}
+
+static __always_inline void init_endpoint6_cidr_key(struct endpoint6_cidr_key *key, const __u8 addr[16], __u16 port, __u8 transport)
+{
+	__builtin_memset(key, 0, sizeof(*key));
+	key->prefixlen = 24 + 128;
+	key->data[0] = transport;
+	key->data[1] = (__u8)(port >> 8);
+	key->data[2] = (__u8)(port & 0xff);
+	__builtin_memcpy(&key->data[3], addr, 16);
+}
+
+static __always_inline __u8 *lookup_endpoint4_cidr_rule(__u32 addr, __u16 port, __u8 transport)
+{
+	struct endpoint4_cidr_key key = {};
+
+	init_endpoint4_cidr_key(&key, addr, port, transport);
+	return bpf_map_lookup_elem(&endpoint4_cidr_rules, &key);
+}
+
+static __always_inline __u8 *lookup_endpoint4_cidr_allow_rule(__u32 addr, __u16 port, __u8 transport)
+{
+	struct endpoint4_cidr_key key = {};
+
+	init_endpoint4_cidr_key(&key, addr, port, transport);
+	return bpf_map_lookup_elem(&endpoint4_cidr_allow_rules, &key);
+}
+
+static __always_inline __u8 *lookup_endpoint6_cidr_rule(const __u8 addr[16], __u16 port, __u8 transport)
+{
+	struct endpoint6_cidr_key key = {};
+
+	init_endpoint6_cidr_key(&key, addr, port, transport);
+	return bpf_map_lookup_elem(&endpoint6_cidr_rules, &key);
+}
+
+static __always_inline __u8 *lookup_endpoint6_cidr_allow_rule(const __u8 addr[16], __u16 port, __u8 transport)
+{
+	struct endpoint6_cidr_key key = {};
+
+	init_endpoint6_cidr_key(&key, addr, port, transport);
+	return bpf_map_lookup_elem(&endpoint6_cidr_allow_rules, &key);
 }
 
 static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __u32 packet_len, struct domain_key *key)
@@ -238,6 +345,9 @@ static __always_inline int handle_dns_payload(struct __sk_buff *skb, __u32 paylo
 	present = bpf_map_lookup_elem(&allowlist, &key);
 	if (present) {
 		return emit_dns_event(&key, EVENT_DNS, transport);
+	}
+	if (is_block_enabled() && block_all_domains_enabled()) {
+		return emit_dns_event(&key, EVENT_BLOCKED, transport);
 	}
 	present = bpf_map_lookup_elem(&blocklist, &key);
 	if (present && is_block_enabled()) {
@@ -404,7 +514,7 @@ static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u3
 	return 1;
 }
 
-static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 *transport_out, __u8 *matched_rule)
+static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block_all, __u8 *transport_out, __u8 *matched_rule)
 {
 	struct endpoint4_key key = {
 		.addr = addr,
@@ -421,8 +531,17 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 *tran
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
+		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOT);
+		if (present) {
+			*transport_out = TRANSPORT_DOT;
+			return 1;
+		}
 		present = bpf_map_lookup_elem(&endpoint4_rules, &key);
 		if (present) {
+			*matched_rule = 1;
+		}
+		present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOT);
+		if (present || block_all) {
 			*matched_rule = 1;
 		}
 		*transport_out = TRANSPORT_DOT;
@@ -434,7 +553,16 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 *tran
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
+		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOH);
+		if (present) {
+			*transport_out = TRANSPORT_DOH;
+			return 1;
+		}
 		present = bpf_map_lookup_elem(&endpoint4_rules, &key);
+		if (!present) {
+			present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOH);
+		}
+		/* DoH remains endpoint-based on 443; wildcard resolver mode must not classify arbitrary HTTPS traffic. */
 		if (!present) {
 			return 0;
 		}
@@ -445,7 +573,7 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 *tran
 	return 0;
 }
 
-static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, __u8 *transport_out, __u8 *matched_rule)
+static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, __u8 block_all, __u8 *transport_out, __u8 *matched_rule)
 {
 	struct endpoint6_key key = {};
 	__u8 *present;
@@ -460,8 +588,17 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, _
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
+		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOT);
+		if (present) {
+			*transport_out = TRANSPORT_DOT;
+			return 1;
+		}
 		present = bpf_map_lookup_elem(&endpoint6_rules, &key);
 		if (present) {
+			*matched_rule = 1;
+		}
+		present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOT);
+		if (present || block_all) {
 			*matched_rule = 1;
 		}
 		*transport_out = TRANSPORT_DOT;
@@ -474,7 +611,16 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, _
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
+		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOH);
+		if (present) {
+			*transport_out = TRANSPORT_DOH;
+			return 1;
+		}
 		present = bpf_map_lookup_elem(&endpoint6_rules, &key);
+		if (!present) {
+			present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOH);
+		}
+		/* DoH remains endpoint-based on 443; wildcard resolver mode must not classify arbitrary HTTPS traffic. */
 		if (!present) {
 			return 0;
 		}
@@ -630,13 +776,14 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	__u16 port;
 	__u8 transport;
 	__u8 matched_rule;
+	__u8 block_all = cfg && cfg->block_all_resolvers;
 
 	if (ctx->protocol != IPPROTO_TCP) {
 		return 1;
 	}
 
 	port = bpf_ntohs((__u16)ctx->user_port);
-	if (!classify_endpoint4(ctx->user_ip4, port, &transport, &matched_rule)) {
+	if (!classify_endpoint4(ctx->user_ip4, port, block_all, &transport, &matched_rule)) {
 		return 1;
 	}
 
@@ -657,6 +804,7 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	__u8 transport;
 	__u8 matched_rule;
 	__u8 addr[16];
+	__u8 block_all = cfg && cfg->block_all_resolvers;
 
 	if (ctx->protocol != IPPROTO_TCP) {
 		return 1;
@@ -664,7 +812,7 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 
 	port = bpf_ntohs((__u16)ctx->user_port);
 	__builtin_memcpy(addr, ctx->user_ip6, sizeof(addr));
-	if (!classify_endpoint6(addr, port, &transport, &matched_rule)) {
+	if (!classify_endpoint6(addr, port, block_all, &transport, &matched_rule)) {
 		return 1;
 	}
 

@@ -46,10 +46,6 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 	defer monitor.Close()
 
-	if err := monitor.SetBlockEnabled(cfg.Block && !cfg.DryRun); err != nil {
-		return fmt.Errorf("configure block mode: %w", err)
-	}
-
 	errCh := make(chan error, 2)
 	var endpointIndex atomic.Pointer[map[string]string]
 	var runtimePolicy atomic.Pointer[blocklist.Policy]
@@ -58,8 +54,11 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		policyMu.Lock()
 		defer policyMu.Unlock()
 
-		if cfg.Block && !cfg.DryRun && (len(rules.BlockSuffixes) > 0 || len(rules.AllowSuffixes) > 0) {
-			return fmt.Errorf("suffix and wildcard domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for suffix policies")
+		if err := validateRulesForMode(cfg, rules); err != nil {
+			return err
+		}
+		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers); err != nil {
+			return fmt.Errorf("configure block mode: %w", err)
 		}
 		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains); err != nil {
 			return err
@@ -74,6 +73,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		}
 		blockMonitorEndpoints := make([]ebpf.ResolverEndpoint, 0, len(blockResolved))
 		allowMonitorEndpoints := make([]ebpf.ResolverEndpoint, 0, len(allowResolved))
+		blockMonitorCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.BlockEndpointCIDRs))
+		allowMonitorCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.AllowEndpointCIDRs))
 		index := make(map[string]string, len(blockResolved)+len(allowResolved))
 		for _, endpoint := range blockResolved {
 			blockMonitorEndpoints = append(blockMonitorEndpoints, ebpf.ResolverEndpoint{
@@ -91,24 +92,42 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			})
 			index[resolverIndexKey(string(endpoint.Kind), endpoint.IP.String(), endpoint.Port)] = endpoint.Host
 		}
-		if err := monitor.ReplaceResolverPolicy(blockMonitorEndpoints, allowMonitorEndpoints); err != nil {
+		for _, cidr := range rules.BlockEndpointCIDRs {
+			blockMonitorCIDRs = append(blockMonitorCIDRs, ebpf.ResolverCIDR{
+				Transport: string(cidr.Kind),
+				Prefix:    cidr.Prefix,
+				Port:      cidr.Port,
+			})
+		}
+		for _, cidr := range rules.AllowEndpointCIDRs {
+			allowMonitorCIDRs = append(allowMonitorCIDRs, ebpf.ResolverCIDR{
+				Transport: string(cidr.Kind),
+				Prefix:    cidr.Prefix,
+				Port:      cidr.Port,
+			})
+		}
+		if err := monitor.ReplaceResolverPolicy(blockMonitorEndpoints, allowMonitorEndpoints, blockMonitorCIDRs, allowMonitorCIDRs); err != nil {
 			return err
 		}
 		endpointIndex.Store(&index)
 		policy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
 		runtimePolicy.Store(policy)
-		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved))
+		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
 		metrics.IncBlocklistRefresh(true)
 		recorder.Info("policy loaded", map[string]any{
-			"block_domains":   len(rules.BlockDomains),
-			"allow_domains":   len(rules.AllowDomains),
-			"block_suffixes":  len(rules.BlockSuffixes),
-			"allow_suffixes":  len(rules.AllowSuffixes),
-			"block_endpoints": len(blockResolved),
-			"allow_endpoints": len(allowResolved),
-			"source":          cfg.BlocklistURL,
-			"cache":           cfg.CachePath,
-			"dry_run":         cfg.DryRun,
+			"block_all_domains":    rules.BlockAllDomains,
+			"block_all_resolvers":  rules.BlockAllResolvers,
+			"block_domains":        len(rules.BlockDomains),
+			"allow_domains":        len(rules.AllowDomains),
+			"block_suffixes":       len(rules.BlockSuffixes),
+			"allow_suffixes":       len(rules.AllowSuffixes),
+			"block_endpoints":      len(blockResolved),
+			"allow_endpoints":      len(allowResolved),
+			"block_endpoint_cidrs": len(rules.BlockEndpointCIDRs),
+			"allow_endpoint_cidrs": len(rules.AllowEndpointCIDRs),
+			"source":               cfg.BlocklistURL,
+			"cache":                cfg.CachePath,
+			"dry_run":              cfg.DryRun,
 		})
 		return nil
 	}
@@ -303,6 +322,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 func IsPermissionError(err error) bool {
 	return errors.Is(err, ebpf.ErrInsufficientPrivileges)
+}
+
+func validateRulesForMode(cfg config.Config, rules blocklist.Rules) error {
+	if cfg.Block && !cfg.DryRun && (len(rules.BlockSuffixes) > 0 || len(rules.AllowSuffixes) > 0) {
+		return fmt.Errorf("suffix and wildcard domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for suffix policies")
+	}
+	return nil
 }
 
 func resolverHost(index *atomic.Pointer[map[string]string], event ebpf.Event) string {
