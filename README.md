@@ -121,12 +121,18 @@ Deny all DNS names and resolver endpoints, then allow only explicit exceptions:
 
 ```bash
 sudo ./traceguard -block \
-  -block-domain '*' \
+  -block-all \
   -allow-domain corp.example \
   -allow-domain 1.1.1.1 \
   -allow-domain 1.1.1.0/24 \
   -allow-domain https://1.1.1.1/dns-query \
   -allow-domain dot://[2606:4700:4700::1111]
+```
+
+If you prefer the wildcard form directly, quote it so your shell does not expand it:
+
+```bash
+sudo ./traceguard -block -block-domain '*'
 ```
 
 Dry-run the policy without enforcing drops:
@@ -213,6 +219,7 @@ sudo ./traceguard \
 Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
+- `TRACEGUARD_BLOCK_ALL`
 - `TRACEGUARD_DRY_RUN`
 - `TRACEGUARD_BLOCKLIST_URL`
 - `TRACEGUARD_BLOCK_DOMAINS`

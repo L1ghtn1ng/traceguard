@@ -86,6 +86,7 @@ func Parse() (Config, error) {
 	}
 
 	cfg := Config{}
+	blockAll := envBool("TRACEGUARD_BLOCK_ALL", false)
 	manual := domainList(strings.FieldsFunc(envString("TRACEGUARD_BLOCK_DOMAINS", ""), func(r rune) bool {
 		return r == ',' || r == '\n'
 	}))
@@ -95,6 +96,7 @@ func Parse() (Config, error) {
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.BoolVar(&cfg.Block, "block", envBool("TRACEGUARD_BLOCK", false), "enable DNS blocking for domains loaded from the configured sources")
+	fs.BoolVar(&blockAll, "block-all", blockAll, "enable deny-all DNS/resolver policy; equivalent to -block-domain '*' without shell quoting issues")
 	fs.BoolVar(&cfg.DryRun, "dry-run", envBool("TRACEGUARD_DRY_RUN", false), "evaluate block policy and log would-block decisions without enforcing drops")
 	fs.StringVar(&cfg.BlocklistURL, "blocklist-url", envString("TRACEGUARD_BLOCKLIST_URL", ""), "HTTPS URL that returns newline-delimited domains or URLs to block")
 	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
@@ -129,12 +131,18 @@ func Parse() (Config, error) {
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return Config{}, err
 	}
+	if fs.NArg() > 0 {
+		return Config{}, fmt.Errorf("unexpected positional arguments: %s; quote '*' as -block-domain '*' or use -block-all", strings.Join(fs.Args(), ", "))
+	}
 	if cfg.PrintVersion || cfg.Doctor {
 		return cfg, nil
 	}
 
 	cfg.ManualDomains = compact(manual)
 	cfg.ManualAllow = compact(manualAllow)
+	if blockAll {
+		cfg.ManualDomains = append(cfg.ManualDomains, "*")
+	}
 	if cfg.RefreshInterval <= 0 {
 		return Config{}, errors.New("refresh-interval must be positive")
 	}
