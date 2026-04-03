@@ -13,7 +13,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type traceguardConnectionDedupeKey struct {
+type traceguardDNSRecvmsgCompatConnectionDedupeKey struct {
 	_         structs.HostLayout
 	Pid       uint32
 	Port      uint16
@@ -26,24 +26,24 @@ type traceguardConnectionDedupeKey struct {
 	LocalAddr [16]uint8
 }
 
-type traceguardConnectionDedupeValue struct {
+type traceguardDNSRecvmsgCompatConnectionDedupeValue struct {
 	_          structs.HostLayout
 	LastSeenNs uint64
 }
 
-type traceguardDomainKey struct {
+type traceguardDNSRecvmsgCompatDomainKey struct {
 	_      structs.HostLayout
 	Domain [256]int8
 }
 
-type traceguardEndpoint4CidrKey struct {
+type traceguardDNSRecvmsgCompatEndpoint4CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [7]uint8
 	_         [1]byte
 }
 
-type traceguardEndpoint4Key struct {
+type traceguardDNSRecvmsgCompatEndpoint4Key struct {
 	_         structs.HostLayout
 	Addr      uint32
 	Port      uint16
@@ -51,14 +51,14 @@ type traceguardEndpoint4Key struct {
 	Pad       uint8
 }
 
-type traceguardEndpoint6CidrKey struct {
+type traceguardDNSRecvmsgCompatEndpoint6CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [19]uint8
 	_         [1]byte
 }
 
-type traceguardEndpoint6Key struct {
+type traceguardDNSRecvmsgCompatEndpoint6Key struct {
 	_         structs.HostLayout
 	Addr      [16]uint8
 	Port      uint16
@@ -66,7 +66,7 @@ type traceguardEndpoint6Key struct {
 	Pad       uint8
 }
 
-type traceguardListenerInfoKey struct {
+type traceguardDNSRecvmsgCompatListenerInfoKey struct {
 	_        structs.HostLayout
 	Port     uint16
 	Family   uint8
@@ -74,13 +74,13 @@ type traceguardListenerInfoKey struct {
 	Addr     [16]uint8
 }
 
-type traceguardListenerInfoValue struct {
+type traceguardDNSRecvmsgCompatListenerInfoValue struct {
 	_    structs.HostLayout
 	Pid  uint32
 	Comm [16]int8
 }
 
-type traceguardSettings struct {
+type traceguardDNSRecvmsgCompatSettings struct {
 	_                 structs.HostLayout
 	BlockEnabled      uint8
 	BlockAllDomains   uint8
@@ -88,7 +88,7 @@ type traceguardSettings struct {
 	Pad               [5]uint8
 }
 
-type traceguardSocketInfoKey struct {
+type traceguardDNSRecvmsgCompatSocketInfoKey struct {
 	_        structs.HostLayout
 	Pid      uint32
 	Port     uint16
@@ -97,7 +97,7 @@ type traceguardSocketInfoKey struct {
 	Addr     [16]uint8
 }
 
-type traceguardSocketInfoValue struct {
+type traceguardDNSRecvmsgCompatSocketInfoValue struct {
 	_        structs.HostLayout
 	Comm     [16]int8
 	Hook     uint8
@@ -106,28 +106,28 @@ type traceguardSocketInfoValue struct {
 	Pad      uint8
 }
 
-// loadTraceguard returns the embedded CollectionSpec for traceguard.
-func loadTraceguard() (*ebpf.CollectionSpec, error) {
-	reader := bytes.NewReader(_TraceguardBytes)
+// loadTraceguardDNSRecvmsgCompat returns the embedded CollectionSpec for traceguardDNSRecvmsgCompat.
+func loadTraceguardDNSRecvmsgCompat() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_TraceguardDNSRecvmsgCompatBytes)
 	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
 	if err != nil {
-		return nil, fmt.Errorf("can't load traceguard: %w", err)
+		return nil, fmt.Errorf("can't load traceguardDNSRecvmsgCompat: %w", err)
 	}
 
 	return spec, err
 }
 
-// loadTraceguardObjects loads traceguard and converts it into a struct.
+// loadTraceguardDNSRecvmsgCompatObjects loads traceguardDNSRecvmsgCompat and converts it into a struct.
 //
 // The following types are suitable as obj argument:
 //
-//	*traceguardObjects
-//	*traceguardPrograms
-//	*traceguardMaps
+//	*traceguardDNSRecvmsgCompatObjects
+//	*traceguardDNSRecvmsgCompatPrograms
+//	*traceguardDNSRecvmsgCompatMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadTraceguardObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
-	spec, err := loadTraceguard()
+func loadTraceguardDNSRecvmsgCompatObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+	spec, err := loadTraceguardDNSRecvmsgCompat()
 	if err != nil {
 		return err
 	}
@@ -135,19 +135,19 @@ func loadTraceguardObjects(obj interface{}, opts *ebpf.CollectionOptions) error 
 	return spec.LoadAndAssign(obj, opts)
 }
 
-// traceguardSpecs contains maps and programs before they are loaded into the kernel.
+// traceguardDNSRecvmsgCompatSpecs contains maps and programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardSpecs struct {
-	traceguardProgramSpecs
-	traceguardMapSpecs
-	traceguardVariableSpecs
+type traceguardDNSRecvmsgCompatSpecs struct {
+	traceguardDNSRecvmsgCompatProgramSpecs
+	traceguardDNSRecvmsgCompatMapSpecs
+	traceguardDNSRecvmsgCompatVariableSpecs
 }
 
-// traceguardProgramSpecs contains programs before they are loaded into the kernel.
+// traceguardDNSRecvmsgCompatProgramSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardProgramSpecs struct {
+type traceguardDNSRecvmsgCompatProgramSpecs struct {
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
@@ -162,10 +162,10 @@ type traceguardProgramSpecs struct {
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 }
 
-// traceguardMapSpecs contains maps before they are loaded into the kernel.
+// traceguardDNSRecvmsgCompatMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardMapSpecs struct {
+type traceguardDNSRecvmsgCompatMapSpecs struct {
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
@@ -183,32 +183,32 @@ type traceguardMapSpecs struct {
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
 }
 
-// traceguardVariableSpecs contains global variables before they are loaded into the kernel.
+// traceguardDNSRecvmsgCompatVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardVariableSpecs struct {
+type traceguardDNSRecvmsgCompatVariableSpecs struct {
 }
 
-// traceguardObjects contains all objects after they have been loaded into the kernel.
+// traceguardDNSRecvmsgCompatObjects contains all objects after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardObjects struct {
-	traceguardPrograms
-	traceguardMaps
-	traceguardVariables
+// It can be passed to loadTraceguardDNSRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardDNSRecvmsgCompatObjects struct {
+	traceguardDNSRecvmsgCompatPrograms
+	traceguardDNSRecvmsgCompatMaps
+	traceguardDNSRecvmsgCompatVariables
 }
 
-func (o *traceguardObjects) Close() error {
-	return _TraceguardClose(
-		&o.traceguardPrograms,
-		&o.traceguardMaps,
+func (o *traceguardDNSRecvmsgCompatObjects) Close() error {
+	return _TraceguardDNSRecvmsgCompatClose(
+		&o.traceguardDNSRecvmsgCompatPrograms,
+		&o.traceguardDNSRecvmsgCompatMaps,
 	)
 }
 
-// traceguardMaps contains all maps after they have been loaded into the kernel.
+// traceguardDNSRecvmsgCompatMaps contains all maps after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardMaps struct {
+// It can be passed to loadTraceguardDNSRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardDNSRecvmsgCompatMaps struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
@@ -226,8 +226,8 @@ type traceguardMaps struct {
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 }
 
-func (m *traceguardMaps) Close() error {
-	return _TraceguardClose(
+func (m *traceguardDNSRecvmsgCompatMaps) Close() error {
+	return _TraceguardDNSRecvmsgCompatClose(
 		m.Allowlist,
 		m.Blocklist,
 		m.ConnectionDedupe,
@@ -246,16 +246,16 @@ func (m *traceguardMaps) Close() error {
 	)
 }
 
-// traceguardVariables contains all global variables after they have been loaded into the kernel.
+// traceguardDNSRecvmsgCompatVariables contains all global variables after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardVariables struct {
+// It can be passed to loadTraceguardDNSRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardDNSRecvmsgCompatVariables struct {
 }
 
-// traceguardPrograms contains all programs after they have been loaded into the kernel.
+// traceguardDNSRecvmsgCompatPrograms contains all programs after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardPrograms struct {
+// It can be passed to loadTraceguardDNSRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardDNSRecvmsgCompatPrograms struct {
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
@@ -270,8 +270,8 @@ type traceguardPrograms struct {
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 }
 
-func (p *traceguardPrograms) Close() error {
-	return _TraceguardClose(
+func (p *traceguardDNSRecvmsgCompatPrograms) Close() error {
+	return _TraceguardDNSRecvmsgCompatClose(
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectionIngress,
@@ -287,7 +287,7 @@ func (p *traceguardPrograms) Close() error {
 	)
 }
 
-func _TraceguardClose(closers ...io.Closer) error {
+func _TraceguardDNSRecvmsgCompatClose(closers ...io.Closer) error {
 	for _, closer := range closers {
 		if err := closer.Close(); err != nil {
 			return err
@@ -298,5 +298,5 @@ func _TraceguardClose(closers ...io.Closer) error {
 
 // Do not access this directly.
 //
-//go:embed traceguard_bpfel.o
-var _TraceguardBytes []byte
+//go:embed traceguarddnsrecvmsgcompat_bpfel.o
+var _TraceguardDNSRecvmsgCompatBytes []byte

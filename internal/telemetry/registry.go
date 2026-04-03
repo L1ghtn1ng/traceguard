@@ -34,6 +34,15 @@ func (r *Registry) IncEvent(kind, transport string) {
 	}))
 }
 
+func (r *Registry) IncConnection(direction, family, protocol, attribution string) {
+	r.incCounter(metricKey("traceguard_connections_total", map[string]string{
+		"direction":   direction,
+		"family":      family,
+		"protocol":    protocol,
+		"attribution": attribution,
+	}))
+}
+
 func (r *Registry) IncBlocklistRefresh(success bool) {
 	name := "traceguard_blocklist_refresh_errors_total"
 	if success {

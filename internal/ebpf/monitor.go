@@ -78,13 +78,18 @@ type Monitor struct {
 }
 
 type monitorObjects struct {
-	TraceDns      *ebpf.Program `ebpf:"trace_dns"`
-	TraceSendmsg4 *ebpf.Program `ebpf:"trace_sendmsg4"`
-	TraceSendmsg6 *ebpf.Program `ebpf:"trace_sendmsg6"`
-	TraceConnect4 *ebpf.Program `ebpf:"trace_connect4"`
-	TraceConnect6 *ebpf.Program `ebpf:"trace_connect6"`
-	TraceExecve   *ebpf.Program `ebpf:"trace_execve"`
-	TraceExecveat *ebpf.Program `ebpf:"trace_execveat"`
+	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
+	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
+	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
+	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
+	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
+	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
+	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
+	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
+	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
+	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
@@ -104,10 +109,15 @@ func (o *monitorObjects) Close() error {
 	var errs []error
 	for _, closer := range []interface{ Close() error }{
 		o.TraceDns,
+		o.TraceConnectionIngress,
 		o.TraceSendmsg4,
 		o.TraceSendmsg6,
+		o.TraceRecvmsg4,
+		o.TraceRecvmsg6,
 		o.TraceConnect4,
 		o.TraceConnect6,
+		o.TracePostBind4,
+		o.TracePostBind6,
 		o.TraceExecve,
 		o.TraceExecveat,
 		o.Allowlist,
@@ -147,122 +157,76 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		return nil, fmt.Errorf("create ring buffer reader: %w", err)
 	}
 
-	cgroupLink, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cgroupPath,
-		Attach:  ebpf.AttachCGroupInetEgress,
-		Program: objects.TraceDns,
-	})
-	if err != nil {
-		reader.Close()
-		objects.Close()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach DNS cgroup egress program: %v", ErrInsufficientPrivileges, err)
+	var links []link.Link
+	cleanup := func() {
+		for _, lnk := range links {
+			if lnk != nil {
+				_ = lnk.Close()
+			}
 		}
-		return nil, fmt.Errorf("attach DNS cgroup egress program: %w", err)
+		_ = reader.Close()
+		_ = objects.Close()
 	}
 
-	sendmsg4Link, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cgroupPath,
-		Attach:  ebpf.AttachCGroupUDP4Sendmsg,
-		Program: objects.TraceSendmsg4,
-	})
-	if err != nil {
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach sendmsg4 program: %v", ErrInsufficientPrivileges, err)
+	attachCgroup := func(program *ebpf.Program, attach ebpf.AttachType, name string) error {
+		lnk, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cgroupPath,
+			Attach:  attach,
+			Program: program,
+		})
+		if err != nil {
+			if isPermissionDenied(err) {
+				return fmt.Errorf("%w: attach %s program: %v", ErrInsufficientPrivileges, name, err)
+			}
+			return fmt.Errorf("attach %s program: %w", name, err)
 		}
-		return nil, fmt.Errorf("attach sendmsg4 program: %w", err)
+		links = append(links, lnk)
+		return nil
 	}
 
-	sendmsg6Link, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cgroupPath,
-		Attach:  ebpf.AttachCGroupUDP6Sendmsg,
-		Program: objects.TraceSendmsg6,
-	})
-	if err != nil {
-		sendmsg4Link.Close()
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach sendmsg6 program: %v", ErrInsufficientPrivileges, err)
+	for _, spec := range []struct {
+		program *ebpf.Program
+		attach  ebpf.AttachType
+		name    string
+	}{
+		{program: objects.TraceDns, attach: ebpf.AttachCGroupInetEgress, name: "DNS cgroup egress"},
+		{program: objects.TraceConnectionIngress, attach: ebpf.AttachCGroupInetIngress, name: "connection ingress"},
+		{program: objects.TraceSendmsg4, attach: ebpf.AttachCGroupUDP4Sendmsg, name: "sendmsg4"},
+		{program: objects.TraceSendmsg6, attach: ebpf.AttachCGroupUDP6Sendmsg, name: "sendmsg6"},
+		{program: objects.TraceRecvmsg4, attach: ebpf.AttachCGroupUDP4Recvmsg, name: "recvmsg4"},
+		{program: objects.TraceRecvmsg6, attach: ebpf.AttachCGroupUDP6Recvmsg, name: "recvmsg6"},
+		{program: objects.TraceConnect4, attach: ebpf.AttachCGroupInet4Connect, name: "connect4"},
+		{program: objects.TraceConnect6, attach: ebpf.AttachCGroupInet6Connect, name: "connect6"},
+		{program: objects.TracePostBind4, attach: ebpf.AttachCGroupInet4PostBind, name: "post_bind4"},
+		{program: objects.TracePostBind6, attach: ebpf.AttachCGroupInet6PostBind, name: "post_bind6"},
+	} {
+		if err := attachCgroup(spec.program, spec.attach, spec.name); err != nil {
+			cleanup()
+			return nil, err
 		}
-		return nil, fmt.Errorf("attach sendmsg6 program: %w", err)
-	}
-
-	connect4Link, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cgroupPath,
-		Attach:  ebpf.AttachCGroupInet4Connect,
-		Program: objects.TraceConnect4,
-	})
-	if err != nil {
-		sendmsg6Link.Close()
-		sendmsg4Link.Close()
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach connect4 program: %v", ErrInsufficientPrivileges, err)
-		}
-		return nil, fmt.Errorf("attach connect4 program: %w", err)
-	}
-
-	connect6Link, err := link.AttachCgroup(link.CgroupOptions{
-		Path:    cgroupPath,
-		Attach:  ebpf.AttachCGroupInet6Connect,
-		Program: objects.TraceConnect6,
-	})
-	if err != nil {
-		sendmsg6Link.Close()
-		sendmsg4Link.Close()
-		connect4Link.Close()
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach connect6 program: %v", ErrInsufficientPrivileges, err)
-		}
-		return nil, fmt.Errorf("attach connect6 program: %w", err)
 	}
 
 	execveLink, err := link.Tracepoint("syscalls", "sys_enter_execve", objects.TraceExecve, nil)
 	if err != nil {
-		sendmsg6Link.Close()
-		sendmsg4Link.Close()
-		connect6Link.Close()
-		connect4Link.Close()
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
+		cleanup()
 		if isPermissionDenied(err) {
 			return nil, fmt.Errorf("%w: attach execve tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
 		}
 		return nil, fmt.Errorf("attach execve tracepoint: %w", err)
 	}
+	links = append(links, execveLink)
 
 	execveatLink, err := link.Tracepoint("syscalls", "sys_enter_execveat", objects.TraceExecveat, nil)
 	if err != nil {
-		sendmsg6Link.Close()
-		sendmsg4Link.Close()
-		execveLink.Close()
-		connect6Link.Close()
-		connect4Link.Close()
-		cgroupLink.Close()
-		reader.Close()
-		objects.Close()
+		cleanup()
 		if isPermissionDenied(err) {
 			return nil, fmt.Errorf("%w: attach execveat tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
 		}
 		return nil, fmt.Errorf("attach execveat tracepoint: %w", err)
 	}
+	links = append(links, execveatLink)
 
-	return &Monitor{
-		objects: objects,
-		links:   []link.Link{cgroupLink, sendmsg4Link, sendmsg6Link, connect4Link, connect6Link, execveLink, execveatLink},
-		reader:  reader,
-	}, nil
+	return &Monitor{objects: objects, links: links, reader: reader}, nil
 }
 
 func newCollectionOptions() *ebpf.CollectionOptions {
@@ -285,25 +249,67 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, er
 	release, _ := kernelRelease()
 	if isLinux612x(release) {
 		objects, err := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
-		if err != nil {
-			return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
+		if err == nil {
+			return objects, nil
 		}
-		return objects, nil
+		if isRecvmsgContextVerifierError(err) {
+			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+			if compatErr != nil {
+				return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
+			}
+			return compatObjects, nil
+		}
+		if isDNSHelperVerifierError(err) {
+			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+			if compatErr == nil {
+				return compatObjects, nil
+			}
+		}
+		return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
 	}
 
 	objects, err := loadMonitorVariant(loadTraceguard, loadOptions)
 	if err == nil {
 		return objects, nil
 	}
+	if isRecvmsgContextVerifierError(err) {
+		compatObjects, compatErr := loadMonitorVariant(loadTraceguardRecvmsgCompat, loadOptions)
+		if compatErr == nil {
+			return compatObjects, nil
+		}
+		if isDNSHelperVerifierError(err) {
+			combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+			if combinedErr == nil {
+				return combinedObjects, nil
+			}
+		}
+		return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; recvmsg compat retry failed: %w", err, compatErr)
+	}
 	if !isDNSHelperVerifierError(err) {
 		return monitorObjects{}, fmt.Errorf("load eBPF objects: %w", err)
 	}
 
 	compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
-	if compatErr != nil {
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+	if compatErr == nil {
+		return compatObjects, nil
 	}
-	return compatObjects, nil
+	if isRecvmsgContextVerifierError(compatErr) {
+		combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+		if combinedErr == nil {
+			return combinedObjects, nil
+		}
+		return monitorObjects{}, fmt.Errorf("load eBPF objects: dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", compatErr, combinedErr)
+	}
+	return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+}
+
+func isRecvmsgContextVerifierError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return (strings.Contains(msg, "trace_recvmsg4") || strings.Contains(msg, "trace_recvmsg6") || strings.Contains(msg, "TraceRecvmsg4") || strings.Contains(msg, "TraceRecvmsg6")) &&
+		(strings.Contains(msg, "invalid bpf_context access off=40") || strings.Contains(msg, "dereference of modified ctx ptr"))
 }
 
 func loadMonitorVariant(loadSpec func() (*ebpf.CollectionSpec, error), loadOptions *ebpf.CollectionOptions) (monitorObjects, error) {

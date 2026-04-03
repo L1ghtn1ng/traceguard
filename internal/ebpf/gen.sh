@@ -43,3 +43,24 @@ go run github.com/cilium/ebpf/cmd/bpf2go \
   -- \
   -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
   -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardRecvmsgCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
+  -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardDNSRecvmsgCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
+  -target bpfel

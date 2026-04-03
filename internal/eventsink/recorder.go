@@ -50,6 +50,11 @@ type Recorder struct {
 	logger   *logging.Logger
 	archive  *archiveSink
 	exporter *exportSink
+	now      func() time.Time
+
+	dedupeMu     sync.Mutex
+	errorStates  map[string]errorDedupeState
+	changeStates map[string]string
 }
 
 type record struct {
@@ -59,8 +64,18 @@ type record struct {
 	Fields    map[string]any `json:"-"`
 }
 
+type errorDedupeState struct {
+	lastEmitted     time.Time
+	suppressedCount uint64
+}
+
 func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry.Registry, cfg Config) (*Recorder, error) {
-	recorder := &Recorder{logger: logger}
+	recorder := &Recorder{
+		logger:       logger,
+		now:          time.Now,
+		errorStates:  make(map[string]errorDedupeState),
+		changeStates: make(map[string]string),
+	}
 	if strings.TrimSpace(cfg.ArchivePath) != "" {
 		archive, err := newArchiveSink(cfg.ArchivePath, metrics)
 		if err != nil {
@@ -104,14 +119,64 @@ func (r *Recorder) Error(msg string, err error, fields map[string]any) {
 	r.emit("error", msg, merged)
 }
 
+func (r *Recorder) ErrorDedup(msg string, err error, fields map[string]any, ttl time.Duration) {
+	merged := cloneFields(fields)
+	if err != nil {
+		merged["error"] = err.Error()
+	}
+	if ttl <= 0 {
+		r.emit("error", msg, merged)
+		return
+	}
+
+	now := r.now().UTC()
+	key := msg + "\x00" + fmt.Sprint(merged["error"])
+
+	r.dedupeMu.Lock()
+	state := r.errorStates[key]
+	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
+		state.suppressedCount++
+		r.errorStates[key] = state
+		r.dedupeMu.Unlock()
+		return
+	}
+	suppressedCount := state.suppressedCount
+	r.errorStates[key] = errorDedupeState{lastEmitted: now}
+	r.dedupeMu.Unlock()
+
+	if suppressedCount > 0 {
+		merged["suppressed_count"] = suppressedCount
+	}
+	r.emitAt("error", msg, merged, now)
+}
+
+func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
+	fingerprint := fingerprintRecord("info", msg, fields)
+
+	r.dedupeMu.Lock()
+	if r.changeStates[msg] == fingerprint {
+		r.dedupeMu.Unlock()
+		return false
+	}
+	r.changeStates[msg] = fingerprint
+	r.dedupeMu.Unlock()
+
+	r.emit("info", msg, fields)
+	return true
+}
+
 func (r *Recorder) emit(level, msg string, fields map[string]any) {
+	r.emitAt(level, msg, fields, r.now().UTC())
+}
+
+func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp time.Time) {
 	if fields == nil {
 		fields = map[string]any{}
 	}
 	r.logger.Log(level, msg, fields)
 
 	entry := record{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Timestamp: timestamp.Format(time.RFC3339Nano),
 		Level:     level,
 		Message:   msg,
 		Fields:    cloneFields(fields),
@@ -122,6 +187,22 @@ func (r *Recorder) emit(level, msg string, fields map[string]any) {
 	if r.exporter != nil {
 		r.exporter.Enqueue(entry)
 	}
+}
+
+func fingerprintRecord(level, msg string, fields map[string]any) string {
+	payload, err := json.Marshal(struct {
+		Level   string         `json:"level"`
+		Message string         `json:"message"`
+		Fields  map[string]any `json:"fields"`
+	}{
+		Level:   level,
+		Message: msg,
+		Fields:  cloneFields(fields),
+	})
+	if err != nil {
+		return fmt.Sprintf("%s|%s|%v", level, msg, fields)
+	}
+	return string(payload)
 }
 
 type archiveSink struct {

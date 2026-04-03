@@ -91,3 +91,26 @@ func TestAppendSocketFieldsSkipsExecEvents(t *testing.T) {
 		t.Fatalf("fields = %#v, want empty", fields)
 	}
 }
+
+func TestAppendSocketFieldsSupportsConnectionEvents(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]any{}
+	appendSocketFields(fields, ebpfmonitor.Event{
+		Kind:           ebpfmonitor.EventConnection,
+		Attribution:    "kernel-ingress",
+		SocketHook:     "cgroup_skb_ingress",
+		SocketFamily:   "ipv4",
+		SocketProtocol: "tcp",
+	}, processinfo.Metadata{})
+
+	want := map[string]any{
+		"attribution":     "kernel-ingress",
+		"socket_hook":     "cgroup_skb_ingress",
+		"socket_family":   "ipv4",
+		"socket_protocol": "tcp",
+	}
+	if !reflect.DeepEqual(fields, want) {
+		t.Fatalf("fields = %#v, want %#v", fields, want)
+	}
+}

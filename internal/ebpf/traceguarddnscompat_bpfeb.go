@@ -13,6 +13,24 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type traceguardDNSCompatConnectionDedupeKey struct {
+	_         structs.HostLayout
+	Pid       uint32
+	Port      uint16
+	LocalPort uint16
+	Family    uint8
+	Protocol  uint8
+	Direction uint8
+	Pad       uint8
+	Addr      [16]uint8
+	LocalAddr [16]uint8
+}
+
+type traceguardDNSCompatConnectionDedupeValue struct {
+	_          structs.HostLayout
+	LastSeenNs uint64
+}
+
 type traceguardDNSCompatDomainKey struct {
 	_      structs.HostLayout
 	Domain [256]int8
@@ -46,6 +64,20 @@ type traceguardDNSCompatEndpoint6Key struct {
 	Port      uint16
 	Transport uint8
 	Pad       uint8
+}
+
+type traceguardDNSCompatListenerInfoKey struct {
+	_        structs.HostLayout
+	Port     uint16
+	Family   uint8
+	Protocol uint8
+	Addr     [16]uint8
+}
+
+type traceguardDNSCompatListenerInfoValue struct {
+	_    structs.HostLayout
+	Pid  uint32
+	Comm [16]int8
 }
 
 type traceguardDNSCompatSettings struct {
@@ -116,13 +148,18 @@ type traceguardDNSCompatSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardDNSCompatProgramSpecs struct {
-	TraceConnect4 *ebpf.ProgramSpec `ebpf:"trace_connect4"`
-	TraceConnect6 *ebpf.ProgramSpec `ebpf:"trace_connect6"`
-	TraceDns      *ebpf.ProgramSpec `ebpf:"trace_dns"`
-	TraceExecve   *ebpf.ProgramSpec `ebpf:"trace_execve"`
-	TraceExecveat *ebpf.ProgramSpec `ebpf:"trace_execveat"`
-	TraceSendmsg4 *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
-	TraceSendmsg6 *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
+	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
+	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
+	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
+	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
+	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
+	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TracePostBind4         *ebpf.ProgramSpec `ebpf:"trace_post_bind4"`
+	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
+	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
+	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
+	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 }
 
 // traceguardDNSCompatMapSpecs contains maps before they are loaded into the kernel.
@@ -131,6 +168,7 @@ type traceguardDNSCompatProgramSpecs struct {
 type traceguardDNSCompatMapSpecs struct {
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
+	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
 	Endpoint4AllowRules     *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.MapSpec `ebpf:"endpoint4_cidr_rules"`
@@ -140,6 +178,7 @@ type traceguardDNSCompatMapSpecs struct {
 	Endpoint6CidrRules      *ebpf.MapSpec `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
+	ListenerInfo            *ebpf.MapSpec `ebpf:"listener_info"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
 }
@@ -172,6 +211,7 @@ func (o *traceguardDNSCompatObjects) Close() error {
 type traceguardDNSCompatMaps struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
+	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -181,6 +221,7 @@ type traceguardDNSCompatMaps struct {
 	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
+	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 }
@@ -189,6 +230,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 	return _TraceguardDNSCompatClose(
 		m.Allowlist,
 		m.Blocklist,
+		m.ConnectionDedupe,
 		m.Endpoint4AllowRules,
 		m.Endpoint4CidrAllowRules,
 		m.Endpoint4CidrRules,
@@ -198,6 +240,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 		m.Endpoint6CidrRules,
 		m.Endpoint6Rules,
 		m.Events,
+		m.ListenerInfo,
 		m.Settings,
 		m.SocketInfo,
 	)
@@ -213,22 +256,32 @@ type traceguardDNSCompatVariables struct {
 //
 // It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardDNSCompatPrograms struct {
-	TraceConnect4 *ebpf.Program `ebpf:"trace_connect4"`
-	TraceConnect6 *ebpf.Program `ebpf:"trace_connect6"`
-	TraceDns      *ebpf.Program `ebpf:"trace_dns"`
-	TraceExecve   *ebpf.Program `ebpf:"trace_execve"`
-	TraceExecveat *ebpf.Program `ebpf:"trace_execveat"`
-	TraceSendmsg4 *ebpf.Program `ebpf:"trace_sendmsg4"`
-	TraceSendmsg6 *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
+	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
+	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
+	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
+	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
+	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
+	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
+	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
+	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
+	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 }
 
 func (p *traceguardDNSCompatPrograms) Close() error {
 	return _TraceguardDNSCompatClose(
 		p.TraceConnect4,
 		p.TraceConnect6,
+		p.TraceConnectionIngress,
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TracePostBind4,
+		p.TracePostBind6,
+		p.TraceRecvmsg4,
+		p.TraceRecvmsg6,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
 	)

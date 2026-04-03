@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
@@ -15,6 +16,8 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
+
+const kubernetesRefreshErrorDedupeTTL = 5 * time.Minute
 
 func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, reloadCh <-chan struct{}) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -30,7 +33,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			NodeName:  cfg.KubernetesNodeName,
 			PollEvery: cfg.KubernetesPoll,
 		}, metrics, func(err error) {
-			recorder.Error("refresh kubernetes metadata", err, nil)
+			recorder.ErrorDedup("refresh kubernetes metadata", err, nil, kubernetesRefreshErrorDedupeTTL)
 		})
 		if err != nil {
 			recorder.Error("initialize kubernetes metadata", err, nil)
@@ -114,7 +117,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		runtimePolicy.Store(policy)
 		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
 		metrics.IncBlocklistRefresh(true)
-		recorder.Info("policy loaded", map[string]any{
+		recorder.InfoIfChanged("policy loaded", map[string]any{
 			"block_all_domains":    rules.BlockAllDomains,
 			"block_all_resolvers":  rules.BlockAllResolvers,
 			"block_domains":        len(rules.BlockDomains),
@@ -198,6 +201,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			process, hit := processCache.Lookup(event.PID, event.Comm)
 			metrics.IncProcessCache(hit)
 			metrics.IncEvent(eventKindName(event.Kind), event.Transport)
+			if event.Kind == ebpf.EventConnection {
+				metrics.IncConnection(event.Direction, event.SocketFamily, event.SocketProtocol, eventAttribution(event, process))
+			}
 
 			fields := map[string]any{
 				"event":          eventKindName(event.Kind),
@@ -305,6 +311,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			case ebpf.EventExec:
 				fields["filename"] = event.Filename
 				recorder.Info("exec", fields)
+			case ebpf.EventConnection:
+				fields["direction"] = event.Direction
+				fields["peer_address"] = event.Address
+				fields["peer_port"] = event.Port
+				fields["local_address"] = event.LocalAddress
+				fields["local_port"] = event.LocalPort
+				recorder.Info("connection", fields)
 			default:
 				fields["kind"] = event.Kind
 				recorder.Info("event", fields)
@@ -374,7 +387,7 @@ func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {
 
 func isSocketAwareEvent(kind uint32) bool {
 	switch kind {
-	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked:
+	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked, ebpf.EventConnection:
 		return true
 	default:
 		return false
@@ -409,6 +422,8 @@ func eventKindName(kind uint32) string {
 		return "resolver"
 	case ebpf.EventResolverBlocked:
 		return "resolver_blocked"
+	case ebpf.EventConnection:
+		return "connection"
 	default:
 		return "unknown"
 	}

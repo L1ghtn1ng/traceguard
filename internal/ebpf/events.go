@@ -21,6 +21,7 @@ const (
 	EventExec
 	EventResolver
 	EventResolverBlocked
+	EventConnection
 )
 
 type rawEvent struct {
@@ -35,9 +36,12 @@ type rawEvent struct {
 	SocketProto uint8
 	Attribution uint8
 	SocketHook  uint8
-	_           uint8
+	Direction   uint8
 	Port        uint16
+	LocalPort   uint16
+	_           uint16
 	Addr        [16]byte
+	LocalAddr   [16]byte
 }
 
 type Event struct {
@@ -50,7 +54,10 @@ type Event struct {
 	Transport      string
 	Address        string
 	Port           uint16
+	LocalAddress   string
+	LocalPort      uint16
 	Attribution    string
+	Direction      string
 	SocketHook     string
 	SocketFamily   string
 	SocketProtocol string
@@ -72,7 +79,10 @@ func decodeEvent(record []byte) (Event, error) {
 		Transport:      transportName(raw.Transport),
 		Address:        decodeAddress(raw.Family, raw.Addr),
 		Port:           raw.Port,
+		LocalAddress:   decodeAddress(raw.Family, raw.LocalAddr),
+		LocalPort:      raw.LocalPort,
 		Attribution:    attributionName(raw.Attribution),
+		Direction:      directionName(raw.Direction),
 		SocketHook:     socketHookName(raw.SocketHook),
 		SocketFamily:   socketFamilyName(raw.Family),
 		SocketProtocol: socketProtocolName(raw.SocketProto),
@@ -129,8 +139,14 @@ func decodeQName(raw []byte) string {
 func decodeAddress(family uint8, raw [16]byte) string {
 	switch family {
 	case 4:
+		if bytes.Equal(raw[:4], make([]byte, 4)) {
+			return ""
+		}
 		return net.IP(raw[:4]).String()
 	case 6:
+		if bytes.Equal(raw[:], make([]byte, 16)) {
+			return ""
+		}
 		return net.IP(raw[:]).String()
 	default:
 		return ""
@@ -167,6 +183,21 @@ func attributionName(code uint8) string {
 		return "kernel-sendmsg"
 	case 3:
 		return "kernel-connect"
+	case 4:
+		return "kernel-recvmsg"
+	case 5:
+		return "kernel-ingress"
+	default:
+		return ""
+	}
+}
+
+func directionName(code uint8) string {
+	switch code {
+	case 1:
+		return "inbound"
+	case 2:
+		return "outbound"
 	default:
 		return ""
 	}
@@ -184,6 +215,16 @@ func socketHookName(code uint8) string {
 		return "cgroup_connect4"
 	case 5:
 		return "cgroup_connect6"
+	case 6:
+		return "cgroup_skb_ingress"
+	case 7:
+		return "cgroup_recvmsg4"
+	case 8:
+		return "cgroup_recvmsg6"
+	case 9:
+		return "cgroup_post_bind4"
+	case 10:
+		return "cgroup_post_bind6"
 	default:
 		return ""
 	}

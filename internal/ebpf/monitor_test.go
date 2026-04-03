@@ -59,3 +59,15 @@ func TestIsDNSHelperVerifierError(t *testing.T) {
 		t.Fatal("isDNSHelperVerifierError matched unrelated error")
 	}
 }
+
+func TestIsRecvmsgContextVerifierError(t *testing.T) {
+	t.Parallel()
+
+	err := errors.New("field TraceRecvmsg4: program trace_recvmsg4: load program: permission denied: invalid bpf_context access off=40 size=4")
+	if !isRecvmsgContextVerifierError(err) {
+		t.Fatal("isRecvmsgContextVerifierError rejected recvmsg context failure")
+	}
+	if isRecvmsgContextVerifierError(errors.New("some other verifier error")) {
+		t.Fatal("isRecvmsgContextVerifierError matched unrelated error")
+	}
+}

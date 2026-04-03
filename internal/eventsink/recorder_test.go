@@ -1,6 +1,7 @@
 package eventsink
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -68,6 +70,89 @@ func TestRecorderWritesArchive(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("archive missing %q in %q", want, text)
 		}
+	}
+}
+
+func TestRecorderErrorDedupSuppressesRepeatedErrors(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.ErrorDedup("refresh kubernetes metadata", errors.New("dial tcp: i/o timeout"), nil, 5*time.Minute)
+
+	now = now.Add(2 * time.Minute)
+	recorder.ErrorDedup("refresh kubernetes metadata", errors.New("dial tcp: i/o timeout"), nil, 5*time.Minute)
+
+	now = now.Add(3 * time.Minute)
+	recorder.ErrorDedup("refresh kubernetes metadata", errors.New("dial tcp: i/o timeout"), nil, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if _, ok := lines[0]["suppressed_count"]; ok {
+		t.Fatalf("first log line unexpectedly had suppressed_count: %#v", lines[0])
+	}
+	if got := lines[1]["suppressed_count"]; got != float64(1) {
+		t.Fatalf("suppressed_count = %#v, want 1", got)
+	}
+}
+
+func TestRecorderErrorDedupEmitsDifferentErrors(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.ErrorDedup("refresh kubernetes metadata", errors.New("dial tcp: i/o timeout"), nil, 5*time.Minute)
+	now = now.Add(time.Minute)
+	recorder.ErrorDedup("refresh kubernetes metadata", errors.New("401 Unauthorized"), nil, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[1]["error"]; got != "401 Unauthorized" {
+		t.Fatalf("second error = %#v, want 401 Unauthorized", got)
+	}
+}
+
+func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+
+	if !recorder.InfoIfChanged("policy loaded", map[string]any{
+		"block_domains": 1,
+		"source":        "https://example.test/blocklist.txt",
+	}) {
+		t.Fatal("InfoIfChanged did not emit initial policy snapshot")
+	}
+	if recorder.InfoIfChanged("policy loaded", map[string]any{
+		"source":        "https://example.test/blocklist.txt",
+		"block_domains": 1,
+	}) {
+		t.Fatal("InfoIfChanged emitted unchanged policy snapshot")
+	}
+	if !recorder.InfoIfChanged("policy loaded", map[string]any{
+		"block_domains": 2,
+		"source":        "https://example.test/blocklist.txt",
+	}) {
+		t.Fatal("InfoIfChanged suppressed changed policy snapshot")
+	}
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[0]["block_domains"]; got != float64(1) {
+		t.Fatalf("first block_domains = %#v, want 1", got)
+	}
+	if got := lines[1]["block_domains"]; got != float64(2) {
+		t.Fatalf("second block_domains = %#v, want 2", got)
 	}
 }
 
@@ -233,6 +318,43 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	if len(files) != 0 {
 		t.Fatalf("expected empty spool after replay, got %d files", len(files))
 	}
+}
+
+func newTestRecorder(t *testing.T) (*Recorder, *bytes.Buffer) {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	logger, err := logging.NewLogger(&buffer, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	recorder, err := NewRecorder(context.Background(), logger, telemetry.NewRegistry(), Config{})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = recorder.Close()
+	})
+	return recorder, &buffer
+}
+
+func decodeLogLines(t *testing.T, buffer *bytes.Buffer) []map[string]any {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+
+	decoded := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("json.Unmarshal returned error: %v", err)
+		}
+		decoded = append(decoded, entry)
+	}
+	return decoded
 }
 
 func writeClientCertificate(t *testing.T, dir string) (string, string) {

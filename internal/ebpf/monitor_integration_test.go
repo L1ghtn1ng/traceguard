@@ -11,7 +11,16 @@ import (
 )
 
 type integrationPrograms struct {
-	TraceDns *ebpf.Program `ebpf:"trace_dns"`
+	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
+	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
+	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
+	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
+	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
+	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
+	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
+	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
 }
 
 func TestTraceDNSProgramLoadsForIntegration(t *testing.T) {
@@ -32,4 +41,13 @@ func TestTraceDNSProgramLoadsForIntegration(t *testing.T) {
 		t.Fatalf("LoadAndAssign returned error: %v", err)
 	}
 	defer objects.TraceDns.Close()
+	defer objects.TraceConnectionIngress.Close()
+	defer objects.TraceSendmsg4.Close()
+	defer objects.TraceSendmsg6.Close()
+	defer objects.TraceRecvmsg4.Close()
+	defer objects.TraceRecvmsg6.Close()
+	defer objects.TraceConnect4.Close()
+	defer objects.TraceConnect6.Close()
+	defer objects.TracePostBind4.Close()
+	defer objects.TracePostBind6.Close()
 }
