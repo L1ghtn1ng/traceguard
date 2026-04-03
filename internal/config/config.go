@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	neturl "net/url"
 	"os"
@@ -33,11 +35,14 @@ func (d *domainList) String() string {
 }
 
 func (d *domainList) Set(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
+	entries, err := parseDomainInput(value)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
 		return errors.New("empty domain value")
 	}
-	*d = append(*d, value)
+	*d = append(*d, entries...)
 	return nil
 }
 
@@ -86,21 +91,15 @@ func Parse() (Config, error) {
 	}
 
 	cfg := Config{}
-	blockAll := envBool("TRACEGUARD_BLOCK_ALL", false)
-	manual := domainList(strings.FieldsFunc(envString("TRACEGUARD_BLOCK_DOMAINS", ""), func(r rune) bool {
-		return r == ',' || r == '\n'
-	}))
-	manualAllow := domainList(strings.FieldsFunc(envString("TRACEGUARD_ALLOW_DOMAINS", ""), func(r rune) bool {
-		return r == ',' || r == '\n'
-	}))
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.BoolVar(&cfg.Block, "block", envBool("TRACEGUARD_BLOCK", false), "enable DNS blocking for domains loaded from the configured sources")
-	fs.BoolVar(&blockAll, "block-all", blockAll, "enable deny-all DNS/resolver policy; equivalent to -block-domain '*' without shell quoting issues")
 	fs.BoolVar(&cfg.DryRun, "dry-run", envBool("TRACEGUARD_DRY_RUN", false), "evaluate block policy and log would-block decisions without enforcing drops")
 	fs.StringVar(&cfg.BlocklistURL, "blocklist-url", envString("TRACEGUARD_BLOCKLIST_URL", ""), "HTTPS URL that returns newline-delimited domains or URLs to block")
-	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
-	fs.Var(&manualAllow, "allow-domain", "exact domain, bare resolver IP/CIDR, or DoH/DoT endpoint to allow even if it also appears in a block policy; may be specified more than once")
+	var manual domainList
+	var manualAllow domainList
+	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
+	fs.Var(&manualAllow, "allow-domain", "exact domain, @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to allow even if it also appears in a block policy; may be specified more than once")
 	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", defaultCachePath), "path to the cached remote blocklist")
 	fs.DurationVar(&cfg.RefreshInterval, "refresh-interval", envDuration("TRACEGUARD_REFRESH_INTERVAL", defaultRefreshInterval), "remote blocklist refresh interval")
 	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for egress attachment")
@@ -123,7 +122,7 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.KubernetesAPIURL, "kubernetes-api-url", envString("TRACEGUARD_KUBERNETES_API_URL", defaultKubernetesAPIURL()), "HTTPS URL for the Kubernetes API server")
 	fs.StringVar(&cfg.KubernetesTokenPath, "kubernetes-token-path", envString("TRACEGUARD_KUBERNETES_TOKEN_PATH", defaultKubeTokenPath), "path to the Kubernetes bearer token file")
 	fs.StringVar(&cfg.KubernetesCAPath, "kubernetes-ca-path", envString("TRACEGUARD_KUBERNETES_CA_PATH", defaultKubeCAPath), "path to the Kubernetes CA certificate bundle")
-	fs.StringVar(&cfg.KubernetesNodeName, "kubernetes-node-name", envStringAny([]string{"TRACEGUARD_KUBERNETES_NODE_NAME", "KUBE_NODE_NAME", "NODE_NAME"}, ""), "optional Kubernetes node name used to scope pod metadata listing")
+	fs.StringVar(&cfg.KubernetesNodeName, "kubernetes-node-name", envString("TRACEGUARD_KUBERNETES_NODE_NAME", ""), "optional Kubernetes node name used to scope pod metadata listing")
 	fs.DurationVar(&cfg.KubernetesPoll, "kubernetes-poll-interval", envDuration("TRACEGUARD_KUBERNETES_POLL_INTERVAL", defaultKubePoll), "how often to refresh Kubernetes pod metadata")
 	fs.BoolVar(&cfg.PrintVersion, "v", false, "print program version and exit")
 	fs.BoolVar(&cfg.Doctor, "doctor", false, "run environment diagnostics and exit")
@@ -132,17 +131,22 @@ func Parse() (Config, error) {
 		return Config{}, err
 	}
 	if fs.NArg() > 0 {
-		return Config{}, fmt.Errorf("unexpected positional arguments: %s; quote '*' as -block-domain '*' or use -block-all", strings.Join(fs.Args(), ", "))
+		return Config{}, fmt.Errorf("unexpected positional arguments: %s; quote '*' as -block-domain '*'", strings.Join(fs.Args(), ", "))
 	}
 	if cfg.PrintVersion || cfg.Doctor {
 		return cfg, nil
 	}
 
-	cfg.ManualDomains = compact(manual)
-	cfg.ManualAllow = compact(manualAllow)
-	if blockAll {
-		cfg.ManualDomains = append(cfg.ManualDomains, "*")
+	cfg.ManualDomains, err = loadDomainEnv("TRACEGUARD_BLOCK_DOMAINS")
+	if err != nil {
+		return Config{}, err
 	}
+	cfg.ManualAllow, err = loadDomainEnv("TRACEGUARD_ALLOW_DOMAINS")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ManualDomains = compact(append(cfg.ManualDomains, manual...))
+	cfg.ManualAllow = compact(append(cfg.ManualAllow, manualAllow...))
 	if cfg.RefreshInterval <= 0 {
 		return Config{}, errors.New("refresh-interval must be positive")
 	}
@@ -307,14 +311,73 @@ func envInt(key string, fallback int) int {
 	return parsed
 }
 
-func envStringAny(keys []string, fallback string) string {
-	for _, key := range keys {
-		value, ok := os.LookupEnv(key)
-		if ok {
-			return strings.TrimSpace(value)
+func loadDomainEnv(key string) ([]string, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return nil, nil
+	}
+	entries, err := parseDomainInput(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	return entries, nil
+}
+
+func parseDomainInput(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(value, "@") {
+		return loadDomainFile(strings.TrimSpace(value[1:]))
+	}
+	return splitDomainEntries(value), nil
+}
+
+func loadDomainFile(path string) ([]string, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("domain file path %q must be absolute", path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read domain file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	return parseDomainEntries(file)
+}
+
+func parseDomainEntries(r io.Reader) ([]string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var entries []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entries = append(entries, splitDomainEntries(line)...)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func splitDomainEntries(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
 		}
 	}
-	return fallback
+	return out
 }
 
 func defaultKubernetesAPIURL() string {

@@ -121,7 +121,7 @@ Deny all DNS names and resolver endpoints, then allow only explicit exceptions:
 
 ```bash
 sudo ./traceguard -block \
-  -block-all \
+  -block-domain '*' \
   -allow-domain corp.example \
   -allow-domain 1.1.1.1 \
   -allow-domain 1.1.1.0/24 \
@@ -165,6 +165,14 @@ sudo ./traceguard -block \
   -refresh-interval 6h
 ```
 
+Load manual block and allow entries from files:
+
+```bash
+sudo ./traceguard -block \
+  -block-domain @/etc/traceguard/block-domains.txt \
+  -allow-domain @/etc/traceguard/allow-domains.txt
+```
+
 Print the program version:
 
 ```bash
@@ -190,7 +198,6 @@ Enable JSON output and metrics:
 
 ```bash
 sudo ./traceguard \
-  -log-format json \
   -metrics-addr :9090
 ```
 
@@ -198,7 +205,6 @@ Archive events locally and export them to a collector:
 
 ```bash
 sudo ./traceguard \
-  -log-format json \
   -event-archive-path /var/lib/traceguard/events.jsonl \
   -event-export-url https://siem.example/api/traceguard \
   -event-export-auth-token 'Bearer secret-token' \
@@ -219,7 +225,6 @@ sudo ./traceguard \
 Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
-- `TRACEGUARD_BLOCK_ALL`
 - `TRACEGUARD_DRY_RUN`
 - `TRACEGUARD_BLOCKLIST_URL`
 - `TRACEGUARD_BLOCK_DOMAINS`
@@ -250,6 +255,14 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_KUBERNETES_POLL_INTERVAL`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output.
+
+Manual policy inputs:
+
+- Use `-block-domain` and `-allow-domain` repeatedly for inline entries.
+- Use `-block-domain @/abs/path` and `-allow-domain @/abs/path` to load entries from files.
+- Use `TRACEGUARD_BLOCK_DOMAINS` and `TRACEGUARD_ALLOW_DOMAINS` for env-based configuration.
+- Set `TRACEGUARD_BLOCK_DOMAINS=@/abs/path` or `TRACEGUARD_ALLOW_DOMAINS=@/abs/path` to load entries from files.
+- Use `*` as the deny-all marker with `-block-domain '*'` or `TRACEGUARD_BLOCK_DOMAINS=*`.
 
 Example output:
 
