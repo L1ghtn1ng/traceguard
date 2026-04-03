@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -210,7 +211,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				"program":        process.Comm,
 				"pid":            event.PID,
 				"transport":      event.Transport,
-				"exe":            process.Exe,
+				"exe":            resolveExecutablePath(event, process),
 				"uid":            process.UID,
 				"ppid":           process.PPID,
 				"parent_program": process.ParentComm,
@@ -376,6 +377,22 @@ func appendSocketFields(fields map[string]any, event ebpf.Event, process process
 	if event.SocketProtocol != "" {
 		fields["socket_protocol"] = event.SocketProtocol
 	}
+}
+
+func resolveExecutablePath(event ebpf.Event, process processinfo.Metadata) string {
+	if event.PID == 0 {
+		return ""
+	}
+	if event.Kind == ebpf.EventExec && event.Filename != "" {
+		return event.Filename
+	}
+	if process.Exe != "" {
+		return process.Exe
+	}
+	if len(process.Cmdline) > 0 && filepath.IsAbs(process.Cmdline[0]) {
+		return process.Cmdline[0]
+	}
+	return ""
 }
 
 func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {

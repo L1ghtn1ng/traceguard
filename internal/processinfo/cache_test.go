@@ -16,6 +16,7 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	writeProcEntry(t, root, 100, "status", "Name:\tcurl\nPPid:\t42\nUid:\t1000\t1000\t1000\t1000\n")
 	writeProcEntry(t, root, 100, "cmdline", "/usr/bin/curl\x00https://example.com\x00")
 	writeProcEntry(t, root, 100, "cgroup", "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod12345678_1234_1234_1234_123456789abc.slice/cri-containerd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.scope\n")
+	writeProcSymlink(t, root, 100, "exe", "/usr/bin/curl")
 	writeProcEntry(t, root, 42, "status", "Name:\tbash\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
 
 	cache := NewCache(root, time.Minute)
@@ -37,6 +38,9 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	}
 	if len(metadata.Cmdline) != 2 || metadata.Cmdline[0] != "/usr/bin/curl" {
 		t.Fatalf("Cmdline = %v, want curl command line", metadata.Cmdline)
+	}
+	if metadata.Exe != "/usr/bin/curl" {
+		t.Fatalf("Exe = %q, want /usr/bin/curl", metadata.Exe)
 	}
 	if metadata.ParentComm != "bash" {
 		t.Fatalf("ParentComm = %q, want bash", metadata.ParentComm)
@@ -104,5 +108,17 @@ func writeProcEntry(t *testing.T, root string, pid uint32, name, content string)
 	}
 	if err := os.WriteFile(filepath.Join(procDir, name), []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func writeProcSymlink(t *testing.T, root string, pid uint32, name, target string) {
+	t.Helper()
+
+	procDir := filepath.Join(root, strconv.Itoa(int(pid)))
+	if err := os.MkdirAll(procDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", procDir, err)
+	}
+	if err := os.Symlink(target, filepath.Join(procDir, name)); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", name, target, err)
 	}
 }

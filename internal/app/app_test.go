@@ -114,3 +114,66 @@ func TestAppendSocketFieldsSupportsConnectionEvents(t *testing.T) {
 		t.Fatalf("fields = %#v, want %#v", fields, want)
 	}
 }
+
+func TestResolveExecutablePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		event   ebpfmonitor.Event
+		process processinfo.Metadata
+		want    string
+	}{
+		{
+			name:  "exec event prefers filename",
+			event: ebpfmonitor.Event{Kind: ebpfmonitor.EventExec, PID: 100, Filename: "/usr/bin/new"},
+			process: processinfo.Metadata{
+				Exe:     "/usr/bin/old",
+				Cmdline: []string{"/usr/bin/fallback"},
+			},
+			want: "/usr/bin/new",
+		},
+		{
+			name:  "non exec event prefers proc exe",
+			event: ebpfmonitor.Event{Kind: ebpfmonitor.EventDNS, PID: 100, Filename: "/usr/bin/ignored"},
+			process: processinfo.Metadata{
+				Exe:     "/usr/bin/curl",
+				Cmdline: []string{"/usr/bin/fallback"},
+			},
+			want: "/usr/bin/curl",
+		},
+		{
+			name:  "falls back to absolute cmdline",
+			event: ebpfmonitor.Event{Kind: ebpfmonitor.EventResolver, PID: 100},
+			process: processinfo.Metadata{
+				Cmdline: []string{"/usr/bin/dig", "@1.1.1.1"},
+			},
+			want: "/usr/bin/dig",
+		},
+		{
+			name:  "rejects relative cmdline fallback",
+			event: ebpfmonitor.Event{Kind: ebpfmonitor.EventBlocked, PID: 100},
+			process: processinfo.Metadata{
+				Cmdline: []string{"curl", "https://example.com"},
+			},
+			want: "",
+		},
+		{
+			name:    "pid zero stays empty",
+			event:   ebpfmonitor.Event{Kind: ebpfmonitor.EventConnection, PID: 0},
+			process: processinfo.Metadata{Exe: "/usr/bin/sshd"},
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := resolveExecutablePath(tt.event, tt.process); got != tt.want {
+				t.Fatalf("resolveExecutablePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
