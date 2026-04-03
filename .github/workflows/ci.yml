@@ -1,24 +1,20 @@
-name: release
+name: ci
 
 on:
+  pull_request:
   push:
-    tags:
-      - "v*"
-  release:
-    types:
-      - published
-  workflow_dispatch:
+    branches: ["main"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name || github.run_id }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  packages:
-    name: Build Release Packages
+  build-test:
+    name: Build and Test
     runs-on: ubuntu-latest
 
     steps:
@@ -29,8 +25,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
@@ -52,17 +46,8 @@ jobs:
       - name: Verify generated files are up to date
         run: git diff --exit-code -- internal/ebpf
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - name: Run tests
+        run: go test ./...
 
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build traceguard
+        run: go build ./cmd/traceguard
