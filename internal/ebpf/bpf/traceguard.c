@@ -90,7 +90,7 @@ struct endpoint6_cidr_key {
 };
 
 struct domain_key {
-	char domain[DOMAIN_KEY_SIZE];
+	__u8 domain[DOMAIN_KEY_SIZE];
 };
 
 struct settings {
@@ -363,8 +363,8 @@ static __always_inline void copy_socket_addr(__u8 dst[16], __u8 family, const vo
 
 static __always_inline void cache_socket_info(__u8 family, __u8 protocol, __u16 port, const void *addr, __u8 hook)
 {
-	struct socket_info_key key = {};
-	struct socket_info_value value = {};
+	struct socket_info_key key = {0};
+	struct socket_info_value value = {0};
 
 	key.pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 	key.port = port;
@@ -393,7 +393,7 @@ static __always_inline void set_event_local(struct event *event, __u8 family, __
 
 static __always_inline void apply_socket_info(struct event *event, __u8 family, __u8 protocol, __u16 port, const void *addr)
 {
-	struct socket_info_key key = {};
+	struct socket_info_key key = {0};
 	struct socket_info_value *value;
 
 	key.pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
@@ -421,8 +421,8 @@ static __always_inline void apply_socket_info(struct event *event, __u8 family, 
 
 static __always_inline void cache_listener_info(__u8 family, __u8 protocol, __u16 port, const void *addr)
 {
-	struct listener_info_key key = {};
-	struct listener_info_value value = {};
+	struct listener_info_key key = {0};
+	struct listener_info_value value = {0};
 
 	key.port = port;
 	key.family = family;
@@ -436,7 +436,7 @@ static __always_inline void cache_listener_info(__u8 family, __u8 protocol, __u1
 
 static __always_inline struct listener_info_value *lookup_listener_info(__u8 family, __u8 protocol, __u16 port, const void *addr)
 {
-	struct listener_info_key key = {};
+	struct listener_info_key key = {0};
 	struct listener_info_value *value;
 
 	key.port = port;
@@ -455,8 +455,8 @@ static __always_inline struct listener_info_value *lookup_listener_info(__u8 fam
 
 static __always_inline int should_emit_connection_event(const struct connection_event_params *params, __u32 pid)
 {
-	struct connection_dedupe_key key = {};
-	struct connection_dedupe_value value = {};
+	struct connection_dedupe_key key = {0};
+	struct connection_dedupe_value value = {0};
 	struct connection_dedupe_value *existing;
 	__u64 now = bpf_ktime_get_ns();
 
@@ -508,7 +508,7 @@ static __always_inline int emit_connection_event_identity(const struct connectio
 
 static __always_inline int emit_connection_event_current(const struct connection_event_params *params)
 {
-	char comm[16] = {};
+	char comm[16] = {0};
 	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 
 	bpf_get_current_comm(comm, sizeof(comm));
@@ -587,7 +587,7 @@ static __always_inline void init_endpoint6_cidr_key(struct endpoint6_cidr_key *k
 
 static __always_inline __u8 *lookup_endpoint4_cidr_rule(__u32 addr, __u16 port, __u8 transport)
 {
-	struct endpoint4_cidr_key key = {};
+	struct endpoint4_cidr_key key = {0};
 
 	init_endpoint4_cidr_key(&key, addr, port, transport);
 	return bpf_map_lookup_elem(&endpoint4_cidr_rules, &key);
@@ -595,7 +595,7 @@ static __always_inline __u8 *lookup_endpoint4_cidr_rule(__u32 addr, __u16 port, 
 
 static __always_inline __u8 *lookup_endpoint4_cidr_allow_rule(__u32 addr, __u16 port, __u8 transport)
 {
-	struct endpoint4_cidr_key key = {};
+	struct endpoint4_cidr_key key = {0};
 
 	init_endpoint4_cidr_key(&key, addr, port, transport);
 	return bpf_map_lookup_elem(&endpoint4_cidr_allow_rules, &key);
@@ -603,7 +603,7 @@ static __always_inline __u8 *lookup_endpoint4_cidr_allow_rule(__u32 addr, __u16 
 
 static __always_inline __u8 *lookup_endpoint6_cidr_rule(const __u8 addr[16], __u16 port, __u8 transport)
 {
-	struct endpoint6_cidr_key key = {};
+	struct endpoint6_cidr_key key = {0};
 
 	init_endpoint6_cidr_key(&key, addr, port, transport);
 	return bpf_map_lookup_elem(&endpoint6_cidr_rules, &key);
@@ -611,7 +611,7 @@ static __always_inline __u8 *lookup_endpoint6_cidr_rule(const __u8 addr[16], __u
 
 static __always_inline __u8 *lookup_endpoint6_cidr_allow_rule(const __u8 addr[16], __u16 port, __u8 transport)
 {
-	struct endpoint6_cidr_key key = {};
+	struct endpoint6_cidr_key key = {0};
 
 	init_endpoint6_cidr_key(&key, addr, port, transport);
 	return bpf_map_lookup_elem(&endpoint6_cidr_allow_rules, &key);
@@ -701,7 +701,7 @@ static __always_inline __u32 dns_event_kind(const struct domain_key *key)
 
 static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key)
 {
-	struct dns_header dns = {};
+	struct dns_header dns = {0};
 	__u16 flags;
 	__u16 qdcount;
 	int parsed;
@@ -781,7 +781,7 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 #pragma clang loop unroll(disable)
 	for (int i = 0; i < 6; i++) {
 		if (*nexthdr == IPPROTO_HOPOPTS || *nexthdr == IPPROTO_ROUTING || *nexthdr == IPPROTO_DSTOPTS) {
-			struct ipv6_ext_header ext = {};
+			struct ipv6_ext_header ext = {0};
 			__u32 header_len;
 
 			if (*transport_offset + sizeof(ext) > packet_len) {
@@ -801,7 +801,7 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 			continue;
 		}
 		if (*nexthdr == IPPROTO_AH) {
-			struct ipv6_ext_header ext = {};
+			struct ipv6_ext_header ext = {0};
 			__u32 header_len;
 
 			if (*transport_offset + sizeof(ext) > packet_len) {
@@ -821,7 +821,7 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 			continue;
 		}
 		if (*nexthdr == IPPROTO_FRAGMENT) {
-			struct ipv6_frag_header frag = {};
+			struct ipv6_frag_header frag = {0};
 			__u16 frag_off;
 
 			if (*transport_offset + sizeof(frag) > packet_len) {
@@ -853,7 +853,7 @@ static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u3
 	}
 
 	if (nexthdr == IPPROTO_UDP) {
-		struct udphdr udph = {};
+		struct udphdr udph = {0};
 
 		if (transport_offset + sizeof(udph) > packet_len) {
 			return 1;
@@ -867,7 +867,7 @@ static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u3
 		return 1;
 	}
 	if (nexthdr == IPPROTO_TCP) {
-		struct tcphdr tcph = {};
+		struct tcphdr tcph = {0};
 
 		if (transport_offset + sizeof(tcph) > packet_len) {
 			return 1;
@@ -943,7 +943,7 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block
 
 static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, __u8 block_all, __u8 *transport_out, __u8 *matched_rule)
 {
-	struct endpoint6_key key = {};
+	struct endpoint6_key key = {0};
 	__u8 *present;
 
 	__builtin_memcpy(key.addr, addr, sizeof(key.addr));
@@ -1015,10 +1015,10 @@ int trace_dns(struct __sk_buff *skb)
 
 	version = version_ihl >> 4;
 	if (version == 4) {
-		struct iphdr iph = {};
+		struct iphdr iph = {0};
 		__u32 header_len;
 		__u32 transport_offset;
-		struct domain_key key = {};
+		struct domain_key key = {0};
 		__u32 kind;
 
 		if (packet_len < sizeof(iph)) {
@@ -1035,7 +1035,7 @@ int trace_dns(struct __sk_buff *skb)
 		transport_offset = header_len;
 
 		if (iph.protocol == IPPROTO_UDP) {
-			struct udphdr udph = {};
+			struct udphdr udph = {0};
 			__u32 payload_offset;
 
 			if (transport_offset + sizeof(udph) > packet_len) {
@@ -1055,7 +1055,7 @@ int trace_dns(struct __sk_buff *skb)
 			return emit_dns4_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
-			struct tcphdr tcph = {};
+			struct tcphdr tcph = {0};
 			__u32 tcp_len;
 			__u32 payload_offset;
 
@@ -1084,11 +1084,11 @@ int trace_dns(struct __sk_buff *skb)
 	}
 
 	if (version == 6) {
-		struct ipv6hdr ip6h = {};
+		struct ipv6hdr ip6h = {0};
 		__u32 transport_offset = sizeof(ip6h);
 		__u8 nexthdr;
 		__u8 fragmented;
-		struct domain_key key = {};
+		struct domain_key key = {0};
 		__u32 kind;
 
 		if (packet_len < sizeof(ip6h)) {
@@ -1106,7 +1106,7 @@ int trace_dns(struct __sk_buff *skb)
 		}
 
 		if (nexthdr == IPPROTO_UDP) {
-			struct udphdr udph = {};
+			struct udphdr udph = {0};
 			__u32 payload_offset;
 
 			if (transport_offset + sizeof(udph) > packet_len) {
@@ -1126,7 +1126,7 @@ int trace_dns(struct __sk_buff *skb)
 			return emit_dns6_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
-			struct tcphdr tcph = {};
+			struct tcphdr tcph = {0};
 			__u32 tcp_len;
 			__u32 payload_offset;
 
@@ -1172,9 +1172,9 @@ int trace_connection_ingress(struct __sk_buff *skb)
 
 	version = version_ihl >> 4;
 	if (version == 4) {
-		struct iphdr iph = {};
-		struct connection_event_params params = {};
-		struct tcphdr tcph = {};
+		struct iphdr iph = {0};
+		struct connection_event_params params = {0};
+		struct tcphdr tcph = {0};
 		struct listener_info_value *listener;
 		__u32 header_len;
 		__u32 transport_offset;
@@ -1222,9 +1222,9 @@ int trace_connection_ingress(struct __sk_buff *skb)
 	}
 
 	if (version == 6) {
-		struct connection_event_params params = {};
-		struct ipv6hdr ip6h = {};
-		struct tcphdr tcph = {};
+		struct connection_event_params params = {0};
+		struct ipv6hdr ip6h = {0};
+		struct tcphdr tcph = {0};
 		struct listener_info_value *listener;
 		__u32 transport_offset = sizeof(ip6h);
 		__u8 nexthdr;
@@ -1273,7 +1273,7 @@ int trace_connection_ingress(struct __sk_buff *skb)
 SEC("cgroup/sendmsg4")
 int trace_sendmsg4(struct bpf_sock_addr *ctx)
 {
-	struct connection_event_params params = {};
+	struct connection_event_params params = {0};
 	struct bpf_sock *sk;
 	__u32 local_addr = 0;
 	__u32 user_ip4;
@@ -1312,9 +1312,9 @@ int trace_sendmsg4(struct bpf_sock_addr *ctx)
 SEC("cgroup/sendmsg6")
 int trace_sendmsg6(struct bpf_sock_addr *ctx)
 {
-	struct connection_event_params params = {};
+	struct connection_event_params params = {0};
 	__u8 addr[16];
-	__u8 local_addr[16] = {};
+	__u8 local_addr[16] = {0};
 	struct bpf_sock *sk;
 	__u32 protocol;
 	__u32 user_port;
@@ -1362,7 +1362,7 @@ int trace_sendmsg6(struct bpf_sock_addr *ctx)
 SEC("cgroup/connect4")
 int trace_connect4(struct bpf_sock_addr *ctx)
 {
-	struct connection_event_params params = {};
+	struct connection_event_params params = {0};
 	__u32 zero = 0;
 	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
 	struct bpf_sock *sk;
@@ -1415,7 +1415,7 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 SEC("cgroup/connect6")
 int trace_connect6(struct bpf_sock_addr *ctx)
 {
-	struct connection_event_params params = {};
+	struct connection_event_params params = {0};
 	__u32 zero = 0;
 	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
 	struct bpf_sock *sk;
@@ -1429,7 +1429,7 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	__u8 transport;
 	__u8 matched_rule;
 	__u8 addr[16];
-	__u8 local_addr[16] = {};
+	__u8 local_addr[16] = {0};
 	__u8 block_all = cfg && cfg->block_all_resolvers;
 	__u16 local_port = 0;
 	int have_local;
@@ -1483,7 +1483,7 @@ int trace_recvmsg4(struct bpf_sock_addr *ctx)
 	(void)ctx;
 	return 1;
 #else
-	struct connection_event_params params = {};
+	struct connection_event_params params = {0};
 	struct bpf_sock *sk;
 	__u32 local_addr = 0;
 	__u32 msg_src_ip4;
@@ -1524,9 +1524,9 @@ int trace_recvmsg6(struct bpf_sock_addr *ctx)
 	(void)ctx;
 	return 1;
 #else
-	struct connection_event_params params = {};
-	__u8 addr[16] = {};
-	__u8 local_addr[16] = {};
+	struct connection_event_params params = {0};
+	__u8 addr[16] = {0};
+	__u8 local_addr[16] = {0};
 	struct bpf_sock *sk;
 	__u32 protocol;
 	__u32 msg_src_ip6_0;

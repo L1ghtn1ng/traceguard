@@ -33,7 +33,7 @@ type traceguardRecvmsgCompatConnectionDedupeValue struct {
 
 type traceguardRecvmsgCompatDomainKey struct {
 	_      structs.HostLayout
-	Domain [256]int8
+	Domain [256]uint8
 }
 
 type traceguardRecvmsgCompatEndpoint4CidrKey struct {

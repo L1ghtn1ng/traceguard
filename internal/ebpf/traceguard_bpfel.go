@@ -33,7 +33,7 @@ type traceguardConnectionDedupeValue struct {
 
 type traceguardDomainKey struct {
 	_      structs.HostLayout
-	Domain [256]int8
+	Domain [256]uint8
 }
 
 type traceguardEndpoint4CidrKey struct {

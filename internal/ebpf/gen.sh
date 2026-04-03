@@ -20,7 +20,7 @@ do
   fi
 done
 
-cflags=("-O2" "-g" "-Wall" "-Werror")
+cflags=("-std=gnu2x" "-O2" "-g" "-Wall" "-Werror")
 for dir in "${include_dirs[@]}"; do
   cflags+=("-I${dir}")
 done

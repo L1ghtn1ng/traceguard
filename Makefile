@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: generate test test-ebpf build snapshot tidy
+.PHONY: generate test test-ebpf test-ebpf-c build snapshot tidy
 
 generate:
 	$(GO) generate ./internal/ebpf
@@ -10,6 +10,9 @@ test:
 
 test-ebpf:
 	$(GO) test -tags ebpfintegration ./internal/ebpf
+
+test-ebpf-c:
+	./internal/ebpf/check.sh
 
 build: generate
 	$(GO) build ./cmd/traceguard
