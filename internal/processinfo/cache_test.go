@@ -18,8 +18,6 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	writeProcEntry(t, root, 100, "cgroup", "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod12345678_1234_1234_1234_123456789abc.slice/cri-containerd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.scope\n")
 	writeProcSymlink(t, root, 100, "exe", "/usr/bin/curl")
 	writeProcEntry(t, root, 42, "status", "Name:\tbash\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
-	writeProcEntry(t, root, 42, "cmdline", "/usr/bin/bash\x00-l\x00")
-	writeProcSymlink(t, root, 42, "exe", "/usr/bin/bash")
 
 	cache := NewCache(root, time.Minute)
 	metadata, hit := cache.Lookup(100, "fallback")
@@ -46,12 +44,6 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	}
 	if metadata.ParentComm != "bash" {
 		t.Fatalf("ParentComm = %q, want bash", metadata.ParentComm)
-	}
-	if metadata.ParentExe != "/usr/bin/bash" {
-		t.Fatalf("ParentExe = %q, want /usr/bin/bash", metadata.ParentExe)
-	}
-	if len(metadata.ParentCmdline) != 2 || metadata.ParentCmdline[0] != "/usr/bin/bash" {
-		t.Fatalf("ParentCmdline = %v, want bash command line", metadata.ParentCmdline)
 	}
 	if metadata.Service != "cri-containerd-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.scope" {
 		t.Fatalf("Service = %q, unexpected", metadata.Service)

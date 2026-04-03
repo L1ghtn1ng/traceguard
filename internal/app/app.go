@@ -215,6 +215,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				"uid":            process.UID,
 				"ppid":           process.PPID,
 				"parent_program": process.ParentComm,
+				"parent_exe":     process.ParentExe,
 			}
 			appendSocketFields(fields, event, process)
 			if process.CgroupPath != "" {

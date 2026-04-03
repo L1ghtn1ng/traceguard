@@ -15,21 +15,20 @@ import (
 )
 
 type Metadata struct {
-	PID           uint32
-	Comm          string
-	Source        string
-	Exe           string
-	Cmdline       []string
-	UID           uint32
-	PPID          uint32
-	ParentComm    string
-	ParentExe     string
-	ParentCmdline []string
-	CgroupPath    string
-	Service       string
-	Container     string
-	PodUID        string
-	Runtime       string
+	PID        uint32
+	Comm       string
+	Source     string
+	Exe        string
+	Cmdline    []string
+	UID        uint32
+	PPID       uint32
+	ParentComm string
+	ParentExe  string
+	CgroupPath string
+	Service    string
+	Container  string
+	PodUID     string
+	Runtime    string
 }
 
 const (
@@ -121,9 +120,6 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 		metadata.ParentComm = parentStatus.Name
 		if exe, err := os.Readlink(c.procPath(metadata.PPID, "exe")); err == nil {
 			metadata.ParentExe = exe
-		}
-		if cmdline, err := os.ReadFile(c.procPath(metadata.PPID, "cmdline")); err == nil {
-			metadata.ParentCmdline = parseCmdline(cmdline)
 		}
 	}
 
