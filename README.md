@@ -39,7 +39,7 @@ The user-space service:
 - can export structured events to an HTTPS endpoint in batches
 - can persist failed export batches to disk for later replay
 - can enrich pod-scoped events from the Kubernetes API using the existing `pod_uid` signal
-- can emit either text logs or newline-delimited JSON records
+- emits newline-delimited JSON records by default and can also emit text logs
 - exports `/health` and `/metrics` when a metrics address is configured
 - uses bounded parsing and fixed-size buffers throughout the BPF program
 - avoids shelling out or executing fetched content
@@ -248,6 +248,8 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_KUBERNETES_CA_PATH`
 - `TRACEGUARD_KUBERNETES_NODE_NAME`
 - `TRACEGUARD_KUBERNETES_POLL_INTERVAL`
+
+By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output.
 
 Example output:
 

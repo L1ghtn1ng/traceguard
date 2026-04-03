@@ -24,6 +24,21 @@
 #define TRANSPORT_DOH 4
 #define FAMILY_IPV4 4
 #define FAMILY_IPV6 6
+#define SOCKET_PROTOCOL_UDP 1
+#define SOCKET_PROTOCOL_TCP 2
+#define ATTRIBUTION_KERNEL_SKB 1
+#define ATTRIBUTION_KERNEL_SENDMSG 2
+#define ATTRIBUTION_KERNEL_CONNECT 3
+#define SOCKET_HOOK_CGROUP_SKB 1
+#define SOCKET_HOOK_CGROUP_SENDMSG4 2
+#define SOCKET_HOOK_CGROUP_SENDMSG6 3
+#define SOCKET_HOOK_CGROUP_CONNECT4 4
+#define SOCKET_HOOK_CGROUP_CONNECT6 5
+#define SOCKET_INFO_MAX_ENTRIES 16384
+
+#ifndef TRACEGUARD_DNS_NO_CURRENT_COMM
+#define TRACEGUARD_DNS_NO_CURRENT_COMM 0
+#endif
 
 struct endpoint4_key {
 	__u32 addr;
@@ -60,6 +75,22 @@ struct settings {
 	__u8 _pad[5];
 };
 
+struct socket_info_key {
+	__u32 pid;
+	__u16 port;
+	__u8 family;
+	__u8 protocol;
+	__u8 addr[16];
+};
+
+struct socket_info_value {
+	char comm[16];
+	__u8 hook;
+	__u8 family;
+	__u8 protocol;
+	__u8 _pad;
+};
+
 struct event {
 	__u64 timestamp_ns;
 	__u32 kind;
@@ -69,8 +100,11 @@ struct event {
 	char filename[MAX_FILENAME_LEN];
 	__u8 transport;
 	__u8 family;
+	__u8 socket_protocol;
+	__u8 attribution;
+	__u8 socket_hook;
+	__u8 _pad0;
 	__u16 port;
-	__u8 _pad[3];
 	__u8 addr[16];
 };
 
@@ -129,6 +163,13 @@ struct {
 	__type(key, __u32);
 	__type(value, struct settings);
 } settings SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, SOCKET_INFO_MAX_ENTRIES);
+	__type(key, struct socket_info_key);
+	__type(value, struct socket_info_value);
+} socket_info SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -190,13 +231,87 @@ struct {
 	__type(value, __u8);
 } endpoint6_cidr_allow_rules SEC(".maps");
 
-static __always_inline void init_event(struct event *event, __u32 kind, __u8 transport)
+static __always_inline void init_event_base(struct event *event, __u32 kind, __u8 transport)
 {
 	event->timestamp_ns = bpf_ktime_get_ns();
 	event->kind = kind;
 	event->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 	event->transport = transport;
+}
+
+static __always_inline void init_event(struct event *event, __u32 kind, __u8 transport)
+{
+	init_event_base(event, kind, transport);
 	bpf_get_current_comm(event->comm, sizeof(event->comm));
+}
+
+static __always_inline void set_event_socket_meta(struct event *event, __u8 family, __u8 protocol, __u8 hook, __u8 attribution)
+{
+	event->family = family;
+	event->socket_protocol = protocol;
+	event->socket_hook = hook;
+	event->attribution = attribution;
+}
+
+static __always_inline void copy_socket_addr(__u8 dst[16], __u8 family, const void *addr)
+{
+	__builtin_memset(dst, 0, 16);
+	if (!addr) {
+		return;
+	}
+	if (family == FAMILY_IPV4) {
+		__builtin_memcpy(dst, addr, 4);
+		return;
+	}
+	if (family == FAMILY_IPV6) {
+		__builtin_memcpy(dst, addr, 16);
+	}
+}
+
+static __always_inline void cache_socket_info(__u8 family, __u8 protocol, __u16 port, const void *addr, __u8 hook)
+{
+	struct socket_info_key key = {};
+	struct socket_info_value value = {};
+
+	key.pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	key.port = port;
+	key.family = family;
+	key.protocol = protocol;
+	copy_socket_addr(key.addr, family, addr);
+
+	value.hook = hook;
+	value.family = family;
+	value.protocol = protocol;
+	bpf_get_current_comm(value.comm, sizeof(value.comm));
+	bpf_map_update_elem(&socket_info, &key, &value, BPF_ANY);
+}
+
+static __always_inline void apply_socket_info(struct event *event, __u8 family, __u8 protocol, __u16 port, const void *addr)
+{
+	struct socket_info_key key = {};
+	struct socket_info_value *value;
+
+	key.pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+	key.port = port;
+	key.family = family;
+	key.protocol = protocol;
+	copy_socket_addr(key.addr, family, addr);
+
+	set_event_socket_meta(event, family, protocol, SOCKET_HOOK_CGROUP_SKB, ATTRIBUTION_KERNEL_SKB);
+
+	value = bpf_map_lookup_elem(&socket_info, &key);
+	if (value) {
+		__builtin_memcpy(event->comm, value->comm, sizeof(event->comm));
+		event->socket_hook = value->hook;
+		event->attribution = value->hook == SOCKET_HOOK_CGROUP_CONNECT4 || value->hook == SOCKET_HOOK_CGROUP_CONNECT6
+			? ATTRIBUTION_KERNEL_CONNECT
+			: ATTRIBUTION_KERNEL_SENDMSG;
+		return;
+	}
+
+#if !TRACEGUARD_DNS_NO_CURRENT_COMM
+	bpf_get_current_comm(event->comm, sizeof(event->comm));
+#endif
 }
 
 static __always_inline int is_block_enabled(void)
@@ -300,7 +415,7 @@ static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __
 	return -1;
 }
 
-static __always_inline int emit_dns_event(const struct domain_key *key, __u32 kind, __u8 transport)
+static __always_inline int emit_dns4_event(const struct domain_key *key, __u32 kind, __u8 transport, __u8 protocol, __u32 addr)
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
 
@@ -309,55 +424,78 @@ static __always_inline int emit_dns_event(const struct domain_key *key, __u32 ki
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event(event, kind, transport);
+	init_event_base(event, kind, transport);
+	apply_socket_info(event, FAMILY_IPV4, protocol, DNS_PORT, &addr);
+	__builtin_memcpy(event->addr, &addr, 4);
 	__builtin_memcpy(event->domain, key->domain, sizeof(event->domain));
 	bpf_ringbuf_submit(event, 0);
 	return kind == EVENT_BLOCKED ? 0 : 1;
 }
 
-static __always_inline int handle_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, __u8 transport)
+static __always_inline int emit_dns6_event(const struct domain_key *key, __u32 kind, __u8 transport, __u8 protocol, const __u8 addr[16])
+{
+	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+
+	if (!event) {
+		return kind == EVENT_BLOCKED ? 0 : 1;
+	}
+
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event_base(event, kind, transport);
+	apply_socket_info(event, FAMILY_IPV6, protocol, DNS_PORT, addr);
+	__builtin_memcpy(event->addr, addr, sizeof(event->addr));
+	__builtin_memcpy(event->domain, key->domain, sizeof(event->domain));
+	bpf_ringbuf_submit(event, 0);
+	return kind == EVENT_BLOCKED ? 0 : 1;
+}
+
+static __always_inline __u32 dns_event_kind(const struct domain_key *key)
+{
+	__u8 *present;
+
+	present = bpf_map_lookup_elem(&allowlist, key);
+	if (present) {
+		return EVENT_DNS;
+	}
+	if (is_block_enabled() && block_all_domains_enabled()) {
+		return EVENT_BLOCKED;
+	}
+	present = bpf_map_lookup_elem(&blocklist, key);
+	if (present && is_block_enabled()) {
+		return EVENT_BLOCKED;
+	}
+	return EVENT_DNS;
+}
+
+static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key)
 {
 	struct dns_header dns = {};
-	struct domain_key key = {};
 	__u16 flags;
 	__u16 qdcount;
 	int parsed;
-	__u8 *present;
 
 	if (payload_offset + sizeof(dns) > packet_len) {
-		return 1;
+		return -1;
 	}
 	if (bpf_skb_load_bytes(skb, payload_offset, &dns, sizeof(dns)) < 0) {
-		return 1;
+		return -1;
 	}
 
 	flags = bpf_ntohs(dns.flags);
 	qdcount = bpf_ntohs(dns.qdcount);
 	if ((flags & 0x8000) != 0 || qdcount == 0) {
-		return 1;
+		return -1;
 	}
 
-	parsed = load_qname_key(skb, payload_offset + sizeof(dns), packet_len, &key);
+	parsed = load_qname_key(skb, payload_offset + sizeof(dns), packet_len, key);
 	if (parsed < 0) {
-		return 1;
+		return -1;
 	}
 
-	present = bpf_map_lookup_elem(&allowlist, &key);
-	if (present) {
-		return emit_dns_event(&key, EVENT_DNS, transport);
-	}
-	if (is_block_enabled() && block_all_domains_enabled()) {
-		return emit_dns_event(&key, EVENT_BLOCKED, transport);
-	}
-	present = bpf_map_lookup_elem(&blocklist, &key);
-	if (present && is_block_enabled()) {
-		return emit_dns_event(&key, EVENT_BLOCKED, transport);
-	}
-
-	return emit_dns_event(&key, EVENT_DNS, transport);
+	return 0;
 }
 
-static __always_inline int handle_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len)
+static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key)
 {
 	__be16 dns_len_be;
 	__u16 dns_len;
@@ -385,10 +523,10 @@ static __always_inline int handle_tcp_dns_payload(struct __sk_buff *skb, __u32 p
 		return is_block_enabled() ? 0 : 1;
 	}
 
-	return handle_dns_payload(skb, dns_offset, dns_end, TRANSPORT_TCP);
+	return parse_dns_payload(skb, dns_offset, dns_end, key);
 }
 
-static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len)
+static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
 
@@ -398,6 +536,7 @@ static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 
 
 	__builtin_memset(event, 0, sizeof(*event));
 	init_event(event, kind, transport);
+	set_event_socket_meta(event, family, SOCKET_PROTOCOL_TCP, hook, ATTRIBUTION_KERNEL_CONNECT);
 	event->family = family;
 	event->port = port;
 	if (addr && addr_len <= sizeof(event->addr)) {
@@ -650,6 +789,8 @@ int trace_dns(struct __sk_buff *skb)
 		struct iphdr iph = {};
 		__u32 header_len;
 		__u32 transport_offset;
+		struct domain_key key = {};
+		__u32 kind;
 
 		if (packet_len < sizeof(iph)) {
 			return 1;
@@ -678,7 +819,11 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			return handle_dns_payload(skb, payload_offset, packet_len, TRANSPORT_UDP);
+			if (parse_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+				return 1;
+			}
+			kind = dns_event_kind(&key);
+			return emit_dns4_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
 			struct tcphdr tcph = {};
@@ -700,7 +845,11 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			return handle_tcp_dns_payload(skb, payload_offset, packet_len);
+			if (parse_tcp_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+				return is_block_enabled() ? 0 : 1;
+			}
+			kind = dns_event_kind(&key);
+			return emit_dns4_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, iph.daddr);
 		}
 		return 1;
 	}
@@ -710,6 +859,8 @@ int trace_dns(struct __sk_buff *skb)
 		__u32 transport_offset = sizeof(ip6h);
 		__u8 nexthdr;
 		__u8 fragmented;
+		struct domain_key key = {};
+		__u32 kind;
 
 		if (packet_len < sizeof(ip6h)) {
 			return 1;
@@ -739,7 +890,11 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			return handle_dns_payload(skb, payload_offset, packet_len, TRANSPORT_UDP);
+			if (parse_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+				return 1;
+			}
+			kind = dns_event_kind(&key);
+			return emit_dns6_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
 			struct tcphdr tcph = {};
@@ -761,10 +916,52 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			return handle_tcp_dns_payload(skb, payload_offset, packet_len);
+			if (parse_tcp_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+				return is_block_enabled() ? 0 : 1;
+			}
+			kind = dns_event_kind(&key);
+			return emit_dns6_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, ip6h.daddr.s6_addr);
 		}
 	}
 
+	return 1;
+}
+
+SEC("cgroup/sendmsg4")
+int trace_sendmsg4(struct bpf_sock_addr *ctx)
+{
+	__u16 port;
+
+	if (ctx->protocol != IPPROTO_UDP) {
+		return 1;
+	}
+
+	port = bpf_ntohs((__u16)ctx->user_port);
+	if (port != DNS_PORT) {
+		return 1;
+	}
+
+	cache_socket_info(FAMILY_IPV4, SOCKET_PROTOCOL_UDP, port, &ctx->user_ip4, SOCKET_HOOK_CGROUP_SENDMSG4);
+	return 1;
+}
+
+SEC("cgroup/sendmsg6")
+int trace_sendmsg6(struct bpf_sock_addr *ctx)
+{
+	__u16 port;
+	__u8 addr[16];
+
+	if (ctx->protocol != IPPROTO_UDP) {
+		return 1;
+	}
+
+	port = bpf_ntohs((__u16)ctx->user_port);
+	if (port != DNS_PORT) {
+		return 1;
+	}
+
+	__builtin_memcpy(addr, ctx->user_ip6, sizeof(addr));
+	cache_socket_info(FAMILY_IPV6, SOCKET_PROTOCOL_UDP, port, addr, SOCKET_HOOK_CGROUP_SENDMSG6);
 	return 1;
 }
 
@@ -783,15 +980,18 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	}
 
 	port = bpf_ntohs((__u16)ctx->user_port);
+	if (port == DNS_PORT) {
+		cache_socket_info(FAMILY_IPV4, SOCKET_PROTOCOL_TCP, port, &ctx->user_ip4, SOCKET_HOOK_CGROUP_CONNECT4);
+	}
 	if (!classify_endpoint4(ctx->user_ip4, port, block_all, &transport, &matched_rule)) {
 		return 1;
 	}
 
 	if (cfg && cfg->block_enabled && matched_rule) {
-		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &ctx->user_ip4, sizeof(ctx->user_ip4));
+		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &ctx->user_ip4, sizeof(ctx->user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
 	}
 
-	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV4, port, &ctx->user_ip4, sizeof(ctx->user_ip4));
+	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV4, port, &ctx->user_ip4, sizeof(ctx->user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
 	return 1;
 }
 
@@ -812,15 +1012,18 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 
 	port = bpf_ntohs((__u16)ctx->user_port);
 	__builtin_memcpy(addr, ctx->user_ip6, sizeof(addr));
+	if (port == DNS_PORT) {
+		cache_socket_info(FAMILY_IPV6, SOCKET_PROTOCOL_TCP, port, addr, SOCKET_HOOK_CGROUP_CONNECT6);
+	}
 	if (!classify_endpoint6(addr, port, block_all, &transport, &matched_rule)) {
 		return 1;
 	}
 
 	if (cfg && cfg->block_enabled && matched_rule) {
-		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV6, port, addr, sizeof(addr));
+		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
 	}
 
-	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV6, port, addr, sizeof(addr));
+	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
 	return 1;
 }
 

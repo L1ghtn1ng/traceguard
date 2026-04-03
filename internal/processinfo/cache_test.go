@@ -26,6 +26,9 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	if metadata.Comm != "curl" {
 		t.Fatalf("Comm = %q, want curl", metadata.Comm)
 	}
+	if metadata.Source != SourceProc {
+		t.Fatalf("Source = %q, want %q", metadata.Source, SourceProc)
+	}
 	if metadata.PPID != 42 {
 		t.Fatalf("PPID = %d, want 42", metadata.PPID)
 	}
@@ -54,6 +57,22 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	_, hit = cache.Lookup(100, "fallback")
 	if !hit {
 		t.Fatal("second lookup did not hit cache")
+	}
+}
+
+func TestCacheLookupKeepsFallbackWithoutStatusName(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeProcEntry(t, root, 100, "status", "PPid:\t42\nUid:\t1000\t1000\t1000\t1000\n")
+
+	cache := NewCache(root, time.Minute)
+	metadata, _ := cache.Lookup(100, "fallback")
+	if metadata.Comm != "fallback" {
+		t.Fatalf("Comm = %q, want fallback", metadata.Comm)
+	}
+	if metadata.Source != SourceFallback {
+		t.Fatalf("Source = %q, want %q", metadata.Source, SourceFallback)
 	}
 }
 

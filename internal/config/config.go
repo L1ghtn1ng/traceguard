@@ -17,7 +17,7 @@ const (
 	defaultRefreshInterval = 6 * time.Hour
 	defaultCgroupPath      = "/sys/fs/cgroup"
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
-	defaultLogFormat       = "text"
+	defaultLogFormat       = "json"
 	defaultProcessCacheTTL = 10 * time.Minute
 	defaultExportBatchSize = 50
 	defaultExportFlush     = 5 * time.Second

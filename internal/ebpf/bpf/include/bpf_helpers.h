@@ -13,6 +13,7 @@
 #endif
 
 static void *(*const bpf_map_lookup_elem)(const void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
+static long (*const bpf_map_update_elem)(const void *map, const void *key, const void *value, __u64 flags) = (void *)BPF_FUNC_map_update_elem;
 static long (*const bpf_get_current_comm)(void *buf, __u32 size_of_buf) = (void *)BPF_FUNC_get_current_comm;
 static __u64 (*const bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;

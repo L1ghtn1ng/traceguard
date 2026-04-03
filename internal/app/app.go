@@ -210,6 +210,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				"parent_program": process.ParentComm,
 				"parent_exe":     process.ParentExe,
 			}
+			appendSocketFields(fields, event, process)
 			if process.CgroupPath != "" {
 				fields["cgroup"] = process.CgroupPath
 			}
@@ -344,6 +345,40 @@ func resolverHost(index *atomic.Pointer[map[string]string], event ebpf.Event) st
 
 func resolverIndexKey(transport, address string, port uint16) string {
 	return fmt.Sprintf("%s|%s|%d", transport, address, port)
+}
+
+func appendSocketFields(fields map[string]any, event ebpf.Event, process processinfo.Metadata) {
+	if !isSocketAwareEvent(event.Kind) {
+		return
+	}
+	if attribution := eventAttribution(event, process); attribution != "" {
+		fields["attribution"] = attribution
+	}
+	if event.SocketHook != "" {
+		fields["socket_hook"] = event.SocketHook
+	}
+	if event.SocketFamily != "" {
+		fields["socket_family"] = event.SocketFamily
+	}
+	if event.SocketProtocol != "" {
+		fields["socket_protocol"] = event.SocketProtocol
+	}
+}
+
+func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {
+	if isSocketAwareEvent(event.Kind) && process.Source == processinfo.SourceProc {
+		return processinfo.SourceProc
+	}
+	return event.Attribution
+}
+
+func isSocketAwareEvent(kind uint32) bool {
+	switch kind {
+	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked:
+		return true
+	default:
+		return false
+	}
 }
 
 func domainDecision(policy *atomic.Pointer[blocklist.Policy], domain string) blocklist.Decision {

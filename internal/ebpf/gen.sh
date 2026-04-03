@@ -33,3 +33,13 @@ go run github.com/cilium/ebpf/cmd/bpf2go \
   "$script_dir/bpf/traceguard.c" \
   -- \
   -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardDNSCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
+  -target bpfel

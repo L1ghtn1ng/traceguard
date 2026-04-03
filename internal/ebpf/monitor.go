@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
@@ -71,9 +72,62 @@ type ResolverCIDR struct {
 }
 
 type Monitor struct {
-	objects traceguardObjects
+	objects monitorObjects
 	links   []link.Link
 	reader  *ringbuf.Reader
+}
+
+type monitorObjects struct {
+	TraceDns      *ebpf.Program `ebpf:"trace_dns"`
+	TraceSendmsg4 *ebpf.Program `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6 *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceConnect4 *ebpf.Program `ebpf:"trace_connect4"`
+	TraceConnect6 *ebpf.Program `ebpf:"trace_connect6"`
+	TraceExecve   *ebpf.Program `ebpf:"trace_execve"`
+	TraceExecveat *ebpf.Program `ebpf:"trace_execveat"`
+
+	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	Blocklist               *ebpf.Map `ebpf:"blocklist"`
+	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
+	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
+	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
+	Endpoint4Rules          *ebpf.Map `ebpf:"endpoint4_rules"`
+	Endpoint6AllowRules     *ebpf.Map `ebpf:"endpoint6_allow_rules"`
+	Endpoint6CidrAllowRules *ebpf.Map `ebpf:"endpoint6_cidr_allow_rules"`
+	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
+	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
+	Events                  *ebpf.Map `ebpf:"events"`
+	Settings                *ebpf.Map `ebpf:"settings"`
+}
+
+func (o *monitorObjects) Close() error {
+	var errs []error
+	for _, closer := range []interface{ Close() error }{
+		o.TraceDns,
+		o.TraceSendmsg4,
+		o.TraceSendmsg6,
+		o.TraceConnect4,
+		o.TraceConnect6,
+		o.TraceExecve,
+		o.TraceExecveat,
+		o.Allowlist,
+		o.Blocklist,
+		o.Endpoint4AllowRules,
+		o.Endpoint4CidrAllowRules,
+		o.Endpoint4CidrRules,
+		o.Endpoint4Rules,
+		o.Endpoint6AllowRules,
+		o.Endpoint6CidrAllowRules,
+		o.Endpoint6CidrRules,
+		o.Endpoint6Rules,
+		o.Events,
+		o.Settings,
+	} {
+		if closer != nil {
+			errs = append(errs, closer.Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func NewMonitor(cgroupPath string) (*Monitor, error) {
@@ -81,15 +135,10 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		return nil, fmt.Errorf("raise memlock rlimit: %w", err)
 	}
 
-	var objects traceguardObjects
-	loadOptions := &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel:     ebpf.LogLevelBranch,
-			LogSizeStart: 1 << 20,
-		},
-	}
-	if err := loadTraceguardObjects(&objects, loadOptions); err != nil {
-		return nil, fmt.Errorf("load eBPF objects: %w", err)
+	loadOptions := newCollectionOptions()
+	objects, err := loadMonitorObjects(loadOptions)
+	if err != nil {
+		return nil, err
 	}
 
 	reader, err := ringbuf.NewReader(objects.Events)
@@ -112,12 +161,45 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		return nil, fmt.Errorf("attach DNS cgroup egress program: %w", err)
 	}
 
+	sendmsg4Link, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cgroupPath,
+		Attach:  ebpf.AttachCGroupUDP4Sendmsg,
+		Program: objects.TraceSendmsg4,
+	})
+	if err != nil {
+		cgroupLink.Close()
+		reader.Close()
+		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach sendmsg4 program: %v", ErrInsufficientPrivileges, err)
+		}
+		return nil, fmt.Errorf("attach sendmsg4 program: %w", err)
+	}
+
+	sendmsg6Link, err := link.AttachCgroup(link.CgroupOptions{
+		Path:    cgroupPath,
+		Attach:  ebpf.AttachCGroupUDP6Sendmsg,
+		Program: objects.TraceSendmsg6,
+	})
+	if err != nil {
+		sendmsg4Link.Close()
+		cgroupLink.Close()
+		reader.Close()
+		objects.Close()
+		if isPermissionDenied(err) {
+			return nil, fmt.Errorf("%w: attach sendmsg6 program: %v", ErrInsufficientPrivileges, err)
+		}
+		return nil, fmt.Errorf("attach sendmsg6 program: %w", err)
+	}
+
 	connect4Link, err := link.AttachCgroup(link.CgroupOptions{
 		Path:    cgroupPath,
 		Attach:  ebpf.AttachCGroupInet4Connect,
 		Program: objects.TraceConnect4,
 	})
 	if err != nil {
+		sendmsg6Link.Close()
+		sendmsg4Link.Close()
 		cgroupLink.Close()
 		reader.Close()
 		objects.Close()
@@ -133,6 +215,8 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		Program: objects.TraceConnect6,
 	})
 	if err != nil {
+		sendmsg6Link.Close()
+		sendmsg4Link.Close()
 		connect4Link.Close()
 		cgroupLink.Close()
 		reader.Close()
@@ -145,6 +229,8 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 
 	execveLink, err := link.Tracepoint("syscalls", "sys_enter_execve", objects.TraceExecve, nil)
 	if err != nil {
+		sendmsg6Link.Close()
+		sendmsg4Link.Close()
 		connect6Link.Close()
 		connect4Link.Close()
 		cgroupLink.Close()
@@ -158,6 +244,8 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 
 	execveatLink, err := link.Tracepoint("syscalls", "sys_enter_execveat", objects.TraceExecveat, nil)
 	if err != nil {
+		sendmsg6Link.Close()
+		sendmsg4Link.Close()
 		execveLink.Close()
 		connect6Link.Close()
 		connect4Link.Close()
@@ -172,9 +260,105 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 
 	return &Monitor{
 		objects: objects,
-		links:   []link.Link{cgroupLink, connect4Link, connect6Link, execveLink, execveatLink},
+		links:   []link.Link{cgroupLink, sendmsg4Link, sendmsg6Link, connect4Link, connect6Link, execveLink, execveatLink},
 		reader:  reader,
 	}, nil
+}
+
+func newCollectionOptions() *ebpf.CollectionOptions {
+	opts := &ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel:     ebpf.LogLevelBranch,
+			LogSizeStart: 1 << 20,
+		},
+	}
+
+	kernelTypes, err := btf.LoadKernelSpec()
+	if err == nil {
+		opts.Programs.KernelTypes = kernelTypes
+	}
+
+	return opts
+}
+
+func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, error) {
+	release, _ := kernelRelease()
+	if isLinux612x(release) {
+		objects, err := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
+		if err != nil {
+			return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
+		}
+		return objects, nil
+	}
+
+	objects, err := loadMonitorVariant(loadTraceguard, loadOptions)
+	if err == nil {
+		return objects, nil
+	}
+	if !isDNSHelperVerifierError(err) {
+		return monitorObjects{}, fmt.Errorf("load eBPF objects: %w", err)
+	}
+
+	compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
+	if compatErr != nil {
+		return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+	}
+	return compatObjects, nil
+}
+
+func loadMonitorVariant(loadSpec func() (*ebpf.CollectionSpec, error), loadOptions *ebpf.CollectionOptions) (monitorObjects, error) {
+	var objects monitorObjects
+
+	spec, err := loadSpec()
+	if err != nil {
+		return monitorObjects{}, err
+	}
+	if err := spec.LoadAndAssign(&objects, loadOptions); err != nil {
+		_ = objects.Close()
+		return monitorObjects{}, err
+	}
+	return objects, nil
+}
+
+func kernelRelease() (string, error) {
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	for _, b := range uts.Release {
+		if b == 0 {
+			break
+		}
+		builder.WriteByte(byte(b))
+	}
+	return builder.String(), nil
+}
+
+func isLinux612x(release string) bool {
+	major, minor, ok := parseKernelRelease(release)
+	return ok && major == 6 && minor == 12
+}
+
+func parseKernelRelease(release string) (int, int, bool) {
+	release = strings.TrimSpace(release)
+	if release == "" {
+		return 0, 0, false
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
+}
+
+func isDNSHelperVerifierError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "program of this type cannot use helper bpf_get_current_comm#16") &&
+		strings.Contains(msg, "trace_dns")
 }
 
 func isPermissionDenied(err error) bool {

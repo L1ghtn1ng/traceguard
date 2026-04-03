@@ -17,6 +17,7 @@ import (
 type Metadata struct {
 	PID        uint32
 	Comm       string
+	Source     string
 	Exe        string
 	Cmdline    []string
 	UID        uint32
@@ -29,6 +30,11 @@ type Metadata struct {
 	PodUID     string
 	Runtime    string
 }
+
+const (
+	SourceFallback = "fallback"
+	SourceProc     = "proc"
+)
 
 type Cache struct {
 	mu      sync.Mutex
@@ -86,13 +92,15 @@ func (c *Cache) Invalidate(pid uint32) {
 
 func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 	metadata := Metadata{
-		PID:  pid,
-		Comm: fallbackComm,
+		PID:    pid,
+		Comm:   fallbackComm,
+		Source: SourceFallback,
 	}
 
 	status := c.readStatus(pid)
 	if status.Name != "" {
 		metadata.Comm = status.Name
+		metadata.Source = SourceProc
 	}
 	metadata.UID = status.UID
 	metadata.PPID = status.PPID

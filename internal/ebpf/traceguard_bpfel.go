@@ -56,6 +56,24 @@ type traceguardSettings struct {
 	Pad               [5]uint8
 }
 
+type traceguardSocketInfoKey struct {
+	_        structs.HostLayout
+	Pid      uint32
+	Port     uint16
+	Family   uint8
+	Protocol uint8
+	Addr     [16]uint8
+}
+
+type traceguardSocketInfoValue struct {
+	_        structs.HostLayout
+	Comm     [16]int8
+	Hook     uint8
+	Family   uint8
+	Protocol uint8
+	Pad      uint8
+}
+
 // loadTraceguard returns the embedded CollectionSpec for traceguard.
 func loadTraceguard() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_TraceguardBytes)
@@ -103,6 +121,8 @@ type traceguardProgramSpecs struct {
 	TraceDns      *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve   *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceSendmsg4 *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6 *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 }
 
 // traceguardMapSpecs contains maps before they are loaded into the kernel.
@@ -121,6 +141,7 @@ type traceguardMapSpecs struct {
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
+	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
 }
 
 // traceguardVariableSpecs contains global variables before they are loaded into the kernel.
@@ -161,6 +182,7 @@ type traceguardMaps struct {
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
 	Settings                *ebpf.Map `ebpf:"settings"`
+	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 }
 
 func (m *traceguardMaps) Close() error {
@@ -177,6 +199,7 @@ func (m *traceguardMaps) Close() error {
 		m.Endpoint6Rules,
 		m.Events,
 		m.Settings,
+		m.SocketInfo,
 	)
 }
 
@@ -195,6 +218,8 @@ type traceguardPrograms struct {
 	TraceDns      *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve   *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat *ebpf.Program `ebpf:"trace_execveat"`
+	TraceSendmsg4 *ebpf.Program `ebpf:"trace_sendmsg4"`
+	TraceSendmsg6 *ebpf.Program `ebpf:"trace_sendmsg6"`
 }
 
 func (p *traceguardPrograms) Close() error {
@@ -204,6 +229,8 @@ func (p *traceguardPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceSendmsg4,
+		p.TraceSendmsg6,
 	)
 }
 
