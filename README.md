@@ -1,4 +1,5 @@
 # TraceGuard
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/L1ghtn1ng/traceguard)
 
 TraceGuard is a Go 1.26 Linux security utility that uses the kernel eBPF subsystem to:
 
