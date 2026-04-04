@@ -82,11 +82,13 @@ struct endpoint6_key {
 struct endpoint4_cidr_key {
 	__u32 prefixlen;
 	__u8 data[7];
+	__u8 _pad;
 };
 
 struct endpoint6_cidr_key {
 	__u32 prefixlen;
 	__u8 data[19];
+	__u8 _pad;
 };
 
 struct domain_key {

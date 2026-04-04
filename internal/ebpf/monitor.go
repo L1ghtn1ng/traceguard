@@ -52,11 +52,13 @@ type endpoint6Key struct {
 type endpoint4CIDRKey struct {
 	PrefixLen uint32
 	Data      [7]uint8
+	_         [1]byte
 }
 
 type endpoint6CIDRKey struct {
 	PrefixLen uint32
 	Data      [19]uint8
+	_         [1]byte
 }
 
 type ResolverEndpoint struct {

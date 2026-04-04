@@ -40,7 +40,7 @@ type traceguardEndpoint4CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [7]uint8
-	_         [1]byte
+	Pad       uint8
 }
 
 type traceguardEndpoint4Key struct {
@@ -55,7 +55,7 @@ type traceguardEndpoint6CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [19]uint8
-	_         [1]byte
+	Pad       uint8
 }
 
 type traceguardEndpoint6Key struct {

@@ -1,8 +1,11 @@
 package ebpf
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
+
+	"github.com/cilium/ebpf"
 )
 
 func TestParseKernelRelease(t *testing.T) {
@@ -69,5 +72,64 @@ func TestIsRecvmsgContextVerifierError(t *testing.T) {
 	}
 	if isRecvmsgContextVerifierError(errors.New("some other verifier error")) {
 		t.Fatal("isRecvmsgContextVerifierError matched unrelated error")
+	}
+}
+
+func TestCIDRKeyBinarySizes(t *testing.T) {
+	t.Parallel()
+
+	if got := binary.Size(endpoint4CIDRKey{}); got != 12 {
+		t.Fatalf("endpoint4CIDRKey binary size = %d, want 12", got)
+	}
+	if got := binary.Size(endpoint6CIDRKey{}); got != 24 {
+		t.Fatalf("endpoint6CIDRKey binary size = %d, want 24", got)
+	}
+}
+
+func TestCIDRKeySizesMatchCollectionSpecs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		loadSpec func() (*ebpf.CollectionSpec, error)
+	}{
+		{name: "default", loadSpec: loadTraceguard},
+		{name: "dns-compat", loadSpec: loadTraceguardDNSCompat},
+		{name: "recvmsg-compat", loadSpec: loadTraceguardRecvmsgCompat},
+		{name: "dns-recvmsg-compat", loadSpec: loadTraceguardDNSRecvmsgCompat},
+	}
+
+	const (
+		endpoint4CIDRKeySize = uint32(12)
+		endpoint6CIDRKeySize = uint32(24)
+	)
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec, err := tc.loadSpec()
+			if err != nil {
+				t.Fatalf("load spec: %v", err)
+			}
+
+			assertMapKeySize(t, spec, "endpoint4_cidr_rules", endpoint4CIDRKeySize)
+			assertMapKeySize(t, spec, "endpoint4_cidr_allow_rules", endpoint4CIDRKeySize)
+			assertMapKeySize(t, spec, "endpoint6_cidr_rules", endpoint6CIDRKeySize)
+			assertMapKeySize(t, spec, "endpoint6_cidr_allow_rules", endpoint6CIDRKeySize)
+		})
+	}
+}
+
+func assertMapKeySize(t *testing.T, spec *ebpf.CollectionSpec, mapName string, want uint32) {
+	t.Helper()
+
+	mapSpec, ok := spec.Maps[mapName]
+	if !ok {
+		t.Fatalf("map %q not found in collection spec", mapName)
+	}
+	if mapSpec.KeySize != want {
+		t.Fatalf("%s key size = %d, want %d", mapName, mapSpec.KeySize, want)
 	}
 }
