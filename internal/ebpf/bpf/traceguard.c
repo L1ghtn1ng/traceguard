@@ -12,6 +12,8 @@
 #define HTTPS_PORT 443
 #define MAX_DOMAIN_LEN 255
 #define DOMAIN_KEY_SIZE (MAX_DOMAIN_LEN + 1)
+#define MAX_SUFFIX_LABELS 16
+#define MAX_SUFFIX_WIRE_LEN 64
 #define MAX_FILENAME_LEN 256
 #define EVENT_DNS 1
 #define EVENT_BLOCKED 2
@@ -98,11 +100,19 @@ struct domain_key {
 	__u8 domain[DOMAIN_KEY_SIZE];
 };
 
+struct domain_suffix_key {
+	__u64 hash;
+	__u16 length;
+	__u16 _pad0;
+	__u32 _pad1;
+};
+
 struct settings {
 	__u8 block_enabled;
 	__u8 block_all_domains;
 	__u8 block_all_resolvers;
-	__u8 _pad[5];
+	__u8 allow_suffixes_enabled;
+	__u8 _pad[4];
 };
 
 struct socket_info_key {
@@ -229,6 +239,13 @@ struct {
 	__type(key, struct domain_key);
 	__type(value, __u8);
 } allowlist SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, struct domain_suffix_key);
+	__type(value, __u8);
+} allow_suffixes SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -567,6 +584,14 @@ static __always_inline int block_all_domains_enabled(void)
 	return cfg && cfg->block_all_domains;
 }
 
+static __always_inline int allow_suffixes_enabled(void)
+{
+	__u32 zero = 0;
+	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+
+	return cfg && cfg->allow_suffixes_enabled;
+}
+
 static __always_inline void init_endpoint4_cidr_key(struct endpoint4_cidr_key *key, __u32 addr, __u16 port, __u8 transport)
 {
 	__builtin_memset(key, 0, sizeof(*key));
@@ -686,12 +711,15 @@ static __always_inline int emit_dns6_event(const struct domain_key *key, __u32 k
 	return kind == EVENT_BLOCKED ? 0 : 1;
 }
 
-static __always_inline __u32 dns_event_kind(const struct domain_key *key)
+static __always_inline __u32 dns_event_kind(const struct domain_key *key, __u8 allow_suffix_match)
 {
 	__u8 *present;
 
 	present = bpf_map_lookup_elem(&allowlist, key);
 	if (present) {
+		return EVENT_DNS;
+	}
+	if (allow_suffix_match) {
 		return EVENT_DNS;
 	}
 	if (is_block_enabled() && block_all_domains_enabled()) {
@@ -704,9 +732,66 @@ static __always_inline __u32 dns_event_kind(const struct domain_key *key)
 	return EVENT_DNS;
 }
 
-static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key)
+static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __u32 qname_offset, __u32 packet_len)
+{
+	__u32 offset = qname_offset;
+
+#pragma clang loop unroll(disable)
+	for (int i = 0; i < MAX_SUFFIX_LABELS; i++) {
+		struct domain_suffix_key suffix = {0};
+		__u8 *present;
+		__u8 label_len;
+		__u32 cursor;
+
+		if (offset >= packet_len) {
+			break;
+		}
+		if (bpf_skb_load_bytes(skb, offset, &label_len, sizeof(label_len)) < 0) {
+			break;
+		}
+		if (label_len == 0) {
+			break;
+		}
+		if (label_len > 63 || offset + 1 + (__u32)label_len >= packet_len) {
+			break;
+		}
+		cursor = offset;
+		suffix.hash = 14695981039346656037ULL;
+#pragma clang loop unroll(disable)
+		for (int j = 0; j < MAX_SUFFIX_WIRE_LEN; j++) {
+			__u8 c;
+
+			if (cursor >= packet_len) {
+				break;
+			}
+			if (bpf_skb_load_bytes(skb, cursor, &c, sizeof(c)) < 0) {
+				break;
+			}
+			if (c >= 'A' && c <= 'Z') {
+				c += 'a' - 'A';
+			}
+			suffix.hash ^= c;
+			suffix.hash *= 1099511628211ULL;
+			suffix.length++;
+			cursor++;
+			if (c == 0) {
+				break;
+			}
+		}
+		present = bpf_map_lookup_elem(&allow_suffixes, &suffix);
+		if (present) {
+			return 1;
+		}
+		offset += 1 + (__u32)label_len;
+	}
+
+	return 0;
+}
+
+static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key, __u8 *allow_suffix_match)
 {
 	struct dns_header dns = {0};
+	__u32 qname_offset;
 	__u16 flags;
 	__u16 qdcount;
 	int parsed;
@@ -724,15 +809,19 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 		return -1;
 	}
 
-	parsed = load_qname_key(skb, payload_offset + sizeof(dns), packet_len, key);
+	qname_offset = payload_offset + sizeof(dns);
+	parsed = load_qname_key(skb, qname_offset, packet_len, key);
 	if (parsed < 0) {
 		return -1;
+	}
+	if (allow_suffixes_enabled()) {
+		*allow_suffix_match = qname_matches_allow_suffix(skb, qname_offset, packet_len);
 	}
 
 	return 0;
 }
 
-static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key)
+static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key, __u8 *allow_suffix_match)
 {
 	__be16 dns_len_be;
 	__u16 dns_len;
@@ -760,7 +849,7 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
-	return parse_dns_payload(skb, dns_offset, dns_end, key) == 0 ? DNS_PARSE_OK : is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+	return parse_dns_payload(skb, dns_offset, dns_end, key, allow_suffix_match) == 0 ? DNS_PARSE_OK : is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 }
 
 static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
@@ -1032,6 +1121,7 @@ int trace_dns(struct __sk_buff *skb)
 		__u32 transport_offset;
 		struct domain_key key = {0};
 		__u32 kind;
+		__u8 allow_suffix_match = 0;
 
 		if (packet_len < sizeof(iph)) {
 			return 1;
@@ -1060,10 +1150,10 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+			if (parse_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match) < 0) {
 				return 1;
 			}
-			kind = dns_event_kind(&key);
+			kind = dns_event_kind(&key, allow_suffix_match);
 			return emit_dns4_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
@@ -1087,14 +1177,14 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&key);
+			kind = dns_event_kind(&key, allow_suffix_match);
 			return emit_dns4_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, iph.daddr);
 		}
 		return 1;
@@ -1107,6 +1197,7 @@ int trace_dns(struct __sk_buff *skb)
 		__u8 fragmented;
 		struct domain_key key = {0};
 		__u32 kind;
+		__u8 allow_suffix_match = 0;
 
 		if (packet_len < sizeof(ip6h)) {
 			return 1;
@@ -1136,10 +1227,10 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
+			if (parse_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match) < 0) {
 				return 1;
 			}
-			kind = dns_event_kind(&key);
+			kind = dns_event_kind(&key, allow_suffix_match);
 			return emit_dns6_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
@@ -1163,14 +1254,14 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&key);
+			kind = dns_event_kind(&key, allow_suffix_match);
 			return emit_dns6_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, ip6h.daddr.s6_addr);
 		}
 	}

@@ -21,6 +21,33 @@ func TestEncodeAndDecodeDomainKey(t *testing.T) {
 	}
 }
 
+func TestEncodeDomainSuffixKey(t *testing.T) {
+	t.Parallel()
+
+	key, err := encodeDomainSuffixKey("Example.COM")
+	if err != nil {
+		t.Fatalf("encodeDomainSuffixKey returned error: %v", err)
+	}
+	exact, err := encodeDomainKey("example.com")
+	if err != nil {
+		t.Fatalf("encodeDomainKey returned error: %v", err)
+	}
+
+	var hash uint64 = 14695981039346656037
+	var length uint16
+	for _, value := range exact.Domain {
+		hash ^= uint64(value)
+		hash *= 1099511628211
+		length++
+		if value == 0 {
+			break
+		}
+	}
+	if key.Hash != hash || key.Length != length {
+		t.Fatalf("suffix key = {hash:%d length:%d}, want {hash:%d length:%d}", key.Hash, key.Length, hash, length)
+	}
+}
+
 func TestDecodeEventSocketMetadata(t *testing.T) {
 	t.Parallel()
 

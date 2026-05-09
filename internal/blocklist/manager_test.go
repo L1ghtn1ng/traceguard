@@ -236,6 +236,46 @@ func TestPolicyAllowSuffixOverridesBlockExact(t *testing.T) {
 	}
 }
 
+func TestPolicyExactAllowDoesNotAllowSubdomains(t *testing.T) {
+	t.Parallel()
+
+	rules := Rules{
+		BlockAllDomains: true,
+		AllowDomains:    []string{"example.com"},
+	}
+	policy := NewPolicy(rules, nil, nil)
+	if got := policy.DomainDecision("example.com"); got != DecisionAllow {
+		t.Fatalf("DomainDecision(example.com) = %q, want %q", got, DecisionAllow)
+	}
+	if got := policy.DomainDecision("foo.example.com"); got != DecisionBlock {
+		t.Fatalf("DomainDecision(foo.example.com) = %q, want %q", got, DecisionBlock)
+	}
+}
+
+func TestManagerFileBackedAllowDomainStaysExact(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(Config{
+		ManualDomains: []string{"*"},
+		ManualAllow:   []string{"example.com"},
+	})
+	rules, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(rules.AllowDomains) != 1 || rules.AllowDomains[0] != "example.com" {
+		t.Fatalf("AllowDomains = %v, want exact example.com", rules.AllowDomains)
+	}
+	if len(rules.AllowSuffixes) != 0 {
+		t.Fatalf("AllowSuffixes = %v, want no suffix rules", rules.AllowSuffixes)
+	}
+
+	policy := NewPolicy(rules, nil, nil)
+	if got := policy.DomainDecision("foo.example.com"); got != DecisionBlock {
+		t.Fatalf("DomainDecision(foo.example.com) = %q, want %q", got, DecisionBlock)
+	}
+}
+
 func TestPolicyDenyAllUsesAllowOverrides(t *testing.T) {
 	t.Parallel()
 

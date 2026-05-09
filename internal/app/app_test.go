@@ -28,14 +28,25 @@ func TestIsPermissionErrorRejectsOtherErrors(t *testing.T) {
 	}
 }
 
-func TestValidateRulesForModeRejectsSuffixRulesInBlockMode(t *testing.T) {
+func TestValidateRulesForModeAllowsAllowSuffixRulesInBlockMode(t *testing.T) {
 	t.Parallel()
 
 	err := validateRulesForMode(config.Config{Block: true}, blocklist.Rules{
 		AllowSuffixes: []string{"example.com"},
 	})
+	if err != nil {
+		t.Fatalf("validateRulesForMode rejected suffix allow in block mode: %v", err)
+	}
+}
+
+func TestValidateRulesForModeRejectsBlockSuffixRulesInBlockMode(t *testing.T) {
+	t.Parallel()
+
+	err := validateRulesForMode(config.Config{Block: true}, blocklist.Rules{
+		BlockSuffixes: []string{"example.com"},
+	})
 	if err == nil {
-		t.Fatal("validateRulesForMode accepted suffix allow in block mode")
+		t.Fatal("validateRulesForMode accepted suffix block in block mode")
 	}
 }
 

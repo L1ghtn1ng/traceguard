@@ -108,13 +108,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 		// Build the full next policy before changing kernel maps. Enabling block mode
 		// is last so a failed refresh cannot publish a partially applied policy.
-		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains); err != nil {
+		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains, rules.AllowSuffixes); err != nil {
 			return err
 		}
 		if err := monitor.ReplaceResolverPolicy(blockMonitorEndpoints, allowMonitorEndpoints, blockMonitorCIDRs, allowMonitorCIDRs); err != nil {
 			return err
 		}
-		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers); err != nil {
+		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers, len(rules.AllowSuffixes) > 0); err != nil {
 			return fmt.Errorf("configure block mode: %w", err)
 		}
 		endpointIndex.Store(&index)
@@ -343,8 +343,8 @@ func IsPermissionError(err error) bool {
 }
 
 func validateRulesForMode(cfg config.Config, rules blocklist.Rules) error {
-	if cfg.Block && !cfg.DryRun && (len(rules.BlockSuffixes) > 0 || len(rules.AllowSuffixes) > 0) {
-		return fmt.Errorf("suffix and wildcard domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for suffix policies")
+	if cfg.Block && !cfg.DryRun && len(rules.BlockSuffixes) > 0 {
+		return fmt.Errorf("suffix and wildcard block domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for block suffix policies")
 	}
 	return nil
 }

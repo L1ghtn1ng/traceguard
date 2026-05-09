@@ -57,7 +57,7 @@ The user-space service:
 Notes:
 
 - blocking is exact-match on normalized DNS QNAMEs for classic UDP/TCP DNS on port 53
-- allow rules are exact-match and take precedence over exact-match block rules
+- allow rules take precedence over block rules; plain domain allow rules are exact matches, while `*.example.com` and `suffix:example.com` allow suffix matches
 - suffix rules match a domain and any subdomain, for example `*.example.com` or `suffix:example.com`
 - `*` enables a deny-all policy for DNS names and identifiable resolver traffic, with explicit allow rules punching holes back in
 - DNS QNAME matching is ASCII case-insensitive
@@ -72,8 +72,9 @@ Notes:
 - Kubernetes enrichment is optional, API-driven, and keyed by the observed pod UID
 - common IPv6 extension headers are parsed before DNS inspection
 - in block mode, segmented TCP DNS queries and fragmented IPv6 DNS packets that cannot be safely inspected are denied instead of allowed
-- exact domain policies are enforceable in kernel block mode; suffix and wildcard domain policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
-- in enforced block mode with `*`, exact domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions; suffix allow rules still require observe or dry-run mode
+- exact domain policies and suffix allow policies are enforceable in kernel block mode; suffix block policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
+- in enforced block mode with `*`, exact domain rules, suffix allow domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions
+- enforced suffix allow matching checks up to 16 DNS label boundaries and 64 wire-format bytes per suffix candidate to stay within kernel verifier limits; exact allow rules are unaffected
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and gzip-compressed batches
 
@@ -124,6 +125,7 @@ Deny all DNS names and resolver endpoints, then allow only explicit exceptions:
 sudo ./traceguard -block \
   -block-domain '*' \
   -allow-domain corp.example \
+  -allow-domain '*.trusted.example' \
   -allow-domain 1.1.1.1 \
   -allow-domain 1.1.1.0/24 \
   -allow-domain https://1.1.1.1/dns-query \
@@ -264,6 +266,8 @@ Manual policy inputs:
 - Use `TRACEGUARD_BLOCK_DOMAINS` and `TRACEGUARD_ALLOW_DOMAINS` for env-based configuration.
 - Set `TRACEGUARD_BLOCK_DOMAINS=@/abs/path` or `TRACEGUARD_ALLOW_DOMAINS=@/abs/path` to load entries from files.
 - Use `*` as the deny-all marker with `-block-domain '*'` or `TRACEGUARD_BLOCK_DOMAINS=*`.
+- Use `example.com` with `-allow-domain` for an exact exception only; it does not allow `foo.example.com`.
+- Use `*.example.com` or `suffix:example.com` with `-allow-domain` for enforced block-mode exceptions that cover a domain and its subdomains.
 
 Example output:
 

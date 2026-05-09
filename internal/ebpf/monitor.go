@@ -28,11 +28,18 @@ type domainKey struct {
 	Domain [domainSize]byte
 }
 
+type domainSuffixKey struct {
+	Hash   uint64
+	Length uint16
+	_      [6]byte
+}
+
 type runtimeSettings struct {
-	BlockEnabled      uint8
-	BlockAllDomains   uint8
-	BlockAllResolvers uint8
-	_                 [5]byte
+	BlockEnabled         uint8
+	BlockAllDomains      uint8
+	BlockAllResolvers    uint8
+	AllowSuffixesEnabled uint8
+	_                    [4]byte
 }
 
 type endpoint4Key struct {
@@ -94,6 +101,7 @@ type monitorObjects struct {
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
@@ -123,6 +131,7 @@ func (o *monitorObjects) Close() error {
 		o.TraceExecve,
 		o.TraceExecveat,
 		o.Allowlist,
+		o.AllowSuffixes,
 		o.Blocklist,
 		o.Endpoint4AllowRules,
 		o.Endpoint4CidrAllowRules,
@@ -387,7 +396,7 @@ func (m *Monitor) Close() error {
 	return errors.Join(errs...)
 }
 
-func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers bool) error {
+func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers, allowSuffixesEnabled bool) error {
 	value := runtimeSettings{}
 	if enabled {
 		value.BlockEnabled = 1
@@ -398,11 +407,14 @@ func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers bool
 	if blockAllResolvers {
 		value.BlockAllResolvers = 1
 	}
+	if allowSuffixesEnabled {
+		value.AllowSuffixesEnabled = 1
+	}
 	key := uint32(0)
 	return m.objects.Settings.Put(key, value)
 }
 
-func (m *Monitor) ReplaceDomainPolicy(blocked, allowed []string) error {
+func (m *Monitor) ReplaceDomainPolicy(blocked, allowed, allowedSuffixes []string) error {
 	nextBlock := make(map[domainKey]struct{}, len(blocked))
 	for _, domain := range blocked {
 		key, err := encodeDomainKey(domain)
@@ -419,17 +431,31 @@ func (m *Monitor) ReplaceDomainPolicy(blocked, allowed []string) error {
 		}
 		nextAllow[key] = struct{}{}
 	}
+	nextAllowSuffixes := make(map[domainSuffixKey]struct{}, len(allowedSuffixes))
+	for _, suffix := range allowedSuffixes {
+		key, err := encodeDomainSuffixKey(suffix)
+		if err != nil {
+			return fmt.Errorf("encode allow suffix entry %q: %w", suffix, err)
+		}
+		nextAllowSuffixes[key] = struct{}{}
+	}
 	if len(nextBlock) > blocklistMaxEntries {
 		return fmt.Errorf("blocklist contains %d entries, exceeds map capacity %d", len(nextBlock), blocklistMaxEntries)
 	}
 	if len(nextAllow) > blocklistMaxEntries {
 		return fmt.Errorf("allowlist contains %d entries, exceeds map capacity %d", len(nextAllow), blocklistMaxEntries)
 	}
+	if len(nextAllowSuffixes) > blocklistMaxEntries {
+		return fmt.Errorf("allow suffix list contains %d entries, exceeds map capacity %d", len(nextAllowSuffixes), blocklistMaxEntries)
+	}
 	if err := syncMap(m.objects.Blocklist, nextBlock); err != nil {
 		return fmt.Errorf("sync blocklist: %w", err)
 	}
 	if err := syncMap(m.objects.Allowlist, nextAllow); err != nil {
 		return fmt.Errorf("sync allowlist: %w", err)
+	}
+	if err := syncMap(m.objects.AllowSuffixes, nextAllowSuffixes); err != nil {
+		return fmt.Errorf("sync allow suffix list: %w", err)
 	}
 	return nil
 }
@@ -610,6 +636,23 @@ func encodeDomainKey(domain string) (domainKey, error) {
 
 	key.Domain[offset] = 0
 	return key, nil
+}
+
+func encodeDomainSuffixKey(domain string) (domainSuffixKey, error) {
+	encoded, err := encodeDomainKey(domain)
+	if err != nil {
+		return domainSuffixKey{}, err
+	}
+	key := domainSuffixKey{Hash: 14695981039346656037}
+	for _, value := range encoded.Domain {
+		key.Hash ^= uint64(value)
+		key.Hash *= 1099511628211
+		key.Length++
+		if value == 0 {
+			return key, nil
+		}
+	}
+	return domainSuffixKey{}, errors.New("domain suffix is missing DNS root terminator")
 }
 
 func encodeResolverTransport(transport string) (uint8, bool) {

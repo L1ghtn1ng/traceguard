@@ -36,6 +36,14 @@ type traceguardRecvmsgCompatDomainKey struct {
 	Domain [256]uint8
 }
 
+type traceguardRecvmsgCompatDomainSuffixKey struct {
+	_      structs.HostLayout
+	Hash   uint64
+	Length uint16
+	Pad0   uint16
+	Pad1   uint32
+}
+
 type traceguardRecvmsgCompatEndpoint4CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
@@ -81,11 +89,12 @@ type traceguardRecvmsgCompatListenerInfoValue struct {
 }
 
 type traceguardRecvmsgCompatSettings struct {
-	_                 structs.HostLayout
-	BlockEnabled      uint8
-	BlockAllDomains   uint8
-	BlockAllResolvers uint8
-	Pad               [5]uint8
+	_                    structs.HostLayout
+	BlockEnabled         uint8
+	BlockAllDomains      uint8
+	BlockAllResolvers    uint8
+	AllowSuffixesEnabled uint8
+	Pad                  [4]uint8
 }
 
 type traceguardRecvmsgCompatSocketInfoKey struct {
@@ -166,6 +175,7 @@ type traceguardRecvmsgCompatProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardRecvmsgCompatMapSpecs struct {
+	AllowSuffixes           *ebpf.MapSpec `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
@@ -209,6 +219,7 @@ func (o *traceguardRecvmsgCompatObjects) Close() error {
 //
 // It can be passed to loadTraceguardRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardRecvmsgCompatMaps struct {
+	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
@@ -228,6 +239,7 @@ type traceguardRecvmsgCompatMaps struct {
 
 func (m *traceguardRecvmsgCompatMaps) Close() error {
 	return _TraceguardRecvmsgCompatClose(
+		m.AllowSuffixes,
 		m.Allowlist,
 		m.Blocklist,
 		m.ConnectionDedupe,
