@@ -81,15 +81,6 @@ type Config struct {
 }
 
 func Parse() (Config, error) {
-	defaultCachePath, err := defaultCachePath()
-	if err != nil {
-		return Config{}, err
-	}
-	defaultExportSpoolPath, err := defaultExportSpoolPath()
-	if err != nil {
-		return Config{}, err
-	}
-
 	cfg := Config{}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
@@ -100,7 +91,7 @@ func Parse() (Config, error) {
 	var manualAllow domainList
 	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
 	fs.Var(&manualAllow, "allow-domain", "exact domain, @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to allow even if it also appears in a block policy; may be specified more than once")
-	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", defaultCachePath), "path to the cached remote blocklist")
+	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", ""), "path to the cached remote blocklist")
 	fs.DurationVar(&cfg.RefreshInterval, "refresh-interval", envDuration("TRACEGUARD_REFRESH_INTERVAL", defaultRefreshInterval), "remote blocklist refresh interval")
 	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for egress attachment")
 	fs.StringVar(&cfg.LogPath, "log-path", envString("TRACEGUARD_LOG_PATH", defaultLogPath), "absolute path to the primary log file")
@@ -112,7 +103,7 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventExportAuthToken, "event-export-auth-token", envString("TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN", ""), "HTTP header value used for event export authentication")
 	fs.IntVar(&cfg.EventExportBatchSize, "event-export-batch-size", envInt("TRACEGUARD_EVENT_EXPORT_BATCH_SIZE", defaultExportBatchSize), "maximum number of events to include in one export batch")
 	fs.DurationVar(&cfg.EventExportFlush, "event-export-flush-interval", envDuration("TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL", defaultExportFlush), "maximum time to wait before flushing a partial export batch")
-	fs.StringVar(&cfg.EventExportSpoolPath, "event-export-spool-path", envString("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", defaultExportSpoolPath), "absolute path to an optional export retry spool directory")
+	fs.StringVar(&cfg.EventExportSpoolPath, "event-export-spool-path", envString("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", ""), "absolute path to an optional export retry spool directory")
 	fs.StringVar(&cfg.EventExportCAPath, "event-export-ca-path", envString("TRACEGUARD_EVENT_EXPORT_CA_PATH", ""), "path to an optional CA bundle for the HTTPS event export endpoint")
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
 	fs.StringVar(&cfg.EventExportClientKey, "event-export-client-key", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_KEY", ""), "path to an optional client key for HTTPS event export")
@@ -137,6 +128,22 @@ func Parse() (Config, error) {
 		return cfg, nil
 	}
 
+	if cfg.CachePath == "" && !flagWasSet(fs, "cache-path") && !envWasSet("TRACEGUARD_CACHE_PATH") {
+		defaultCachePath, err := defaultCachePath()
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.CachePath = defaultCachePath
+	}
+	if cfg.EventExportSpoolPath == "" && !flagWasSet(fs, "event-export-spool-path") && !envWasSet("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH") {
+		defaultExportSpoolPath, err := defaultExportSpoolPath()
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.EventExportSpoolPath = defaultExportSpoolPath
+	}
+
+	var err error
 	cfg.ManualDomains, err = loadDomainEnv("TRACEGUARD_BLOCK_DOMAINS")
 	if err != nil {
 		return Config{}, err
@@ -273,6 +280,21 @@ func envString(key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(value)
+}
+
+func envWasSet(key string) bool {
+	_, ok := os.LookupEnv(key)
+	return ok
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func envBool(key string, fallback bool) bool {

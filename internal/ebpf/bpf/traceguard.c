@@ -34,6 +34,9 @@
 #define ATTRIBUTION_KERNEL_CONNECT 3
 #define ATTRIBUTION_KERNEL_RECVMSG 4
 #define ATTRIBUTION_KERNEL_INGRESS 5
+#define DNS_PARSE_OK 0
+#define DNS_PARSE_PASS 1
+#define DNS_PARSE_DROP 2
 #define SOCKET_HOOK_CGROUP_SKB 1
 #define SOCKET_HOOK_CGROUP_SENDMSG4 2
 #define SOCKET_HOOK_CGROUP_SENDMSG6 3
@@ -737,27 +740,27 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 	__u32 dns_end;
 
 	if (payload_offset >= packet_len) {
-		return 1;
+		return DNS_PARSE_PASS;
 	}
 	if (payload_offset + sizeof(dns_len_be) > packet_len) {
-		return is_block_enabled() ? 0 : 1;
+		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 	if (bpf_skb_load_bytes(skb, payload_offset, &dns_len_be, sizeof(dns_len_be)) < 0) {
-		return is_block_enabled() ? 0 : 1;
+		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
 	dns_len = bpf_ntohs(dns_len_be);
 	if (dns_len < sizeof(struct dns_header)) {
-		return is_block_enabled() ? 0 : 1;
+		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
 	dns_offset = payload_offset + sizeof(dns_len_be);
 	dns_end = dns_offset + (__u32)dns_len;
 	if (dns_end < dns_offset || dns_end > packet_len) {
-		return is_block_enabled() ? 0 : 1;
+		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
-	return parse_dns_payload(skb, dns_offset, dns_end, key);
+	return parse_dns_payload(skb, dns_offset, dns_end, key) == 0 ? DNS_PARSE_OK : is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 }
 
 static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
@@ -851,6 +854,13 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u32 transport_offset, __u32 packet_len, __u8 nexthdr)
 {
 	if (!is_block_enabled()) {
+		return 1;
+	}
+	if (transport_offset >= packet_len) {
+		/* Later fragments do not carry the transport header, so they cannot be
+		 * classified safely without connection reassembly state. Pass them here
+		 * rather than breaking unrelated fragmented IPv6 traffic.
+		 */
 		return 1;
 	}
 
@@ -1060,6 +1070,7 @@ int trace_dns(struct __sk_buff *skb)
 			struct tcphdr tcph = {0};
 			__u32 tcp_len;
 			__u32 payload_offset;
+			int dns_parse;
 
 			if (transport_offset + sizeof(tcph) > packet_len) {
 				return 1;
@@ -1076,8 +1087,12 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			if (parse_tcp_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
-				return is_block_enabled() ? 0 : 1;
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key);
+			if (dns_parse != DNS_PARSE_OK) {
+				/* Segmented or malformed TCP DNS cannot be matched against the
+				 * policy map. Block mode fails closed; observe mode passes it.
+				 */
+				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
 			kind = dns_event_kind(&key);
 			return emit_dns4_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, iph.daddr);
@@ -1131,6 +1146,7 @@ int trace_dns(struct __sk_buff *skb)
 			struct tcphdr tcph = {0};
 			__u32 tcp_len;
 			__u32 payload_offset;
+			int dns_parse;
 
 			if (transport_offset + sizeof(tcph) > packet_len) {
 				return 1;
@@ -1147,8 +1163,12 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			if (parse_tcp_dns_payload(skb, payload_offset, packet_len, &key) < 0) {
-				return is_block_enabled() ? 0 : 1;
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key);
+			if (dns_parse != DNS_PARSE_OK) {
+				/* Segmented or malformed TCP DNS cannot be matched against the
+				 * policy map. Block mode fails closed; observe mode passes it.
+				 */
+				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
 			kind = dns_event_kind(&key);
 			return emit_dns6_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, ip6h.daddr.s6_addr);

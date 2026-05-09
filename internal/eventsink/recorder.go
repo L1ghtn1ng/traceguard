@@ -29,6 +29,7 @@ import (
 const (
 	exportQueueSize      = 1024
 	exportReplayInterval = 15 * time.Second
+	exportShutdownFlush  = 10 * time.Second
 	maxSpoolFiles        = 10000
 )
 
@@ -338,11 +339,11 @@ func (e *exportSink) run(ctx context.Context) {
 	defer replayTicker.Stop()
 
 	batch := make([]json.RawMessage, 0, e.batchSize)
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := e.sendBatch(ctx, batch); err != nil {
+		if err := e.sendBatch(flushCtx, batch); err != nil {
 			e.metrics.IncEventExport("error")
 			if e.spool != nil {
 				if spoolErr := e.spool.Write(batch); spoolErr == nil {
@@ -356,19 +357,34 @@ func (e *exportSink) run(ctx context.Context) {
 		}
 		batch = batch[:0]
 	}
+	shutdown := func() {
+		for {
+			select {
+			case payload := <-e.queue:
+				batch = append(batch, payload)
+			default:
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), exportShutdownFlush)
+				defer cancel()
+				// The worker context is already canceled during Close; use a short
+				// independent context so the final batch can be delivered or spooled.
+				flush(shutdownCtx)
+				return
+			}
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
+			shutdown()
 			return
 		case payload := <-e.queue:
 			batch = append(batch, payload)
 			if len(batch) >= e.batchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-flushTicker.C:
-			flush()
+			flush(ctx)
 		case <-replayTicker.C:
 			if e.spool == nil {
 				continue

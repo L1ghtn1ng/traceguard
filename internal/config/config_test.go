@@ -113,6 +113,50 @@ func TestParseDefaultsLogFormatToJSON(t *testing.T) {
 	}
 }
 
+func TestParseVersionDoesNotRequireUserCacheDir(t *testing.T) {
+	originalArgs := os.Args
+	originalHome, hadHome := os.LookupEnv("HOME")
+	originalXDG, hadXDG := os.LookupEnv("XDG_CACHE_HOME")
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		restoreEnv("HOME", originalHome, hadHome)
+		restoreEnv("XDG_CACHE_HOME", originalXDG, hadXDG)
+	})
+	os.Args = []string{"traceguard", "-v"}
+	if err := os.Unsetenv("HOME"); err != nil {
+		t.Fatalf("Unsetenv HOME returned error: %v", err)
+	}
+	if err := os.Unsetenv("XDG_CACHE_HOME"); err != nil {
+		t.Fatalf("Unsetenv XDG_CACHE_HOME returned error: %v", err)
+	}
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.PrintVersion {
+		t.Fatal("PrintVersion = false, want true")
+	}
+}
+
+func TestParsePreservesExplicitEmptyExportSpoolPath(t *testing.T) {
+	t.Setenv("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", "")
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.EventExportSpoolPath != "" {
+		t.Fatalf("EventExportSpoolPath = %q, want explicit empty value", cfg.EventExportSpoolPath)
+	}
+}
+
 func TestParseLoadsDomainFileFromEnv(t *testing.T) {
 	path := writeDomainFile(t, "example.com\n# comment\nbad.example.org,one.one.one.one\n")
 
@@ -135,6 +179,14 @@ func TestParseLoadsDomainFileFromEnv(t *testing.T) {
 	if !slices.Equal(cfg.ManualDomains, want) {
 		t.Fatalf("ManualDomains = %v, want %v", cfg.ManualDomains, want)
 	}
+}
+
+func restoreEnv(key, value string, present bool) {
+	if present {
+		_ = os.Setenv(key, value)
+		return
+	}
+	_ = os.Unsetenv(key)
 }
 
 func TestParseLoadsDomainFileFromFlag(t *testing.T) {

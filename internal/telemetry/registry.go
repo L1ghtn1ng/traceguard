@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -127,6 +128,10 @@ func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen metrics server: %w", err)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -137,9 +142,9 @@ func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging
 
 	go func() {
 		logger.Info("metrics server listening", map[string]any{
-			"address": addr,
+			"address": listener.Addr().String(),
 		})
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			logger.Error("metrics server stopped", err, map[string]any{
 				"address": addr,
 			})

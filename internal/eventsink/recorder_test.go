@@ -320,6 +320,48 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	}
 }
 
+func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan []byte, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- body
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sink, err := newExportSink(context.Background(), Config{
+		ExportURL:        server.URL,
+		ExportAuthHeader: "Authorization",
+		ExportBatchSize:  10,
+		ExportFlush:      time.Hour,
+	}, telemetry.NewRegistry())
+	if err != nil {
+		t.Fatalf("newExportSink returned error: %v", err)
+	}
+	if transport, ok := sink.client.Transport.(*http.Transport); ok {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
+		}
+	}
+
+	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "queued"})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	select {
+	case body := <-requests:
+		if !strings.Contains(string(body), `"message":"queued"`) {
+			t.Fatalf("export body = %s, want queued event", body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for close flush request")
+	}
+}
+
 func newTestRecorder(t *testing.T) (*Recorder, *bytes.Buffer) {
 	t.Helper()
 

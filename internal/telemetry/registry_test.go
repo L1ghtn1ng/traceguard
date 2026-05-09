@@ -1,8 +1,13 @@
 package telemetry
 
 import (
+	"context"
+	"io"
+	"net"
 	"strings"
 	"testing"
+
+	"github.com/L1ghtn1ng/traceguard/internal/logging"
 )
 
 func TestRenderIncludesCountersAndGauges(t *testing.T) {
@@ -38,5 +43,25 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+}
+
+func TestStartServerReturnsListenError(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	defer listener.Close()
+
+	logger, err := logging.NewLogger(io.Discard, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+
+	err = NewRegistry().StartServer(context.Background(), listener.Addr().String(), logger)
+	if err == nil || !strings.Contains(err.Error(), "listen metrics server") {
+		t.Fatalf("StartServer error = %v, want listen failure", err)
 	}
 }

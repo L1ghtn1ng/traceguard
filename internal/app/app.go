@@ -61,12 +61,6 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		if err := validateRulesForMode(cfg, rules); err != nil {
 			return err
 		}
-		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers); err != nil {
-			return fmt.Errorf("configure block mode: %w", err)
-		}
-		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains); err != nil {
-			return err
-		}
 		blockResolved, err := blocklist.ResolveEndpoints(ctx, rules.BlockEndpoints)
 		if err != nil {
 			return fmt.Errorf("resolve block endpoint rules: %w", err)
@@ -110,11 +104,20 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				Port:      cidr.Port,
 			})
 		}
+		policy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
+
+		// Build the full next policy before changing kernel maps. Enabling block mode
+		// is last so a failed refresh cannot publish a partially applied policy.
+		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains); err != nil {
+			return err
+		}
 		if err := monitor.ReplaceResolverPolicy(blockMonitorEndpoints, allowMonitorEndpoints, blockMonitorCIDRs, allowMonitorCIDRs); err != nil {
 			return err
 		}
+		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers); err != nil {
+			return fmt.Errorf("configure block mode: %w", err)
+		}
 		endpointIndex.Store(&index)
-		policy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
 		runtimePolicy.Store(policy)
 		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
 		metrics.IncBlocklistRefresh(true)
