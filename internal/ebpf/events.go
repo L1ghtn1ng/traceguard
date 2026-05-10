@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"strings"
 	"time"
@@ -67,6 +68,9 @@ func decodeEvent(record []byte) (Event, error) {
 	var raw rawEvent
 	if err := binary.Read(bytes.NewReader(record), binary.LittleEndian, &raw); err != nil {
 		return Event{}, fmt.Errorf("decode raw event: %w", err)
+	}
+	if raw.TimestampNS > math.MaxInt64 {
+		return Event{}, fmt.Errorf("event timestamp %d exceeds int64 nanosecond range", raw.TimestampNS)
 	}
 
 	return Event{

@@ -513,10 +513,25 @@ type spoolStore struct {
 }
 
 func newSpoolStore(path string) (*spoolStore, error) {
-	if err := os.MkdirAll(path, 0o750); err != nil {
+	cleaned := filepath.Clean(path)
+	if err := os.MkdirAll(cleaned, 0o750); err != nil {
 		return nil, fmt.Errorf("create export spool directory: %w", err)
 	}
-	return &spoolStore{dir: path}, nil
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("resolve export spool directory: %w", err)
+	}
+	if filepath.Clean(resolved) != cleaned {
+		return nil, fmt.Errorf("export spool directory %q must not traverse symlinks", cleaned)
+	}
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("stat export spool directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("export spool directory %q is not a directory", cleaned)
+	}
+	return &spoolStore{dir: cleaned}, nil
 }
 
 func (s *spoolStore) Write(batch []json.RawMessage) error {
@@ -542,7 +557,7 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 	}
 	tempPath := filepath.Join(s.dir, name+".tmp")
 	finalPath := filepath.Join(s.dir, name+".json")
-	if err := os.WriteFile(tempPath, payload, 0o640); err != nil {
+	if err := os.WriteFile(tempPath, payload, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tempPath, finalPath); err != nil {
@@ -561,7 +576,12 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 		return err
 	}
 	for _, file := range files {
-		payload, err := os.ReadFile(filepath.Join(s.dir, file))
+		path := filepath.Join(s.dir, file)
+		if err := rejectSymlink(path); err != nil {
+			return err
+		}
+		// #nosec G304 -- file is from this spool directory listing, filtered to local .json names, and symlinks are rejected.
+		payload, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -582,7 +602,7 @@ func (s *spoolStore) files() ([]string, error) {
 	}
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !filepath.IsLocal(entry.Name()) {
 			continue
 		}
 		out = append(out, entry.Name())
@@ -619,4 +639,15 @@ func spoolFilename() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%d-%s", time.Now().UTC().UnixNano(), hex.EncodeToString(randBytes[:])), nil
+}
+
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("path %q must not be a symlink", path)
+	}
+	return nil
 }

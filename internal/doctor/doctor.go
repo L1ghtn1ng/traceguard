@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -19,7 +20,27 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
+var defaultChecks = environmentChecks{
+	stat:                      os.Stat,
+	statfs:                    unix.Statfs,
+	geteuid:                   os.Geteuid,
+	validateProcRoot:          processinfo.ValidateRoot,
+	checkTracepointPerfAccess: checkTracepointPerfEventAccess,
+}
+
+type environmentChecks struct {
+	stat                      func(string) (fs.FileInfo, error)
+	statfs                    func(string, *unix.Statfs_t) error
+	geteuid                   func() int
+	validateProcRoot          func(string) error
+	checkTracepointPerfAccess func() error
+}
+
 func Run(cfg config.Config, w io.Writer) error {
+	return runWithChecks(cfg, w, defaultChecks)
+}
+
+func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error {
 	var failures int
 
 	check := func(ok bool, name, detail string) {
@@ -33,27 +54,27 @@ func Run(cfg config.Config, w io.Writer) error {
 
 	check(runtime.GOOS == "linux", "os", fmt.Sprintf("runtime=%s", runtime.GOOS))
 
-	if info, err := os.Stat(cfg.CgroupPath); err != nil {
+	if info, err := env.stat(cfg.CgroupPath); err != nil {
 		check(false, "cgroup-path", err.Error())
 	} else {
 		check(info.IsDir(), "cgroup-path", cfg.CgroupPath)
 	}
 
 	var statfs unix.Statfs_t
-	if err := unix.Statfs(cfg.CgroupPath, &statfs); err != nil {
+	if err := env.statfs(cfg.CgroupPath, &statfs); err != nil {
 		check(false, "cgroup-v2", err.Error())
 	} else {
-		check(uint64(statfs.Type) == unix.CGROUP2_SUPER_MAGIC, "cgroup-v2", fmt.Sprintf("fstype=%#x", uint64(statfs.Type)))
+		check(statfs.Type == int64(unix.CGROUP2_SUPER_MAGIC), "cgroup-v2", fmt.Sprintf("fstype=%#x", statfs.Type))
 	}
 
 	logDir := filepath.Dir(cfg.LogPath)
 	if !filepath.IsAbs(cfg.LogPath) {
 		check(false, "log-path", "must be absolute")
-	} else if info, err := os.Stat(logDir); err == nil {
+	} else if info, err := env.stat(logDir); err == nil {
 		check(info.IsDir(), "log-path", cfg.LogPath)
 	} else if os.IsNotExist(err) {
 		parent := filepath.Dir(logDir)
-		parentInfo, parentErr := os.Stat(parent)
+		parentInfo, parentErr := env.stat(parent)
 		check(parentErr == nil && parentInfo.IsDir(), "log-path", fmt.Sprintf("%s (directory will be created at startup)", cfg.LogPath))
 	} else {
 		check(false, "log-path", err.Error())
@@ -76,7 +97,7 @@ func Run(cfg config.Config, w io.Writer) error {
 		parsed, err := url.Parse(cfg.EventExportURL)
 		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "event-export-url", cfg.EventExportURL)
 		if cfg.EventExportCAPath != "" {
-			if info, err := os.Stat(cfg.EventExportCAPath); err != nil {
+			if info, err := env.stat(cfg.EventExportCAPath); err != nil {
 				check(false, "event-export-ca-path", err.Error())
 			} else {
 				check(!info.IsDir(), "event-export-ca-path", cfg.EventExportCAPath)
@@ -85,12 +106,12 @@ func Run(cfg config.Config, w io.Writer) error {
 			check(true, "event-export-ca-path", "system trust store")
 		}
 		if cfg.EventExportClientCert != "" || cfg.EventExportClientKey != "" {
-			if info, err := os.Stat(cfg.EventExportClientCert); err != nil {
+			if info, err := env.stat(cfg.EventExportClientCert); err != nil {
 				check(false, "event-export-client-cert", err.Error())
 			} else {
 				check(!info.IsDir(), "event-export-client-cert", cfg.EventExportClientCert)
 			}
-			if info, err := os.Stat(cfg.EventExportClientKey); err != nil {
+			if info, err := env.stat(cfg.EventExportClientKey); err != nil {
 				check(false, "event-export-client-key", err.Error())
 			} else {
 				check(!info.IsDir(), "event-export-client-key", cfg.EventExportClientKey)
@@ -100,15 +121,15 @@ func Run(cfg config.Config, w io.Writer) error {
 		}
 	}
 
-	if err := processinfo.ValidateRoot("/proc"); err != nil {
+	if err := env.validateProcRoot("/proc"); err != nil {
 		check(false, "procfs", err.Error())
 	} else {
 		check(true, "procfs", "/proc")
 	}
 
-	euid := os.Geteuid()
+	euid := env.geteuid()
 	check(euid == 0, "privileges", fmt.Sprintf("effective_uid=%d", euid))
-	if err := checkTracepointPerfEventAccess(); err != nil {
+	if err := env.checkTracepointPerfAccess(); err != nil {
 		check(false, "tracepoint-perf-event", err.Error())
 	} else {
 		check(true, "tracepoint-perf-event", "syscalls/sys_enter_execve")
@@ -119,12 +140,12 @@ func Run(cfg config.Config, w io.Writer) error {
 	if cfg.KubernetesEnrich {
 		parsed, err := url.Parse(cfg.KubernetesAPIURL)
 		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "kubernetes-api-url", cfg.KubernetesAPIURL)
-		if info, err := os.Stat(cfg.KubernetesTokenPath); err != nil {
+		if info, err := env.stat(cfg.KubernetesTokenPath); err != nil {
 			check(false, "kubernetes-token-path", err.Error())
 		} else {
 			check(!info.IsDir(), "kubernetes-token-path", cfg.KubernetesTokenPath)
 		}
-		if info, err := os.Stat(cfg.KubernetesCAPath); err != nil {
+		if info, err := env.stat(cfg.KubernetesCAPath); err != nil {
 			check(false, "kubernetes-ca-path", err.Error())
 		} else {
 			check(!info.IsDir(), "kubernetes-ca-path", cfg.KubernetesCAPath)
@@ -160,6 +181,7 @@ func checkTracepointPerfEventAccess() error {
 	}
 
 	tracepointIDPath := filepath.Join(tracefsPath, "events", "syscalls", "sys_enter_execve", "id")
+	// #nosec G304 -- tracepointIDPath is built from fixed tracefs candidates and a fixed kernel tracepoint path.
 	rawID, err := os.ReadFile(tracepointIDPath)
 	if err != nil {
 		return fmt.Errorf("read tracepoint id: %w", err)

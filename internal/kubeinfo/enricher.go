@@ -291,6 +291,7 @@ func newTransport(caPath string) (*http.Transport, error) {
 		rootCAs = x509.NewCertPool()
 	}
 	if strings.TrimSpace(caPath) != "" {
+		// #nosec G304 -- CA path is an explicit operator-provided Kubernetes configuration path.
 		pem, err := os.ReadFile(caPath)
 		if err != nil {
 			return nil, fmt.Errorf("read kubernetes ca: %w", err)
@@ -320,6 +321,7 @@ func newTransport(caPath string) (*http.Transport, error) {
 }
 
 func readToken(path string) (string, error) {
+	// #nosec G304 -- token path is an explicit operator-provided Kubernetes configuration path.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

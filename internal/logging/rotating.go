@@ -194,11 +194,12 @@ func openFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
 
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("stat log file %q: %w", path, err)
+		return nil, fmt.Errorf("stat log file %q: %w", path, errors.Join(err, file.Close()))
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		file.Close()
+		if err := file.Close(); err != nil {
+			return nil, fmt.Errorf("close non-regular log file %q: %w", path, err)
+		}
 		return nil, fmt.Errorf("log file %q is not a regular file", path)
 	}
 

@@ -386,6 +386,27 @@ func TestManagerRejectsOversizedRemoteBlocklist(t *testing.T) {
 	}
 }
 
+func TestManagerReturnsFreshCacheReadError(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "blocklist.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 1024*1024+1)), 0o640); err != nil {
+		t.Fatalf("WriteFile cache: %v", err)
+	}
+
+	manager := NewManager(Config{
+		URL:           "https://blocklist.example.test/list.txt",
+		CachePath:     path,
+		RefreshPeriod: time.Hour,
+		ManualDomains: []string{"manual.example"},
+	})
+
+	_, err := manager.Load(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "parse cache") {
+		t.Fatalf("Load() error = %v, want fresh cache parse error", err)
+	}
+}
+
 func TestWriteCacheUsesRestrictedPermissions(t *testing.T) {
 	t.Parallel()
 
@@ -400,5 +421,24 @@ func TestWriteCacheUsesRestrictedPermissions(t *testing.T) {
 	}
 	if got, want := info.Mode().Perm(), os.FileMode(0o640); got != want {
 		t.Fatalf("cache mode = %o, want %o", got, want)
+	}
+}
+
+func TestWriteCacheRejectsSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "cache-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink cache directory: %v", err)
+	}
+
+	err := writeCache(filepath.Join(link, "blocklist.txt"), []byte("example.com\n"))
+	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
+		t.Fatalf("writeCache error = %v, want symlink traversal rejection", err)
 	}
 }

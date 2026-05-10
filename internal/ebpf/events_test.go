@@ -21,6 +21,31 @@ func TestEncodeAndDecodeDomainKey(t *testing.T) {
 	}
 }
 
+func TestEncodeDomainKeyRejectsInvalidDomains(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		domain string
+	}{
+		{name: "empty", domain: ""},
+		{name: "empty label", domain: "example..com"},
+		{name: "label too long", domain: string(bytes.Repeat([]byte("a"), 64)) + ".com"},
+		{name: "domain too long", domain: string(bytes.Repeat([]byte("a."), 128)) + "com"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := encodeDomainKey(tt.domain); err == nil {
+				t.Fatalf("encodeDomainKey(%q) returned nil error", tt.domain)
+			}
+		})
+	}
+}
+
 func TestEncodeDomainSuffixKey(t *testing.T) {
 	t.Parallel()
 
@@ -45,6 +70,57 @@ func TestEncodeDomainSuffixKey(t *testing.T) {
 	}
 	if key.Hash != hash || key.Length != length {
 		t.Fatalf("suffix key = {hash:%d length:%d}, want {hash:%d length:%d}", key.Hash, key.Length, hash, length)
+	}
+}
+
+func TestDecodeQNameRejectsMalformedWireNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "empty", raw: nil},
+		{name: "root", raw: []byte{0}},
+		{name: "label too long", raw: append([]byte{64}, bytes.Repeat([]byte("a"), 64)...)},
+		{name: "truncated label", raw: []byte{7, 'e', 'x'}},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := decodeQName(tt.raw); got != "" {
+				t.Fatalf("decodeQName(%v) = %q, want empty", tt.raw, got)
+			}
+		})
+	}
+}
+
+func TestDecodeAddressAndEnumNamesHandleUnknownValues(t *testing.T) {
+	t.Parallel()
+
+	if got := decodeAddress(9, [16]byte{1, 2, 3, 4}); got != "" {
+		t.Fatalf("decodeAddress unknown family = %q, want empty", got)
+	}
+	if got := decodeAddress(4, [16]byte{}); got != "" {
+		t.Fatalf("decodeAddress zero IPv4 = %q, want empty", got)
+	}
+	if got := decodeAddress(6, [16]byte{}); got != "" {
+		t.Fatalf("decodeAddress zero IPv6 = %q, want empty", got)
+	}
+	if got := transportName(99); got != "unknown" {
+		t.Fatalf("transportName unknown = %q, want unknown", got)
+	}
+	if got := attributionName(99); got != "" {
+		t.Fatalf("attributionName unknown = %q, want empty", got)
+	}
+	if got := directionName(99); got != "" {
+		t.Fatalf("directionName unknown = %q, want empty", got)
+	}
+	if got := socketHookName(99); got != "" {
+		t.Fatalf("socketHookName unknown = %q, want empty", got)
 	}
 }
 

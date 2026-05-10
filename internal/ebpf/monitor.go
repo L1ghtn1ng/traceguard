@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -164,7 +165,9 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 
 	reader, err := ringbuf.NewReader(objects.Events)
 	if err != nil {
-		objects.Close()
+		if closeErr := objects.Close(); closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("create ring buffer reader: %w", err), closeErr)
+		}
 		return nil, fmt.Errorf("create ring buffer reader: %w", err)
 	}
 
@@ -512,10 +515,15 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blo
 			}
 			if addr.Is4() {
 				ip := addr.As4()
-				key := endpoint4CIDRKey{
-					PrefixLen: uint32(24 + endpoint.Prefix.Bits()),
-					Data:      [7]uint8{transport, uint8(endpoint.Port >> 8), uint8(endpoint.Port)},
+				prefixBits := endpoint.Prefix.Bits()
+				if prefixBits < 0 || prefixBits > 32 {
+					return fmt.Errorf("invalid IPv4 endpoint prefix length %d", prefixBits)
 				}
+				key := endpoint4CIDRKey{
+					PrefixLen: 24 + uint32(prefixBits),
+					Data:      [7]uint8{transport},
+				}
+				binary.BigEndian.PutUint16(key.Data[1:3], endpoint.Port)
 				copy(key.Data[3:], ip[:])
 				ipv4[key] = struct{}{}
 				continue
@@ -524,10 +532,15 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blo
 				return fmt.Errorf("invalid endpoint prefix %q", endpoint.Prefix)
 			}
 			ip := addr.As16()
-			key := endpoint6CIDRKey{
-				PrefixLen: uint32(24 + endpoint.Prefix.Bits()),
-				Data:      [19]uint8{transport, uint8(endpoint.Port >> 8), uint8(endpoint.Port)},
+			prefixBits := endpoint.Prefix.Bits()
+			if prefixBits < 0 || prefixBits > 128 {
+				return fmt.Errorf("invalid IPv6 endpoint prefix length %d", prefixBits)
 			}
+			key := endpoint6CIDRKey{
+				PrefixLen: 24 + uint32(prefixBits),
+				Data:      [19]uint8{transport},
+			}
+			binary.BigEndian.PutUint16(key.Data[1:3], endpoint.Port)
 			copy(key.Data[3:], ip[:])
 			ipv6[key] = struct{}{}
 		}
@@ -621,17 +634,18 @@ func encodeDomainKey(domain string) (domainKey, error) {
 		if label == "" {
 			return key, errors.New("empty label")
 		}
-		if len(label) > 63 {
+		labelLen := len(label)
+		if labelLen > 63 {
 			return key, fmt.Errorf("label %q exceeds 63 bytes", label)
 		}
-		if offset+1+len(label)+1 > len(key.Domain) {
+		if offset+1+labelLen+1 > len(key.Domain) {
 			return key, errors.New("domain exceeds DNS wire-format limit")
 		}
 
-		key.Domain[offset] = byte(len(label))
+		key.Domain[offset] = byte(labelLen)
 		offset++
 		copy(key.Domain[offset:], label)
-		offset += len(label)
+		offset += labelLen
 	}
 
 	key.Domain[offset] = 0

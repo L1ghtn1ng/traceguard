@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
@@ -184,6 +185,92 @@ func TestResolveExecutablePath(t *testing.T) {
 
 			if got := resolveExecutablePath(tt.event, tt.process); got != tt.want {
 				t.Fatalf("resolveExecutablePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolverHostUsesAtomicIndex(t *testing.T) {
+	t.Parallel()
+
+	var index atomic.Pointer[map[string]string]
+	if got := resolverHost(&index, ebpfmonitor.Event{Transport: "doh", Address: "1.1.1.1", Port: 443}); got != "" {
+		t.Fatalf("resolverHost without index = %q, want empty", got)
+	}
+
+	current := map[string]string{
+		resolverIndexKey("doh", "1.1.1.1", 443): "cloudflare-dns.com",
+	}
+	index.Store(&current)
+	if got := resolverHost(&index, ebpfmonitor.Event{Transport: "doh", Address: "1.1.1.1", Port: 443}); got != "cloudflare-dns.com" {
+		t.Fatalf("resolverHost = %q, want cloudflare-dns.com", got)
+	}
+	if got := resolverHost(&index, ebpfmonitor.Event{Transport: "dot", Address: "1.1.1.1", Port: 853}); got != "" {
+		t.Fatalf("resolverHost for missing endpoint = %q, want empty", got)
+	}
+}
+
+func TestPolicyDecisionHelpers(t *testing.T) {
+	t.Parallel()
+
+	var pointer atomic.Pointer[blocklist.Policy]
+	if got := domainDecision(&pointer, "example.com"); got != blocklist.DecisionNone {
+		t.Fatalf("domainDecision without policy = %q, want %q", got, blocklist.DecisionNone)
+	}
+	if got := endpointDecision(&pointer, "doh", "1.1.1.1", 443); got != blocklist.DecisionNone {
+		t.Fatalf("endpointDecision without policy = %q, want %q", got, blocklist.DecisionNone)
+	}
+
+	policy := blocklist.NewPolicy(blocklist.Rules{
+		BlockDomains: []string{"blocked.example"},
+		AllowDomains: []string{"allowed.example"},
+	}, []blocklist.ResolvedEndpoint{{
+		Kind: blocklist.EndpointKindDoH,
+		Host: "resolver.example",
+		Port: 443,
+		IP:   []byte{9, 9, 9, 9},
+	}}, nil)
+	pointer.Store(policy)
+
+	if got := domainDecision(&pointer, "blocked.example"); got != blocklist.DecisionBlock {
+		t.Fatalf("domainDecision(blocked.example) = %q, want %q", got, blocklist.DecisionBlock)
+	}
+	if got := domainDecision(&pointer, "allowed.example"); got != blocklist.DecisionAllow {
+		t.Fatalf("domainDecision(allowed.example) = %q, want %q", got, blocklist.DecisionAllow)
+	}
+	if got := endpointDecision(&pointer, "doh", "9.9.9.9", 443); got != blocklist.DecisionBlock {
+		t.Fatalf("endpointDecision(9.9.9.9) = %q, want %q", got, blocklist.DecisionBlock)
+	}
+}
+
+func TestEventKindNameAndSocketAwareness(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		kind        uint32
+		wantName    string
+		wantSockets bool
+	}{
+		{name: "dns", kind: ebpfmonitor.EventDNS, wantName: "dns", wantSockets: true},
+		{name: "blocked", kind: ebpfmonitor.EventBlocked, wantName: "blocked", wantSockets: true},
+		{name: "exec", kind: ebpfmonitor.EventExec, wantName: "exec", wantSockets: false},
+		{name: "resolver", kind: ebpfmonitor.EventResolver, wantName: "resolver", wantSockets: true},
+		{name: "resolver blocked", kind: ebpfmonitor.EventResolverBlocked, wantName: "resolver_blocked", wantSockets: true},
+		{name: "connection", kind: ebpfmonitor.EventConnection, wantName: "connection", wantSockets: true},
+		{name: "unknown", kind: 99, wantName: "unknown", wantSockets: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := eventKindName(tt.kind); got != tt.wantName {
+				t.Fatalf("eventKindName(%d) = %q, want %q", tt.kind, got, tt.wantName)
+			}
+			if got := isSocketAwareEvent(tt.kind); got != tt.wantSockets {
+				t.Fatalf("isSocketAwareEvent(%d) = %v, want %v", tt.kind, got, tt.wantSockets)
 			}
 		})
 	}

@@ -23,9 +23,10 @@ const (
 	defaultProcessCacheTTL = 10 * time.Minute
 	defaultExportBatchSize = 50
 	defaultExportFlush     = 5 * time.Second
-	defaultKubeTokenPath   = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	defaultKubeCAPath      = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	defaultKubePoll        = 2 * time.Minute
+	// #nosec G101 -- this is the standard Kubernetes service-account token path, not an embedded credential value.
+	defaultKubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	defaultKubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	defaultKubePoll      = 2 * time.Minute
 )
 
 type domainList []string
@@ -361,6 +362,7 @@ func loadDomainFile(path string) ([]string, error) {
 		return nil, fmt.Errorf("domain file path %q must be absolute", path)
 	}
 
+	// #nosec G304 -- domain files are explicit operator-provided absolute paths.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read domain file %q: %w", path, err)

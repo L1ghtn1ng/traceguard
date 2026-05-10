@@ -320,6 +320,25 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	}
 }
 
+func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "spool-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink spool directory: %v", err)
+	}
+
+	_, err := newSpoolStore(link)
+	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
+		t.Fatalf("newSpoolStore error = %v, want symlink traversal rejection", err)
+	}
+}
+
 func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 	t.Parallel()
 

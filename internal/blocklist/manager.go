@@ -193,6 +193,9 @@ func (m *Manager) Load(ctx context.Context) (Rules, error) {
 	switch {
 	case cacheFresh:
 		remote, err = m.readCache()
+		if err != nil {
+			return Rules{}, err
+		}
 	default:
 		remote, err = m.fetchAndCache(ctx)
 		if err != nil {
@@ -738,23 +741,22 @@ func writeCache(path string, content []byte) error {
 	if err := rejectSymlink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("persist cache %q: %w", path, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create cache directory: %w", err)
+	cacheDir, err := ensureCacheDirectory(filepath.Dir(path))
+	if err != nil {
+		return err
 	}
 
-	temp, err := os.CreateTemp(filepath.Dir(path), "traceguard-blocklist-*.tmp")
+	temp, err := os.CreateTemp(cacheDir, "traceguard-blocklist-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create cache temp file: %w", err)
 	}
 	defer os.Remove(temp.Name())
 
 	if _, err := temp.Write(content); err != nil {
-		temp.Close()
-		return fmt.Errorf("write cache temp file: %w", err)
+		return fmt.Errorf("write cache temp file: %w", errors.Join(err, temp.Close()))
 	}
 	if err := temp.Chmod(0o640); err != nil {
-		temp.Close()
-		return fmt.Errorf("chmod cache temp file: %w", err)
+		return fmt.Errorf("chmod cache temp file: %w", errors.Join(err, temp.Close()))
 	}
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close cache temp file: %w", err)
@@ -764,6 +766,28 @@ func writeCache(path string, content []byte) error {
 		return fmt.Errorf("persist cache: %w", err)
 	}
 	return nil
+}
+
+func ensureCacheDirectory(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	if err := os.MkdirAll(cleaned, 0o750); err != nil {
+		return "", fmt.Errorf("create cache directory: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve cache directory: %w", err)
+	}
+	if filepath.Clean(resolved) != cleaned {
+		return "", fmt.Errorf("cache directory %q must not traverse symlinks", cleaned)
+	}
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("stat cache directory: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("cache directory %q is not a directory", cleaned)
+	}
+	return cleaned, nil
 }
 
 func rejectSymlink(path string) error {
