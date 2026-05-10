@@ -73,6 +73,55 @@ func TestRecorderWritesArchive(t *testing.T) {
 	}
 }
 
+func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
+	t.Parallel()
+
+	var buffer bytes.Buffer
+	logger, err := logging.NewLogger(&buffer, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+
+	blockedPath := filepath.Join(t.TempDir(), "blocked.log")
+	recorder, err := NewRecorder(context.Background(), logger, telemetry.NewRegistry(), Config{
+		BlockedPath: blockedPath,
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	recorder.Info("dns", map[string]any{"domain": "allowed.example"})
+	recorder.Info("would-block", map[string]any{"domain": "dry-run.example", "policy": "block"})
+	recorder.Info("blocked", map[string]any{"domain": "blocked.example", "policy": "block"})
+	recorder.Info("blocked-doh", map[string]any{"endpoint": "dns.example", "policy": "block"})
+
+	content, err := os.ReadFile(blockedPath)
+	if err != nil {
+		t.Fatalf("ReadFile blocked log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("blocked log line count = %d, want 2; content=%q", len(lines), content)
+	}
+
+	var first map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("json.Unmarshal first blocked line: %v", err)
+	}
+	if first["message"] != "blocked" || first["domain"] != "blocked.example" || first["policy"] != "block" {
+		t.Fatalf("first blocked line = %#v, want blocked domain record", first)
+	}
+
+	var second map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("json.Unmarshal second blocked line: %v", err)
+	}
+	if second["message"] != "blocked-doh" || second["endpoint"] != "dns.example" || second["policy"] != "block" {
+		t.Fatalf("second blocked line = %#v, want blocked resolver record", second)
+	}
+}
+
 func TestRecorderErrorDedupSuppressesRepeatedErrors(t *testing.T) {
 	t.Parallel()
 

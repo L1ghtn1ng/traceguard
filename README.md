@@ -68,6 +68,7 @@ Notes:
 - bare IP literals such as `1.1.1.1` or `[2606:4700:4700::1111]` are treated as resolver exceptions for both DoH on 443 and DoT on 853
 - bare CIDR literals such as `1.1.1.0/24` or `2606:4700:4700::/48` are treated the same way for resolver ranges on DoH 443 and DoT 853
 - logs are written to `/var/log/traceguard/traceguard.log` by default, rotate at 1 GiB, and retain the last 5 rotated files
+- enforced blocked events are also written as JSON to `blocked.log` in the same log directory, with the same rotation policy
 - process metadata is cached from `/proc` for 10 minutes by default to reduce lookup overhead
 - Kubernetes enrichment is optional, API-driven, and keyed by the observed pod UID
 - common IPv6 extension headers are parsed before DNS inspection
@@ -83,7 +84,7 @@ Notes:
 ```bash
 go generate ./internal/ebpf
 go test ./...
-go build ./cmd/traceguard
+make build
 ```
 
 Common targets:
@@ -94,6 +95,10 @@ make test
 make build
 make snapshot
 ```
+
+`make build` produces a hardened Linux binary with PIE enabled and the C
+toolchain configured for stack protection on all C functions,
+`_FORTIFY_SOURCE=2`, RELRO, BIND_NOW, and a non-executable stack.
 
 ## Usage
 

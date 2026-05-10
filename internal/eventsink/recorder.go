@@ -35,6 +35,7 @@ const (
 
 type Config struct {
 	ArchivePath      string
+	BlockedPath      string
 	ExportURL        string
 	ExportAuthHeader string
 	ExportAuthToken  string
@@ -50,6 +51,7 @@ type Config struct {
 type Recorder struct {
 	logger   *logging.Logger
 	archive  *archiveSink
+	blocked  *blockedSink
 	exporter *exportSink
 	now      func() time.Time
 
@@ -84,11 +86,24 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 		}
 		recorder.archive = archive
 	}
+	if strings.TrimSpace(cfg.BlockedPath) != "" {
+		blocked, err := newBlockedSink(cfg.BlockedPath)
+		if err != nil {
+			if recorder.archive != nil {
+				_ = recorder.archive.Close()
+			}
+			return nil, err
+		}
+		recorder.blocked = blocked
+	}
 	if strings.TrimSpace(cfg.ExportURL) != "" {
 		exporter, err := newExportSink(ctx, cfg, metrics)
 		if err != nil {
 			if recorder.archive != nil {
 				_ = recorder.archive.Close()
+			}
+			if recorder.blocked != nil {
+				_ = recorder.blocked.Close()
 			}
 			return nil, err
 		}
@@ -101,6 +116,9 @@ func (r *Recorder) Close() error {
 	var errs []error
 	if r.archive != nil {
 		errs = append(errs, r.archive.Close())
+	}
+	if r.blocked != nil {
+		errs = append(errs, r.blocked.Close())
 	}
 	if r.exporter != nil {
 		errs = append(errs, r.exporter.Close())
@@ -185,6 +203,9 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 	if r.archive != nil {
 		r.archive.Write(entry)
 	}
+	if r.blocked != nil && isBlockedRecord(entry) {
+		r.blocked.Write(entry)
+	}
 	if r.exporter != nil {
 		r.exporter.Enqueue(entry)
 	}
@@ -243,6 +264,43 @@ func (a *archiveSink) Write(entry record) {
 
 func (a *archiveSink) Close() error {
 	return a.writer.Close()
+}
+
+type blockedSink struct {
+	writer *logging.RotatingFile
+	mu     sync.Mutex
+}
+
+func newBlockedSink(path string) (*blockedSink, error) {
+	writer, err := logging.NewRotatingFile(path, logging.Options{
+		MaxSizeBytes: 1 << 30,
+		MaxBackups:   5,
+		FileMode:     0o640,
+		DirMode:      0o750,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize blocked event log: %w", err)
+	}
+	return &blockedSink{writer: writer}, nil
+}
+
+func (b *blockedSink) Write(entry record) {
+	payload, err := marshalSingleRecord(entry)
+	if err != nil {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, _ = b.writer.Write(append(payload, '\n'))
+}
+
+func (b *blockedSink) Close() error {
+	return b.writer.Close()
+}
+
+func isBlockedRecord(entry record) bool {
+	return entry.Message == "blocked" || strings.HasPrefix(entry.Message, "blocked-")
 }
 
 type exportSink struct {

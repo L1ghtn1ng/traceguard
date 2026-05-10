@@ -6,18 +6,22 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/L1ghtn1ng/traceguard/internal/app"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/doctor"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/hardening"
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/version"
 )
 
 func main() {
+	hardening.Anchor()
+
 	cfg, err := config.Parse()
 	if err != nil {
 		log.Fatalf("parse config: %v", err)
@@ -73,6 +77,7 @@ func main() {
 
 	recorder, err := eventsink.NewRecorder(ctx, logger, metrics, eventsink.Config{
 		ArchivePath:      cfg.EventArchivePath,
+		BlockedPath:      filepath.Join(filepath.Dir(cfg.LogPath), "blocked.log"),
 		ExportURL:        cfg.EventExportURL,
 		ExportAuthHeader: cfg.EventExportAuthHeader,
 		ExportAuthToken:  cfg.EventExportAuthToken,
