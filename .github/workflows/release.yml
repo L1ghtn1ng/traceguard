@@ -41,7 +41,7 @@ jobs:
       - name: Install Clang cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang lld gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install --yes clang gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Configure cgo cross compiler
         run: |
@@ -55,7 +55,7 @@ jobs:
               exec /usr/bin/clang "$@"
               ;;
             linux/arm64)
-              exec /usr/bin/clang --target=aarch64-linux-gnu --gcc-toolchain=/usr -fuse-ld=lld "$@"
+              exec /usr/bin/clang --target=aarch64-linux-gnu --gcc-toolchain=/usr "$@"
               ;;
             *)
               echo "unsupported cgo target: GOOS=${GOOS:-} GOARCH=${GOARCH:-}" >&2
