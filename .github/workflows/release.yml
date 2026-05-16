@@ -55,7 +55,7 @@ jobs:
               exec /usr/bin/clang "$@"
               ;;
             linux/arm64)
-              exec /usr/bin/clang --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu --gcc-toolchain=/usr -fuse-ld=lld "$@"
+              exec /usr/bin/clang --target=aarch64-linux-gnu --gcc-toolchain=/usr -fuse-ld=lld "$@"
               ;;
             *)
               echo "unsupported cgo target: GOOS=${GOOS:-} GOARCH=${GOARCH:-}" >&2
