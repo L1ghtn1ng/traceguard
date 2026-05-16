@@ -38,10 +38,35 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install clang
+      - name: Install Clang cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang
+          sudo apt-get install --yes clang lld gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Configure cgo cross compiler
+        run: |
+          umask 077
+          cat > "${RUNNER_TEMP}/traceguard-clang" <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+
+          case "${GOOS:-}/${GOARCH:-}" in
+            linux/amd64)
+              exec /usr/bin/clang "$@"
+              ;;
+            linux/arm64)
+              exec /usr/bin/clang --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu --gcc-toolchain=/usr -fuse-ld=lld "$@"
+              ;;
+            *)
+              echo "unsupported cgo target: GOOS=${GOOS:-} GOARCH=${GOARCH:-}" >&2
+              exit 1
+              ;;
+          esac
+          EOF
+          chmod +x "${RUNNER_TEMP}/traceguard-clang"
+          GOOS=linux GOARCH=amd64 "${RUNNER_TEMP}/traceguard-clang" --version
+          printf 'int main(void) { return 0; }\n' > "${RUNNER_TEMP}/traceguard-arm64-smoke.c"
+          GOOS=linux GOARCH=arm64 "${RUNNER_TEMP}/traceguard-clang" "${RUNNER_TEMP}/traceguard-arm64-smoke.c" -o "${RUNNER_TEMP}/traceguard-arm64-smoke"
 
       - name: Run eBPF C checks
         run: make test-ebpf-c
@@ -60,3 +85,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CC: ${{ runner.temp }}/traceguard-clang
