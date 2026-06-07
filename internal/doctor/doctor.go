@@ -122,6 +122,24 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 			check(true, "event-export-client-cert", "disabled")
 		}
 	}
+	if cfg.EventSyslogURL != "" {
+		parsed, err := url.Parse(cfg.EventSyslogURL)
+		check(err == nil && validSyslogURL(parsed), "event-syslog-url", cfg.EventSyslogURL)
+		check(validSyslogFacility(cfg.EventSyslogFacility), "event-syslog-facility", cfg.EventSyslogFacility)
+		check(validSyslogTag(cfg.EventSyslogTag), "event-syslog-tag", cfg.EventSyslogTag)
+		check(cfg.EventSyslogTimeout > 0, "event-syslog-timeout", cfg.EventSyslogTimeout.String())
+		if cfg.EventSyslogCAPath != "" {
+			if info, err := env.stat(cfg.EventSyslogCAPath); err != nil {
+				check(false, "event-syslog-ca-path", err.Error())
+			} else {
+				check(!info.IsDir(), "event-syslog-ca-path", cfg.EventSyslogCAPath)
+			}
+		} else if parsed != nil && parsed.Scheme == "syslog+tls" {
+			check(true, "event-syslog-ca-path", "system trust store")
+		}
+	} else {
+		check(true, "event-syslog", "disabled")
+	}
 
 	if err := env.validateProcRoot("/proc"); err != nil {
 		check(false, "procfs", err.Error())
@@ -170,6 +188,33 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	}
 	_, _ = io.WriteString(w, "PASS summary: environment looks ready for TraceGuard\n")
 	return nil
+}
+
+func validSyslogURL(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
+	switch parsed.Scheme {
+	case "syslog+udp", "syslog+tcp", "syslog+tls":
+	default:
+		return false
+	}
+	return parsed.Hostname() != "" && parsed.Port() != ""
+}
+
+func validSyslogFacility(facility string) bool {
+	switch strings.ToLower(strings.TrimSpace(facility)) {
+	case "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp",
+		"local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7":
+		return true
+	default:
+		return false
+	}
+}
+
+func validSyslogTag(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	return tag != "" && !strings.ContainsAny(tag, " \t\r\n")
 }
 
 func Summary(err error) string {

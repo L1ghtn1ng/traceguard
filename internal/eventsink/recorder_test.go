@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -515,6 +516,110 @@ func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 	}
 }
 
+func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
+	t.Parallel()
+
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket returned error: %v", err)
+	}
+	defer packetConn.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, 4096)
+		_ = packetConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, _, err := packetConn.ReadFrom(buffer)
+		if err != nil {
+			received <- "ERROR: " + err.Error()
+			return
+		}
+		received <- string(buffer[:n])
+	}()
+
+	recorder, err := newSyslogTestRecorder(t, Config{
+		SyslogURL:      "syslog+udp://" + packetConn.LocalAddr().String(),
+		SyslogFacility: "local0",
+		SyslogTag:      "traceguard",
+		SyslogTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	recorder.Info("dns", map[string]any{"domain": "example.com"})
+
+	select {
+	case message := <-received:
+		if strings.HasPrefix(message, "ERROR: ") {
+			t.Fatal(message)
+		}
+		if !strings.Contains(message, `<134>1 `) || !strings.Contains(message, ` traceguard - - - {`) || !strings.Contains(message, `"message":"dns"`) || !strings.Contains(message, `"domain":"example.com"`) {
+			t.Fatalf("syslog message = %q, want RFC5424 envelope with JSON event", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for syslog datagram")
+	}
+}
+
+func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	defer listener.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			received <- "ERROR: " + err.Error()
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buffer := make([]byte, 4096)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			received <- "ERROR: " + err.Error()
+			return
+		}
+		received <- string(buffer[:n])
+	}()
+
+	recorder, err := newSyslogTestRecorder(t, Config{
+		SyslogURL:      "syslog+tcp://" + listener.Addr().String(),
+		SyslogFacility: "local1",
+		SyslogTag:      "traceguard",
+		SyslogTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	recorder.Error("export", errors.New("boom"), nil)
+
+	select {
+	case message := <-received:
+		if strings.HasPrefix(message, "ERROR: ") {
+			t.Fatal(message)
+		}
+		parts := strings.SplitN(message, " ", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			t.Fatalf("tcp syslog message = %q, want octet-counted frame", message)
+		}
+		if !strings.Contains(parts[1], `<139>1 `) || !strings.Contains(parts[1], `"message":"export"`) || !strings.Contains(parts[1], `"error":"boom"`) {
+			t.Fatalf("tcp syslog frame = %q, want RFC5424 error event", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for syslog tcp frame")
+	}
+}
+
 func newTestRecorder(t *testing.T) (*Recorder, *bytes.Buffer) {
 	t.Helper()
 
@@ -531,6 +636,16 @@ func newTestRecorder(t *testing.T) (*Recorder, *bytes.Buffer) {
 		_ = recorder.Close()
 	})
 	return recorder, &buffer
+}
+
+func newSyslogTestRecorder(t *testing.T, cfg Config) (*Recorder, error) {
+	t.Helper()
+
+	logger, err := logging.NewLogger(io.Discard, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	return NewRecorder(context.Background(), logger, telemetry.NewRegistry(), cfg)
 }
 
 func decodeLogLines(t *testing.T, buffer *bytes.Buffer) []map[string]any {

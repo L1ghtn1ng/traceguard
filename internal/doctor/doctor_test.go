@@ -41,6 +41,11 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 	cfg.EventExportCAPath = filepath.Join(root, "missing-ca.crt")
 	cfg.EventExportClientCert = filepath.Join(root, "missing-client.crt")
 	cfg.EventExportClientKey = filepath.Join(root, "missing-client.key")
+	cfg.EventSyslogURL = "syslog://collector.test"
+	cfg.EventSyslogFacility = "bad"
+	cfg.EventSyslogTag = "bad tag"
+	cfg.EventSyslogTimeout = 0
+	cfg.EventSyslogCAPath = filepath.Join(root, "missing-syslog-ca.crt")
 	cfg.KubernetesEnrich = true
 	cfg.KubernetesAPIURL = "http://kubernetes.default.svc"
 	cfg.KubernetesTokenPath = filepath.Join(root, "missing-token")
@@ -64,6 +69,11 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 		"FAIL event-export-ca-path",
 		"FAIL event-export-client-cert",
 		"FAIL event-export-client-key",
+		"FAIL event-syslog-url",
+		"FAIL event-syslog-facility",
+		"FAIL event-syslog-tag",
+		"FAIL event-syslog-timeout",
+		"FAIL event-syslog-ca-path",
 		"FAIL privileges",
 		"FAIL tracepoint-perf-event",
 		"FAIL process-cache-ttl",
@@ -71,7 +81,7 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 		"FAIL kubernetes-token-path",
 		"FAIL kubernetes-ca-path",
 		"FAIL kubernetes-poll-interval",
-		"doctor found 12 failing checks",
+		"doctor found 17 failing checks",
 	} {
 		if !strings.Contains(text+"\n"+err.Error(), want) {
 			t.Fatalf("missing %q\noutput:\n%s\nerr:%v", want, text, err)

@@ -17,6 +17,7 @@ TraceGuard is a Go 1.26 Linux security utility that uses the kernel eBPF subsyst
 - expose health and Prometheus-style metrics over HTTP
 - optionally archive JSON events locally and export them to an HTTPS collector
 - support batched authenticated HTTPS export with durable retry spooling
+- export structured events to remote syslog over UDP, TCP, or TLS
 - support optional gzip and mTLS for HTTPS event export
 - optionally enrich pod-scoped events with Kubernetes namespace, pod, node, workload, service account, container, and image metadata
 - run a built-in environment doctor check before deployment
@@ -43,6 +44,7 @@ The user-space service:
 - can archive structured events to a local JSONL file with rotation
 - can export structured events to an HTTPS endpoint in batches
 - can persist failed export batches to disk for later replay
+- can send structured events to remote syslog collectors in RFC5424-style messages
 - can enrich pod-scoped events from the Kubernetes API using the existing `pod_uid` signal
 - emits newline-delimited JSON records by default and can also emit text logs
 - exports `/health` and `/metrics` when a metrics address is configured
@@ -211,9 +213,14 @@ Enable Kubernetes enrichment on a node:
 ```bash
 sudo ./traceguard \
   -kubernetes-enrich \
-  -kubernetes-api-url https://kubernetes.default.svc:443 \
   -kubernetes-node-name "$(hostname)"
 ```
+
+When running in Kubernetes, `-kubernetes-enrich` can infer the API URL from
+`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT_HTTPS`, and it uses the
+standard service-account token and CA paths by default. Set
+`TRACEGUARD_KUBERNETES_NODE_NAME`, or expose `NODE_NAME` through the downward API,
+to scope pod metadata listing to one node.
 
 Use the packaged JSON output and metrics defaults:
 
@@ -244,6 +251,19 @@ sudo ./traceguard \
   -event-export-client-key /etc/traceguard/siem-client.key
 ```
 
+Export events to a remote syslog collector:
+
+```bash
+sudo ./traceguard \
+  -event-syslog-url syslog+tls://syslog.example:6514 \
+  -event-syslog-facility local0 \
+  -event-syslog-ca-path /etc/traceguard/syslog-ca.crt
+```
+
+Remote syslog supports `syslog+udp://`, `syslog+tcp://`, and `syslog+tls://`
+URLs. It is best-effort and does not spool failed sends; use HTTPS export when
+durable retry is required.
+
 Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
@@ -268,6 +288,11 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_EVENT_EXPORT_CLIENT_CERT`
 - `TRACEGUARD_EVENT_EXPORT_CLIENT_KEY`
 - `TRACEGUARD_EVENT_EXPORT_GZIP`
+- `TRACEGUARD_EVENT_SYSLOG_URL`
+- `TRACEGUARD_EVENT_SYSLOG_FACILITY`
+- `TRACEGUARD_EVENT_SYSLOG_TAG`
+- `TRACEGUARD_EVENT_SYSLOG_TIMEOUT`
+- `TRACEGUARD_EVENT_SYSLOG_CA_PATH`
 - `TRACEGUARD_PROCESS_CACHE_TTL`
 - `TRACEGUARD_FILE_AUDIT`
 - `TRACEGUARD_KUBERNETES_ENRICH`
@@ -291,9 +316,10 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - event archive and export disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` or `TRACEGUARD_EVENT_EXPORT_URL` is set
 - export batching defaults: `TRACEGUARD_EVENT_EXPORT_BATCH_SIZE=50`, `TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL=5s`, `TRACEGUARD_EVENT_EXPORT_GZIP=false`
 - export spool path: `TRACEGUARD_EVENT_EXPORT_SPOOL_PATH=/var/lib/traceguard/export-spool`
+- remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=2m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
-- Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`
+- Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint
 
 Manual policy inputs:
 
@@ -368,5 +394,6 @@ The generated packages install:
 - Metrics include event volume, policy decisions, blocklist refresh/load status, policy size and mode, eBPF attachment/read health, export queue and spool backlog, process attribution quality, Kubernetes refreshes, and enrichment hit/miss counts.
 - Event export requires an HTTPS endpoint and uses bounded in-memory queuing to avoid blocking the main event loop.
 - Event export batches records as JSON arrays, supports a configurable auth header, optional gzip compression, optional mTLS, and can spool failed batches to disk for replay.
+- Remote syslog export sends RFC5424-style structured events over UDP, TCP, or TLS without durable spooling.
 - Kubernetes enrichment uses HTTPS, a bearer token, bounded response sizes, and a periodic cache refresh instead of live per-event API calls.
 - Encrypted DoH and DoT traffic is handled at the resolver-endpoint level; the implementation does not attempt TLS interception or decryption.

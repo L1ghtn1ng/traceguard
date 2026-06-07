@@ -20,6 +20,7 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.IncPolicyReload("sighup", true)
 	registry.IncEventArchive("success")
 	registry.IncEventExport("queued")
+	registry.IncEventSyslog("success")
 	registry.SetEventExportQueueDepth(7)
 	registry.SetEventExportSpoolFiles(2)
 	registry.SetEventExportLastSuccess()
@@ -57,6 +58,7 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`traceguard_policy_reload_total{status="success",trigger="sighup"} 1`,
 		`traceguard_event_archive_total{status="success"} 1`,
 		`traceguard_event_export_total{status="queued"} 1`,
+		`traceguard_event_syslog_total{status="success"} 1`,
 		`traceguard_kubernetes_refresh_total{status="success"} 1`,
 		`traceguard_kubernetes_enrichment_total{status="hit"} 1`,
 		`traceguard_connections_total{attribution="kernel-ingress",direction="inbound",family="ipv4",protocol="tcp"} 1`,

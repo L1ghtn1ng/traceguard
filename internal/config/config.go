@@ -26,6 +26,9 @@ const (
 	defaultExportBatchSize = 50
 	defaultExportFlush     = 5 * time.Second
 	defaultExportSpoolPath = "/var/lib/traceguard/export-spool"
+	defaultSyslogFacility  = "local0"
+	defaultSyslogTag       = "traceguard"
+	defaultSyslogTimeout   = 5 * time.Second
 	// #nosec G101 -- this is the standard Kubernetes service-account token path, not an embedded credential value.
 	defaultKubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultKubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -73,6 +76,11 @@ type Config struct {
 	EventExportClientCert string
 	EventExportClientKey  string
 	EventExportGzip       bool
+	EventSyslogURL        string
+	EventSyslogFacility   string
+	EventSyslogTag        string
+	EventSyslogTimeout    time.Duration
+	EventSyslogCAPath     string
 	ProcessCacheTTL       time.Duration
 	FileAudit             bool
 	KubernetesEnrich      bool
@@ -113,6 +121,11 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
 	fs.StringVar(&cfg.EventExportClientKey, "event-export-client-key", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_KEY", ""), "path to an optional client key for HTTPS event export")
 	fs.BoolVar(&cfg.EventExportGzip, "event-export-gzip", envBool("TRACEGUARD_EVENT_EXPORT_GZIP", false), "gzip-compress event export batches")
+	fs.StringVar(&cfg.EventSyslogURL, "event-syslog-url", envString("TRACEGUARD_EVENT_SYSLOG_URL", ""), "remote syslog URL: syslog+udp://host:514, syslog+tcp://host:514, or syslog+tls://host:6514")
+	fs.StringVar(&cfg.EventSyslogFacility, "event-syslog-facility", envString("TRACEGUARD_EVENT_SYSLOG_FACILITY", defaultSyslogFacility), "remote syslog facility, for example local0")
+	fs.StringVar(&cfg.EventSyslogTag, "event-syslog-tag", envString("TRACEGUARD_EVENT_SYSLOG_TAG", defaultSyslogTag), "remote syslog app-name/tag")
+	fs.DurationVar(&cfg.EventSyslogTimeout, "event-syslog-timeout", envDuration("TRACEGUARD_EVENT_SYSLOG_TIMEOUT", defaultSyslogTimeout), "remote syslog connection/write timeout")
+	fs.StringVar(&cfg.EventSyslogCAPath, "event-syslog-ca-path", envString("TRACEGUARD_EVENT_SYSLOG_CA_PATH", ""), "path to an optional CA bundle for syslog+tls")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", envDuration("TRACEGUARD_PROCESS_CACHE_TTL", defaultProcessCacheTTL), "how long to cache process metadata from /proc")
 	fs.BoolVar(&cfg.FileAudit, "file-audit", envBool("TRACEGUARD_FILE_AUDIT", true), "emit file access audit events for open-style syscalls")
 	fs.BoolVar(&cfg.KubernetesEnrich, "kubernetes-enrich", envBool("TRACEGUARD_KUBERNETES_ENRICH", false), "enrich events with Kubernetes pod metadata from the API")
@@ -130,6 +143,7 @@ func Parse() (Config, error) {
 	if fs.NArg() > 0 {
 		return Config{}, fmt.Errorf("unexpected positional arguments: %s; quote '*' as -block-domain '*'", strings.Join(fs.Args(), ", "))
 	}
+	normalizeKubernetesConfig(&cfg)
 	if cfg.PrintVersion || cfg.Doctor {
 		return cfg, nil
 	}
@@ -178,6 +192,9 @@ func Parse() (Config, error) {
 	if cfg.EventExportClientKey != "" && !filepath.IsAbs(cfg.EventExportClientKey) {
 		return Config{}, errors.New("event-export-client-key must be an absolute path")
 	}
+	if cfg.EventSyslogCAPath != "" && !filepath.IsAbs(cfg.EventSyslogCAPath) {
+		return Config{}, errors.New("event-syslog-ca-path must be an absolute path")
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.LogFormat)) {
 	case "text", "json":
 		cfg.LogFormat = strings.ToLower(strings.TrimSpace(cfg.LogFormat))
@@ -208,6 +225,11 @@ func Parse() (Config, error) {
 		}
 		if (cfg.EventExportClientCert == "") != (cfg.EventExportClientKey == "") {
 			return Config{}, errors.New("event-export-client-cert and event-export-client-key must be set together")
+		}
+	}
+	if cfg.EventSyslogURL != "" {
+		if err := validateSyslogConfig(cfg); err != nil {
+			return Config{}, err
 		}
 	}
 	if cfg.ProcessCacheTTL <= 0 {
@@ -267,6 +289,119 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+func validateSyslogConfig(cfg Config) error {
+	parsed, err := neturl.Parse(strings.TrimSpace(cfg.EventSyslogURL))
+	if err != nil {
+		return fmt.Errorf("event-syslog-url: %w", err)
+	}
+	switch parsed.Scheme {
+	case "syslog+udp", "syslog+tcp", "syslog+tls":
+	default:
+		return errors.New("event-syslog-url must use syslog+udp://, syslog+tcp://, or syslog+tls://")
+	}
+	if parsed.Hostname() == "" || parsed.Port() == "" {
+		return errors.New("event-syslog-url must include host and port")
+	}
+	if _, ok := syslogFacilityCode(cfg.EventSyslogFacility); !ok {
+		return errors.New("event-syslog-facility must be one of kern,user,mail,daemon,auth,syslog,lpr,news,uucp,cron,authpriv,ftp,local0-local7")
+	}
+	if !validSyslogTag(cfg.EventSyslogTag) {
+		return errors.New("event-syslog-tag must be non-empty and must not contain whitespace")
+	}
+	if cfg.EventSyslogTimeout <= 0 {
+		return errors.New("event-syslog-timeout must be positive")
+	}
+	return nil
+}
+
+func syslogFacilityCode(facility string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(facility)) {
+	case "kern":
+		return 0, true
+	case "user":
+		return 1, true
+	case "mail":
+		return 2, true
+	case "daemon":
+		return 3, true
+	case "auth":
+		return 4, true
+	case "syslog":
+		return 5, true
+	case "lpr":
+		return 6, true
+	case "news":
+		return 7, true
+	case "uucp":
+		return 8, true
+	case "cron":
+		return 9, true
+	case "authpriv":
+		return 10, true
+	case "ftp":
+		return 11, true
+	case "local0":
+		return 16, true
+	case "local1":
+		return 17, true
+	case "local2":
+		return 18, true
+	case "local3":
+		return 19, true
+	case "local4":
+		return 20, true
+	case "local5":
+		return 21, true
+	case "local6":
+		return 22, true
+	case "local7":
+		return 23, true
+	default:
+		return 0, false
+	}
+}
+
+func validSyslogTag(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	return tag != "" && !strings.ContainsAny(tag, " \t\r\n")
+}
+
+func detectKubernetesAPIURL() string {
+	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
+	if host == "" {
+		return "https://kubernetes.default.svc:443"
+	}
+	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS"))
+	if port == "" {
+		port = strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
+	}
+	if port == "" {
+		port = "443"
+	}
+	return "https://" + net.JoinHostPort(host, port)
+}
+
+func normalizeKubernetesConfig(cfg *Config) {
+	if !cfg.KubernetesEnrich {
+		return
+	}
+	if cfg.KubernetesAPIURL == "" {
+		cfg.KubernetesAPIURL = detectKubernetesAPIURL()
+	}
+	if cfg.KubernetesNodeName == "" {
+		cfg.KubernetesNodeName = firstEnv("NODE_NAME", "KUBE_NODE_NAME")
+	}
+}
+
+func firstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

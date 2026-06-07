@@ -1,6 +1,6 @@
 # Security Policy
 
-TraceGuard is a privileged Linux security utility that attaches eBPF programs to cgroup and tracepoint hooks, reads process metadata from `/proc`, and can export telemetry to remote HTTPS endpoints. Security reports should focus on issues that materially affect privilege boundaries, policy enforcement, confidentiality, integrity, or availability.
+TraceGuard is a privileged Linux security utility that attaches eBPF programs to cgroup and tracepoint hooks, reads process metadata from `/proc`, and can export telemetry to remote HTTPS or syslog endpoints. Security reports should focus on issues that materially affect privilege boundaries, policy enforcement, confidentiality, integrity, or availability.
 
 ## Supported Versions
 
@@ -41,7 +41,7 @@ The following are generally considered security issues:
 - Privilege escalation or unintended code execution
 - Bypass of enforced DNS or resolver endpoint blocking
 - Exposure of sensitive telemetry, credentials, or local files
-- TLS verification flaws in remote blocklist fetch or HTTPS event export
+- TLS verification flaws in remote blocklist fetch, HTTPS event export, or TLS syslog export
 - Unauthorized access introduced by metrics, logging, cache, or spool handling
 - Incorrect SELinux/AppArmor label reporting or file access auditing behavior that materially affects security decisions
 - Denial of service caused by untrusted network input or malformed policy input in privileged paths
@@ -64,7 +64,7 @@ Because TraceGuard runs with elevated privileges, treat deployment choices as pa
 - Run the latest supported release and keep the host kernel and Go dependencies current.
 - Prefer the packaged systemd unit or an equivalent hardened service definition with a tight capability set and restricted writable paths.
 - Expose `-metrics-addr` only on localhost or a trusted management network. The built-in `/health` and `/metrics` server is plain HTTP and does not provide authentication.
-- Keep `-blocklist-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS for event export where appropriate.
+- Keep `-blocklist-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS for event export where appropriate. Prefer `syslog+tls://` over UDP or plaintext TCP when sending syslog events outside a trusted management network.
 - Protect `TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN`, client certificates, cache files, export spool data, and logs with least-privilege filesystem permissions.
 - The packaged env file enables file access auditing. Set `TRACEGUARD_FILE_AUDIT=false` when the expected event volume or retained path data is not acceptable for the host.
 - Review Kubernetes API credentials and RBAC carefully before enabling `-kubernetes-enrich`.

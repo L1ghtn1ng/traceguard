@@ -88,6 +88,11 @@ func main() {
 		ExportClientCert: cfg.EventExportClientCert,
 		ExportClientKey:  cfg.EventExportClientKey,
 		ExportGzip:       cfg.EventExportGzip,
+		SyslogURL:        cfg.EventSyslogURL,
+		SyslogFacility:   cfg.EventSyslogFacility,
+		SyslogTag:        cfg.EventSyslogTag,
+		SyslogTimeout:    cfg.EventSyslogTimeout,
+		SyslogCAPath:     cfg.EventSyslogCAPath,
 	})
 	if err != nil {
 		logger.Error("initialize event recorder", err, nil)

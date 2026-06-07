@@ -139,6 +139,10 @@ func (r *Registry) IncEventExport(status string) {
 	r.incCounter(metricKey1("traceguard_event_export_total", "status", status))
 }
 
+func (r *Registry) IncEventSyslog(status string) {
+	r.incCounter(metricKey1("traceguard_event_syslog_total", "status", status))
+}
+
 func (r *Registry) SetEventExportQueueDepth(depth int) {
 	r.setGauge("traceguard_event_export_queue_depth", int64(depth))
 }

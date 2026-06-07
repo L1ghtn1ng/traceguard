@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseWildcardPolicyViaFlag(t *testing.T) {
@@ -130,6 +131,11 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_EVENT_EXPORT_BATCH_SIZE",
 		"TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL",
 		"TRACEGUARD_EVENT_EXPORT_GZIP",
+		"TRACEGUARD_EVENT_SYSLOG_URL",
+		"TRACEGUARD_EVENT_SYSLOG_FACILITY",
+		"TRACEGUARD_EVENT_SYSLOG_TAG",
+		"TRACEGUARD_EVENT_SYSLOG_TIMEOUT",
+		"TRACEGUARD_EVENT_SYSLOG_CA_PATH",
 		"TRACEGUARD_PROCESS_CACHE_TTL",
 		"TRACEGUARD_FILE_AUDIT",
 		"TRACEGUARD_KUBERNETES_ENRICH",
@@ -164,6 +170,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if cfg.EventExportBatchSize != 50 || cfg.EventExportFlush.String() != "5s" || cfg.EventExportGzip {
 		t.Fatalf("export defaults = batch %d flush %s gzip %v, want packaged defaults", cfg.EventExportBatchSize, cfg.EventExportFlush, cfg.EventExportGzip)
+	}
+	if cfg.EventSyslogURL != "" || cfg.EventSyslogFacility != "local0" || cfg.EventSyslogTag != "traceguard" || cfg.EventSyslogTimeout != 5*time.Second || cfg.EventSyslogCAPath != "" {
+		t.Fatalf("syslog defaults = url %q facility %q tag %q timeout %s ca %q, want packaged defaults", cfg.EventSyslogURL, cfg.EventSyslogFacility, cfg.EventSyslogTag, cfg.EventSyslogTimeout, cfg.EventSyslogCAPath)
 	}
 	if cfg.ProcessCacheTTL.String() != "2m0s" {
 		t.Fatalf("ProcessCacheTTL = %s, want 2m", cfg.ProcessCacheTTL)
@@ -223,6 +232,96 @@ func TestParsePreservesExplicitEmptyExportSpoolPath(t *testing.T) {
 	}
 	if cfg.EventExportSpoolPath != "" {
 		t.Fatalf("EventExportSpoolPath = %q, want explicit empty value", cfg.EventExportSpoolPath)
+	}
+}
+
+func TestParseAcceptsRemoteSyslogConfig(t *testing.T) {
+	t.Setenv("TRACEGUARD_EVENT_SYSLOG_URL", "syslog+tls://syslog.example:6514")
+	t.Setenv("TRACEGUARD_EVENT_SYSLOG_FACILITY", "local1")
+	t.Setenv("TRACEGUARD_EVENT_SYSLOG_TAG", "traceguard-node")
+	t.Setenv("TRACEGUARD_EVENT_SYSLOG_TIMEOUT", "3s")
+	t.Setenv("TRACEGUARD_EVENT_SYSLOG_CA_PATH", "/etc/traceguard/syslog-ca.crt")
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.EventSyslogURL != "syslog+tls://syslog.example:6514" || cfg.EventSyslogFacility != "local1" || cfg.EventSyslogTag != "traceguard-node" || cfg.EventSyslogTimeout != 3*time.Second || cfg.EventSyslogCAPath != "/etc/traceguard/syslog-ca.crt" {
+		t.Fatalf("syslog config = %#v, want parsed values", cfg)
+	}
+}
+
+func TestParseRejectsInvalidRemoteSyslogConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "scheme",
+			env:  map[string]string{"TRACEGUARD_EVENT_SYSLOG_URL": "udp://syslog.example:514"},
+			want: "event-syslog-url must use",
+		},
+		{
+			name: "missing port",
+			env:  map[string]string{"TRACEGUARD_EVENT_SYSLOG_URL": "syslog+udp://syslog.example"},
+			want: "event-syslog-url must include host and port",
+		},
+		{
+			name: "facility",
+			env: map[string]string{
+				"TRACEGUARD_EVENT_SYSLOG_URL":      "syslog+udp://syslog.example:514",
+				"TRACEGUARD_EVENT_SYSLOG_FACILITY": "bad",
+			},
+			want: "event-syslog-facility",
+		},
+		{
+			name: "tag",
+			env: map[string]string{
+				"TRACEGUARD_EVENT_SYSLOG_URL": "syslog+udp://syslog.example:514",
+				"TRACEGUARD_EVENT_SYSLOG_TAG": "bad tag",
+			},
+			want: "event-syslog-tag",
+		},
+		{
+			name: "timeout",
+			env: map[string]string{
+				"TRACEGUARD_EVENT_SYSLOG_URL":     "syslog+udp://syslog.example:514",
+				"TRACEGUARD_EVENT_SYSLOG_TIMEOUT": "0s",
+			},
+			want: "event-syslog-timeout",
+		},
+		{
+			name: "relative ca",
+			env: map[string]string{
+				"TRACEGUARD_EVENT_SYSLOG_URL":     "syslog+tls://syslog.example:6514",
+				"TRACEGUARD_EVENT_SYSLOG_CA_PATH": "ca.crt",
+			},
+			want: "event-syslog-ca-path must be an absolute path",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard"}
+			clearPolicyEnv(t)
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			_, err := Parse()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Parse error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -382,6 +481,88 @@ func TestParseUsesTraceguardKubernetesNodeNameOnly(t *testing.T) {
 	}
 	if cfg.KubernetesNodeName != "worker-a" {
 		t.Fatalf("KubernetesNodeName = %q, want worker-a", cfg.KubernetesNodeName)
+	}
+}
+
+func TestParseAutoDetectsKubernetesAPIWhenEnabled(t *testing.T) {
+	t.Setenv("TRACEGUARD_KUBERNETES_ENRICH", "true")
+	t.Setenv("TRACEGUARD_KUBERNETES_API_URL", "")
+	t.Setenv("TRACEGUARD_KUBERNETES_NODE_NAME", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT_HTTPS", "6443")
+	t.Setenv("NODE_NAME", "worker-a")
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.KubernetesAPIURL != "https://10.96.0.1:6443" {
+		t.Fatalf("KubernetesAPIURL = %q, want detected service endpoint", cfg.KubernetesAPIURL)
+	}
+	if cfg.KubernetesNodeName != "worker-a" {
+		t.Fatalf("KubernetesNodeName = %q, want NODE_NAME fallback", cfg.KubernetesNodeName)
+	}
+}
+
+func TestParseAutoDetectsKubernetesAPIForDoctor(t *testing.T) {
+	t.Setenv("TRACEGUARD_KUBERNETES_API_URL", "")
+	t.Setenv("TRACEGUARD_KUBERNETES_NODE_NAME", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT_HTTPS", "6443")
+	t.Setenv("NODE_NAME", "worker-a")
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-doctor", "-kubernetes-enrich"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.Doctor {
+		t.Fatal("Doctor = false, want true")
+	}
+	if cfg.KubernetesAPIURL != "https://10.96.0.1:6443" {
+		t.Fatalf("KubernetesAPIURL = %q, want detected service endpoint", cfg.KubernetesAPIURL)
+	}
+	if cfg.KubernetesNodeName != "worker-a" {
+		t.Fatalf("KubernetesNodeName = %q, want NODE_NAME fallback", cfg.KubernetesNodeName)
+	}
+}
+
+func TestParseKubernetesUsesDefaultServiceURLWhenEnabledOutsideClusterEnv(t *testing.T) {
+	t.Setenv("TRACEGUARD_KUBERNETES_ENRICH", "true")
+	t.Setenv("TRACEGUARD_KUBERNETES_API_URL", "")
+	if err := os.Unsetenv("KUBERNETES_SERVICE_HOST"); err != nil {
+		t.Fatalf("Unsetenv KUBERNETES_SERVICE_HOST returned error: %v", err)
+	}
+	if err := os.Unsetenv("KUBERNETES_SERVICE_PORT_HTTPS"); err != nil {
+		t.Fatalf("Unsetenv KUBERNETES_SERVICE_PORT_HTTPS returned error: %v", err)
+	}
+	if err := os.Unsetenv("KUBERNETES_SERVICE_PORT"); err != nil {
+		t.Fatalf("Unsetenv KUBERNETES_SERVICE_PORT returned error: %v", err)
+	}
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.KubernetesAPIURL != "https://kubernetes.default.svc:443" {
+		t.Fatalf("KubernetesAPIURL = %q, want default service endpoint", cfg.KubernetesAPIURL)
 	}
 }
 
