@@ -22,7 +22,7 @@ const (
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
 	defaultLogFormat       = "json"
 	defaultMetricsAddr     = ":9091"
-	defaultProcessCacheTTL = 2 * time.Minute
+	defaultProcessCacheTTL = 5 * time.Minute
 	defaultSyslogFacility  = "local0"
 	defaultSyslogTag       = "traceguard"
 	defaultSyslogTimeout   = 5 * time.Second

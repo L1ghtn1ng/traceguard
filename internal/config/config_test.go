@@ -169,8 +169,8 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	if cfg.EventSyslogURL != "" || cfg.EventSyslogFacility != "local0" || cfg.EventSyslogTag != "traceguard" || cfg.EventSyslogTimeout != 5*time.Second || cfg.EventSyslogCAPath != "" {
 		t.Fatalf("syslog defaults = url %q facility %q tag %q timeout %s ca %q, want packaged defaults", cfg.EventSyslogURL, cfg.EventSyslogFacility, cfg.EventSyslogTag, cfg.EventSyslogTimeout, cfg.EventSyslogCAPath)
 	}
-	if cfg.ProcessCacheTTL.String() != "2m0s" {
-		t.Fatalf("ProcessCacheTTL = %s, want 2m", cfg.ProcessCacheTTL)
+	if cfg.ProcessCacheTTL.String() != "5m0s" {
+		t.Fatalf("ProcessCacheTTL = %s, want 5m", cfg.ProcessCacheTTL)
 	}
 	if !cfg.FileAudit {
 		t.Fatal("FileAudit = false, want packaged default true")

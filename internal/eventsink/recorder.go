@@ -159,13 +159,20 @@ func (r *Recorder) Info(msg string, fields map[string]any) {
 }
 
 func (r *Recorder) InfoDedup(msg string, fields map[string]any, ttl time.Duration) {
+	r.infoDedupWithKey(msg, fields, ttl, fingerprintRecord("info", msg, fields))
+}
+
+func (r *Recorder) InfoDedupFileAudit(msg string, fields map[string]any, ttl time.Duration) {
+	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields))
+}
+
+func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key string) {
 	if ttl <= 0 {
 		r.emit("info", msg, fields)
 		return
 	}
 
 	now := r.now().UTC()
-	key := fingerprintRecord("info", msg, fields)
 
 	r.dedupeMu.Lock()
 	state := r.infoStates[key]
@@ -286,6 +293,71 @@ func fingerprintRecord(level, msg string, fields map[string]any) string {
 		return fmt.Sprintf("%s|%s|%v", level, msg, fields)
 	}
 	return string(payload)
+}
+
+func fingerprintFileAuditRecord(msg string, fields map[string]any) string {
+	stable := make(map[string]any, 20)
+	for _, key := range []string{
+		"event",
+		"path",
+		"file_access",
+		"file_flags",
+		"file_mode",
+		"program",
+		"exe",
+		"cmdline",
+		"uid",
+		"cgroup",
+		"service",
+		"container_id",
+		"pod_uid",
+		"runtime",
+		"lsm_label",
+		"lsm_source",
+		"selinux_context",
+		"apparmor_profile",
+		"apparmor_mode",
+		"k8s_namespace",
+		"k8s_pod",
+		"k8s_node",
+		"k8s_service_account",
+		"k8s_owner_kind",
+		"k8s_owner",
+		"k8s_app",
+	} {
+		if value, ok := fields[key]; ok {
+			stable[key] = value
+		}
+	}
+	if fileAuditProcessAttributionIncomplete(fields) {
+		for _, key := range []string{"pid", "ppid"} {
+			if value, ok := fields[key]; ok {
+				stable[key] = value
+			}
+		}
+	}
+	return fingerprintRecord("info", msg, stable)
+}
+
+func fileAuditProcessAttributionIncomplete(fields map[string]any) bool {
+	return !hasNonEmptyField(fields, "exe") && !hasNonEmptyField(fields, "cmdline")
+}
+
+func hasNonEmptyField(fields map[string]any, key string) bool {
+	value, ok := fields[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed != ""
+	case []string:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	default:
+		return true
+	}
 }
 
 type archiveSink struct {

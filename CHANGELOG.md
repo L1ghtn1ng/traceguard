@@ -18,6 +18,7 @@ All notable changes to TraceGuard are documented in this file.
 - Simplified HTTPS batch export configuration to URL, `Authorization`, spool enablement, and TLS settings.
 - Fixed HTTPS export batching at 50 events or 5 seconds and fixed the durable spool path at `/var/lib/traceguard/export-spool`.
 - Updated packaged environment defaults and README guidance to make local archive, HTTPS batch export, remote syslog, and Kubernetes enrichment setup easier to understand.
+- Increased the packaged and built-in process metadata cache TTL to 5 minutes.
 - Enabled stronger release build hardening and optimization through LTO-related build flags.
 - Reduced repeated process metadata reads and hot-path allocation overhead in process attribution, metric rendering, cgroup parsing, and info-event deduplication.
 
@@ -26,6 +27,7 @@ All notable changes to TraceGuard are documented in this file.
 - Failed closed on unparseable IPv4 UDP DNS payloads in enforced block mode, preventing fragmented UDP DNS bypasses.
 - Pruned expired process metadata cache entries under PID churn to avoid unbounded stale metadata growth.
 - Capped HTTPS export spool writes at 1 MiB per batch and 256 MiB total spool usage to reduce disk exhaustion risk.
+- Improved file audit deduplication so AppArmor/LSM-attributed events suppress PID churn without merging different command lines or fallback process metadata records.
 - Counted failed periodic blocklist refreshes in blocklist load-status metrics.
 - Ensured Kubernetes auto-detected defaults are applied consistently in doctor mode.
 - Regenerated eBPF objects for the updated DNS enforcement behavior.

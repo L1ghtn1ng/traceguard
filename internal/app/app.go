@@ -368,7 +368,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				fields["file_flags"] = event.FileFlags
 				fields["file_mode"] = event.FileMode
 				fields["file_access"] = fileAccessName(event.FileFlags)
-				recorder.InfoDedup(eventName, fields, fileAccessDedupeTTL)
+				recorder.InfoDedupFileAudit(eventName, fields, fileAccessDedupeTTL)
 			default:
 				fields["kind"] = event.Kind
 				recorder.Info("event", fields)

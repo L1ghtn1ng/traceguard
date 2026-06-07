@@ -269,6 +269,159 @@ func TestRecorderInfoDedupEmitsChangedPayload(t *testing.T) {
 	}
 }
 
+func TestRecorderFileAuditDedupSuppressesAppArmorAcrossPIDChurn(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	fields := map[string]any{
+		"event":            "file_access",
+		"path":             "/etc/passwd",
+		"file_access":      "read",
+		"file_flags":       uint32(0),
+		"file_mode":        uint32(0),
+		"program":          "cat",
+		"exe":              "/usr/bin/cat",
+		"uid":              uint32(1000),
+		"pid":              uint32(100),
+		"ppid":             uint32(10),
+		"parent_program":   "bash",
+		"parent_exe":       "/usr/bin/bash",
+		"lsm_label":        "traceguard-default (enforce)",
+		"lsm_source":       "apparmor",
+		"apparmor_profile": "traceguard-default",
+		"apparmor_mode":    "enforce",
+	}
+
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+	now = now.Add(time.Minute)
+	fields["pid"] = uint32(101)
+	fields["ppid"] = uint32(11)
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+	now = now.Add(5 * time.Minute)
+	fields["pid"] = uint32(102)
+	fields["ppid"] = uint32(12)
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[1]["suppressed_count"]; got != float64(1) {
+		t.Fatalf("suppressed_count = %#v, want 1", got)
+	}
+	if got := lines[1]["pid"]; got != float64(102) {
+		t.Fatalf("second emitted pid = %#v, want latest pid 102", got)
+	}
+}
+
+func TestRecorderFileAuditDedupEmitsChangedAppArmorLabel(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	fields := map[string]any{
+		"event":            "file_access",
+		"path":             "/etc/passwd",
+		"file_access":      "read",
+		"program":          "cat",
+		"exe":              "/usr/bin/cat",
+		"uid":              uint32(1000),
+		"pid":              uint32(100),
+		"lsm_label":        "traceguard-default (enforce)",
+		"lsm_source":       "apparmor",
+		"apparmor_profile": "traceguard-default",
+		"apparmor_mode":    "enforce",
+	}
+
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+	now = now.Add(time.Minute)
+	fields["pid"] = uint32(101)
+	fields["lsm_label"] = "traceguard-audit (complain)"
+	fields["apparmor_profile"] = "traceguard-audit"
+	fields["apparmor_mode"] = "complain"
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[1]["apparmor_profile"]; got != "traceguard-audit" {
+		t.Fatalf("second apparmor_profile = %#v, want changed profile", got)
+	}
+}
+
+func TestRecorderFileAuditDedupEmitsChangedCmdline(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	fields := map[string]any{
+		"event":       "file_access",
+		"path":        "/etc/app/config.yaml",
+		"file_access": "read",
+		"program":     "python",
+		"exe":         "/usr/bin/python",
+		"cmdline":     []string{"/usr/bin/python", "script_a.py"},
+		"uid":         uint32(1000),
+		"pid":         uint32(100),
+	}
+
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+	now = now.Add(time.Minute)
+	fields["pid"] = uint32(101)
+	fields["cmdline"] = []string{"/usr/bin/python", "script_b.py"}
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	cmdline, ok := lines[1]["cmdline"].([]any)
+	if !ok || len(cmdline) != 2 || cmdline[1] != "script_b.py" {
+		t.Fatalf("second cmdline = %#v, want script_b.py", lines[1]["cmdline"])
+	}
+}
+
+func TestRecorderFileAuditDedupKeepsPIDForFallbackMetadata(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	fields := map[string]any{
+		"event":       "file_access",
+		"path":        "/etc/passwd",
+		"file_access": "read",
+		"file_flags":  uint32(0),
+		"file_mode":   uint32(0),
+		"program":     "cat",
+		"uid":         uint32(0),
+		"pid":         uint32(100),
+		"ppid":        uint32(0),
+	}
+
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+	now = now.Add(time.Minute)
+	fields["pid"] = uint32(101)
+	recorder.InfoDedupFileAudit("file_access", fields, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[1]["pid"]; got != float64(101) {
+		t.Fatalf("second emitted pid = %#v, want fallback pid 101", got)
+	}
+}
+
 func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	t.Parallel()
 

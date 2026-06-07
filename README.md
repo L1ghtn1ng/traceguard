@@ -333,7 +333,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - HTTPS export sends batches of 50 events or every 5 seconds
 - HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
-- process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=2m`
+- process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint
 
@@ -401,7 +401,7 @@ The generated packages install:
 - Process enrichment also extracts cgroup path, likely service unit, and container ID heuristics from `/proc/<pid>/cgroup`.
 - Process enrichment includes SELinux contexts and AppArmor profile/mode where the host exposes those labels through `/proc`.
 - File access auditing records open-style syscall path, flags, mode, and read/write intent. Opens with create intent are emitted as `file_created`; other opens are emitted as `file_access`. It is enabled by the packaged env file with `TRACEGUARD_FILE_AUDIT=true`; disable it when retained path data or event volume is not acceptable.
-- Repeated identical file access audit records are deduplicated for 5 minutes so unchanged SELinux/AppArmor-attributed entries do not spam logs with timestamp-only differences.
+- Repeated file access audit records are deduplicated for 5 minutes using stable file, process, container/pod, and SELinux/AppArmor label fields so short-lived PID churn does not spam logs with unchanged LSM-attributed entries.
 - Process enrichment now also extracts pod UID and runtime hints from common Kubernetes/container cgroup layouts when present.
 - Optional Kubernetes API enrichment can add namespace, pod name, pod IP, node name, service account, controller workload, app label, container names, and image names keyed by the observed pod UID.
 - `dry-run` uses the same policy engine as enforcement mode but logs `would-block` decisions instead of enabling kernel drops.
