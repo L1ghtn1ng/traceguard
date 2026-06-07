@@ -78,6 +78,7 @@ func main() {
 	recorder, err := eventsink.NewRecorder(ctx, logger, metrics, eventsink.Config{
 		ArchivePath:         cfg.EventArchivePath,
 		BlockedPath:         filepath.Join(filepath.Dir(cfg.LogPath), "blocked.log"),
+		DomainsPath:         filepath.Join(filepath.Dir(cfg.LogPath), "domains.log"),
 		ExportURL:           cfg.EventExportURL,
 		ExportAuthorization: cfg.EventExportAuthorization,
 		ExportSpool:         cfg.EventExportSpool,

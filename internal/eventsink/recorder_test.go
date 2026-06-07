@@ -122,6 +122,110 @@ func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	}
 }
 
+func TestRecorderWritesUniqueDomainsLog(t *testing.T) {
+	t.Parallel()
+
+	var buffer bytes.Buffer
+	logger, err := logging.NewLogger(&buffer, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+
+	domainsPath := filepath.Join(t.TempDir(), "domains.log")
+	recorder, err := NewRecorder(context.Background(), logger, telemetry.NewRegistry(), Config{
+		DomainsPath: domainsPath,
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	now := time.Date(2026, time.June, 7, 9, 30, 0, 123, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.Info("dns", map[string]any{"domain": "Example.COM."})
+	recorder.Info("dns", map[string]any{"domain": "example.com"})
+	recorder.Info("would-block", map[string]any{"domain": "blocked.example", "policy": "block"})
+	recorder.Info("blocked", map[string]any{"domain": "BLOCKED.EXAMPLE.", "policy": "block"})
+	recorder.Info("blocked-doh", map[string]any{"endpoint": "dns.example", "policy": "block"})
+	recorder.Info("dns", map[string]any{"domain": ""})
+	recorder.Info("dns", map[string]any{"domain": 123})
+	recorder.Info("dns", map[string]any{"domain": "evil.example\nforged.example"})
+	recorder.Info("dns", map[string]any{"domain": "evil.example\tforged.example"})
+	recorder.Info("dns", map[string]any{"domain": "bad..example"})
+	recorder.Info("dns", map[string]any{"domain": "_dmarc.example"})
+
+	lines := readDomainLogLines(t, domainsPath)
+	if len(lines) != 3 {
+		t.Fatalf("domain log line count = %d, want 3; content=%q", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[0] != "2026-06-07T09:30:00.000000123Z\texample.com" {
+		t.Fatalf("first domain log line = %q, want timestamped example.com", lines[0])
+	}
+	if lines[1] != "2026-06-07T09:30:00.000000123Z\tblocked.example" {
+		t.Fatalf("second domain log line = %q, want timestamped blocked.example", lines[1])
+	}
+	if lines[2] != "2026-06-07T09:30:00.000000123Z\t_dmarc.example" {
+		t.Fatalf("third domain log line = %q, want timestamped _dmarc.example", lines[2])
+	}
+}
+
+func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	domainsPath := filepath.Join(dir, "domains.log")
+	if err := os.WriteFile(domainsPath, []byte("2026-06-07T09:00:00Z\texisting.example\n"), 0o640); err != nil {
+		t.Fatalf("write domains log: %v", err)
+	}
+	if err := os.WriteFile(domainsPath+".1", []byte("2026-06-07T08:00:00Z\trotated.example\n"), 0o640); err != nil {
+		t.Fatalf("write rotated domains log: %v", err)
+	}
+	if err := os.WriteFile(domainsPath+".2", []byte("forged.example\n2026-06-07T07:01:00Z\talso\tbad\n"), 0o640); err != nil {
+		t.Fatalf("write malformed rotated domains log: %v", err)
+	}
+
+	var buffer bytes.Buffer
+	logger, err := logging.NewLogger(&buffer, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+
+	recorder, err := NewRecorder(context.Background(), logger, telemetry.NewRegistry(), Config{
+		DomainsPath: domainsPath,
+	})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+
+	now := time.Date(2026, time.June, 7, 10, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.Info("dns", map[string]any{"domain": "existing.example"})
+	recorder.Info("dns", map[string]any{"domain": "rotated.example"})
+	recorder.Info("dns", map[string]any{"domain": "forged.example"})
+	recorder.Info("dns", map[string]any{"domain": "bad"})
+	recorder.Info("dns", map[string]any{"domain": "new.example"})
+
+	lines := readDomainLogLines(t, domainsPath)
+	if len(lines) != 4 {
+		t.Fatalf("current domain log line count = %d, want 4; content=%q", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[0] != "2026-06-07T09:00:00Z\texisting.example" {
+		t.Fatalf("first current domain log line changed: %q", lines[0])
+	}
+	if lines[1] != "2026-06-07T10:00:00Z\tforged.example" {
+		t.Fatalf("second current domain log line = %q, want forged.example appended", lines[1])
+	}
+	if lines[2] != "2026-06-07T10:00:00Z\tbad" {
+		t.Fatalf("third current domain log line = %q, want bad appended", lines[2])
+	}
+	if lines[3] != "2026-06-07T10:00:00Z\tnew.example" {
+		t.Fatalf("fourth current domain log line = %q, want new.example appended", lines[3])
+	}
+}
+
 func TestRecorderErrorDedupSuppressesRepeatedErrors(t *testing.T) {
 	t.Parallel()
 
@@ -860,6 +964,20 @@ func decodeLogLines(t *testing.T, buffer *bytes.Buffer) []map[string]any {
 		decoded = append(decoded, entry)
 	}
 	return decoded
+}
+
+func readDomainLogLines(t *testing.T, path string) []string {
+	t.Helper()
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile domain log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	return lines
 }
 
 func mustMarshalRecord(t *testing.T, entry record) json.RawMessage {

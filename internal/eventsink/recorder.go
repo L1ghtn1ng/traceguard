@@ -1,6 +1,7 @@
 package eventsink
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -41,6 +42,7 @@ var exportSpoolPath = "/var/lib/traceguard/export-spool"
 type Config struct {
 	ArchivePath         string
 	BlockedPath         string
+	DomainsPath         string
 	ExportURL           string
 	ExportAuthorization string
 	ExportSpool         bool
@@ -58,6 +60,7 @@ type Recorder struct {
 	logger   *logging.Logger
 	archive  *archiveSink
 	blocked  *blockedSink
+	domains  *domainSink
 	exporter *exportSink
 	syslog   *syslogSink
 	now      func() time.Time
@@ -98,22 +101,23 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 	if strings.TrimSpace(cfg.BlockedPath) != "" {
 		blocked, err := newBlockedSink(cfg.BlockedPath)
 		if err != nil {
-			if recorder.archive != nil {
-				_ = recorder.archive.Close()
-			}
+			_ = recorder.Close()
 			return nil, err
 		}
 		recorder.blocked = blocked
 	}
+	if strings.TrimSpace(cfg.DomainsPath) != "" {
+		domains, err := newDomainSink(cfg.DomainsPath)
+		if err != nil {
+			_ = recorder.Close()
+			return nil, err
+		}
+		recorder.domains = domains
+	}
 	if strings.TrimSpace(cfg.ExportURL) != "" {
 		exporter, err := newExportSink(ctx, cfg, metrics)
 		if err != nil {
-			if recorder.archive != nil {
-				_ = recorder.archive.Close()
-			}
-			if recorder.blocked != nil {
-				_ = recorder.blocked.Close()
-			}
+			_ = recorder.Close()
 			return nil, err
 		}
 		recorder.exporter = exporter
@@ -121,15 +125,7 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 	if strings.TrimSpace(cfg.SyslogURL) != "" {
 		syslog, err := newSyslogSink(ctx, cfg, metrics)
 		if err != nil {
-			if recorder.archive != nil {
-				_ = recorder.archive.Close()
-			}
-			if recorder.blocked != nil {
-				_ = recorder.blocked.Close()
-			}
-			if recorder.exporter != nil {
-				_ = recorder.exporter.Close()
-			}
+			_ = recorder.Close()
 			return nil, err
 		}
 		recorder.syslog = syslog
@@ -144,6 +140,9 @@ func (r *Recorder) Close() error {
 	}
 	if r.blocked != nil {
 		errs = append(errs, r.blocked.Close())
+	}
+	if r.domains != nil {
+		errs = append(errs, r.domains.Close())
 	}
 	if r.exporter != nil {
 		errs = append(errs, r.exporter.Close())
@@ -270,6 +269,9 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 	}
 	if r.blocked != nil && isBlockedRecord(entry) {
 		r.blocked.Write(entry)
+	}
+	if r.domains != nil {
+		r.domains.Write(entry)
 	}
 	if r.exporter != nil {
 		r.exporter.Enqueue(entry)
@@ -434,6 +436,158 @@ func (b *blockedSink) Close() error {
 
 func isBlockedRecord(entry record) bool {
 	return entry.Message == "blocked" || strings.HasPrefix(entry.Message, "blocked-")
+}
+
+type domainSink struct {
+	writer *logging.RotatingFile
+	mu     sync.Mutex
+	seen   map[string]struct{}
+}
+
+func newDomainSink(path string) (*domainSink, error) {
+	writer, err := logging.NewRotatingFile(path, logging.Options{
+		MaxSizeBytes: 1 << 30,
+		MaxBackups:   5,
+		FileMode:     0o640,
+		DirMode:      0o750,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize domain log: %w", err)
+	}
+
+	sink := &domainSink{
+		writer: writer,
+		seen:   make(map[string]struct{}),
+	}
+	if err := sink.loadSeen(path, 5); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	return sink, nil
+}
+
+func (d *domainSink) Write(entry record) {
+	value, ok := entry.Fields["domain"].(string)
+	if !ok {
+		return
+	}
+	domain := normalizeDomainLogValue(value)
+	if domain == "" {
+		return
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.seen[domain]; ok {
+		return
+	}
+	if _, err := d.writer.Write([]byte(entry.Timestamp + "\t" + domain + "\n")); err != nil {
+		return
+	}
+	d.seen[domain] = struct{}{}
+}
+
+func (d *domainSink) Close() error {
+	return d.writer.Close()
+}
+
+func (d *domainSink) loadSeen(path string, backups int) error {
+	for idx := backups; idx >= 0; idx-- {
+		current := path
+		if idx > 0 {
+			current = fmt.Sprintf("%s.%d", path, idx)
+		}
+		if err := d.loadSeenFile(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *domainSink) loadSeenFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat domain log %q: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("domain log %q must not be a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("domain log %q is not a regular file", path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open domain log %q: %w", path, err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if domain := domainFromLogLine(scanner.Text()); domain != "" {
+			d.seen[domain] = struct{}{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read domain log %q: %w", path, err)
+	}
+	return nil
+}
+
+func domainFromLogLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	timestamp, domain, ok := strings.Cut(line, "\t")
+	if !ok || timestamp == "" {
+		return ""
+	}
+	if _, err := time.Parse(time.RFC3339Nano, timestamp); err != nil {
+		return ""
+	}
+	return normalizeDomainLogValue(domain)
+}
+
+func normalizeDomainLogValue(domain string) string {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if !validDomainLogValue(domain) {
+		return ""
+	}
+	return domain
+}
+
+func validDomainLogValue(domain string) bool {
+	if domain == "" || len(domain) > 253 {
+		return false
+	}
+
+	labelLen := 0
+	for idx := 0; idx < len(domain); idx++ {
+		ch := domain[idx]
+		if ch == '.' {
+			if labelLen == 0 || labelLen > 63 {
+				return false
+			}
+			labelLen = 0
+			continue
+		}
+		if !validDomainLogChar(ch) {
+			return false
+		}
+		labelLen++
+	}
+	return labelLen > 0 && labelLen <= 63
+}
+
+func validDomainLogChar(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' ||
+		ch >= '0' && ch <= '9' ||
+		ch == '-' ||
+		ch == '_'
 }
 
 type exportSink struct {

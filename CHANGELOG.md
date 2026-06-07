@@ -12,6 +12,7 @@ All notable changes to TraceGuard are documented in this file.
 - Added Kubernetes enrichment setup improvements, including in-cluster API defaulting and clearer doctor checks.
 - Added operational metrics for policy decisions, blocklist refresh/load status, policy size and mode, eBPF health, export queue and spool backlog, process attribution quality, Kubernetes refreshes, and enrichment hit/miss counts.
 - Added HTTPS export mTLS and durable retry spooling documentation and packaged configuration examples.
+- Added a deduplicated `domains.log` inventory in the TraceGuard log directory for first-seen DNS query domains.
 
 ### Changed
 
@@ -28,6 +29,7 @@ All notable changes to TraceGuard are documented in this file.
 - Pruned expired process metadata cache entries under PID churn to avoid unbounded stale metadata growth.
 - Capped HTTPS export spool writes at 1 MiB per batch and 256 MiB total spool usage to reduce disk exhaustion risk.
 - Improved file audit deduplication so AppArmor/LSM-attributed events suppress PID churn without merging different command lines or fallback process metadata records.
+- Rejected malformed domain names from the domain inventory log to prevent line-oriented log forging from crafted DNS queries.
 - Counted failed periodic blocklist refreshes in blocklist load-status metrics.
 - Ensured Kubernetes auto-detected defaults are applied consistently in doctor mode.
 - Regenerated eBPF objects for the updated DNS enforcement behavior.

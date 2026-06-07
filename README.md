@@ -75,6 +75,7 @@ Notes:
 - bare CIDR literals such as `1.1.1.0/24` or `2606:4700:4700::/48` are treated the same way for resolver ranges on DoH 443 and DoT 853
 - logs are written to `/var/log/traceguard/traceguard.log` by default, rotate at 1 GiB, and retain the last 5 rotated files
 - enforced blocked events are also written as JSON to `blocked.log` in the same log directory, with the same rotation policy
+- first-seen DNS query domains are written once to `domains.log` in the same log directory as timestamped domain lines, with the same rotation policy
 - process metadata is cached from `/proc` for 2 minutes by default in packaged deployments to reduce lookup overhead while limiting stale attribution
 - SELinux/AppArmor labels are read from `/proc/<pid>/attr/current` and `/proc/<pid>/attr/apparmor/current` when available
 - file access auditing is enabled by default in packaged deployments; disable it with `TRACEGUARD_FILE_AUDIT=false` if open-style syscall volume is too high for the host
@@ -327,6 +328,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - refresh interval: `TRACEGUARD_REFRESH_INTERVAL=6h`
 - cgroup path: `TRACEGUARD_CGROUP_PATH=/sys/fs/cgroup`
 - log path and format: `TRACEGUARD_LOG_PATH=/var/log/traceguard/traceguard.log`, `TRACEGUARD_LOG_FORMAT=json`
+- first-seen DNS query domains are also retained in `/var/log/traceguard/domains.log`; this is a deduplicated DNS-domain inventory, not full HTTP URL/path capture
 - metrics enabled on `TRACEGUARD_METRICS_ADDR=:9091`
 - local event archive disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` is set
 - durable HTTPS batch export disabled unless `TRACEGUARD_EVENT_EXPORT_URL` is set
