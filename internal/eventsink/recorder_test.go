@@ -2,7 +2,6 @@ package eventsink
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -270,7 +269,7 @@ func TestRecorderInfoDedupEmitsChangedPayload(t *testing.T) {
 	}
 }
 
-func TestExportSinkBatchesAndSetsAuthHeader(t *testing.T) {
+func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	t.Parallel()
 
 	requests := make(chan struct {
@@ -278,17 +277,7 @@ func TestExportSinkBatchesAndSetsAuthHeader(t *testing.T) {
 		body []byte
 	}, 1)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body []byte
-		if r.Header.Get("Content-Encoding") == "gzip" {
-			reader, err := gzip.NewReader(r.Body)
-			if err != nil {
-				t.Fatalf("gzip.NewReader: %v", err)
-			}
-			body, _ = io.ReadAll(reader)
-			_ = reader.Close()
-		} else {
-			body, _ = io.ReadAll(r.Body)
-		}
+		body, _ := io.ReadAll(r.Body)
 		requests <- struct {
 			auth string
 			body []byte
@@ -301,12 +290,8 @@ func TestExportSinkBatchesAndSetsAuthHeader(t *testing.T) {
 	defer server.Close()
 
 	sink, err := newExportSink(context.Background(), Config{
-		ExportURL:        server.URL,
-		ExportAuthHeader: "Authorization",
-		ExportAuthToken:  "Bearer token",
-		ExportBatchSize:  2,
-		ExportFlush:      time.Minute,
-		ExportGzip:       true,
+		ExportURL:           server.URL,
+		ExportAuthorization: "Bearer token",
 	}, telemetry.NewRegistry())
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
@@ -319,8 +304,13 @@ func TestExportSinkBatchesAndSetsAuthHeader(t *testing.T) {
 		}
 	}
 
-	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "one"})
-	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "two"})
+	batch := []json.RawMessage{
+		mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "one"}),
+		mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "two"}),
+	}
+	if err := sink.sendBatch(context.Background(), batch); err != nil {
+		t.Fatalf("sendBatch returned error: %v", err)
+	}
 
 	select {
 	case req := <-requests:
@@ -351,8 +341,6 @@ func TestNewExportSinkLoadsClientCertificate(t *testing.T) {
 
 	sink, err := newExportSink(context.Background(), Config{
 		ExportURL:        "https://127.0.0.1:6443",
-		ExportBatchSize:  1,
-		ExportFlush:      time.Second,
 		ExportCAPath:     caPath,
 		ExportClientCert: certPath,
 		ExportClientKey:  keyPath,
@@ -372,8 +360,6 @@ func TestNewExportSinkLoadsClientCertificate(t *testing.T) {
 }
 
 func TestExportSinkSpoolsAndReplays(t *testing.T) {
-	t.Parallel()
-
 	var failMode atomic.Bool
 	failMode.Store(true)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -386,13 +372,13 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	defer server.Close()
 
 	spoolDir := filepath.Join(t.TempDir(), "spool")
+	originalSpoolPath := exportSpoolPath
+	exportSpoolPath = spoolDir
+	t.Cleanup(func() { exportSpoolPath = originalSpoolPath })
 	metrics := telemetry.NewRegistry()
 	sink, err := newExportSink(context.Background(), Config{
-		ExportURL:        server.URL,
-		ExportAuthHeader: "Authorization",
-		ExportBatchSize:  1,
-		ExportFlush:      10 * time.Millisecond,
-		ExportSpoolPath:  spoolDir,
+		ExportURL:   server.URL,
+		ExportSpool: true,
 	}, metrics)
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
@@ -405,7 +391,17 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 		}
 	}
 
-	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "spool"})
+	batch := []json.RawMessage{
+		mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "spool"}),
+	}
+	if err := sink.sendBatch(context.Background(), batch); err == nil {
+		t.Fatal("sendBatch returned nil, want server failure")
+	}
+	metrics.SetEventExportLastError()
+	if err := sink.spool.Write(batch); err != nil {
+		t.Fatalf("spool.Write returned error: %v", err)
+	}
+	sink.updateSpoolFiles()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -474,6 +470,55 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 	}
 }
 
+func TestSpoolStoreRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+
+	store, err := newSpoolStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("newSpoolStore returned error: %v", err)
+	}
+	oversized := json.RawMessage(`"` + strings.Repeat("a", maxSpoolPayloadBytes) + `"`)
+
+	err = store.Write([]json.RawMessage{oversized})
+	if err == nil || !strings.Contains(err.Error(), "payload exceeds") {
+		t.Fatalf("Write error = %v, want payload size rejection", err)
+	}
+	files, readErr := store.files()
+	if readErr != nil {
+		t.Fatalf("files returned error: %v", readErr)
+	}
+	if len(files) != 0 {
+		t.Fatalf("spool files = %d, want 0 after oversized write", len(files))
+	}
+}
+
+func TestSpoolStoreRejectsByteCapacityExceeded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := newSpoolStore(dir)
+	if err != nil {
+		t.Fatalf("newSpoolStore returned error: %v", err)
+	}
+	existing := filepath.Join(dir, "existing.json")
+	file, err := os.Create(existing)
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if err := file.Truncate(maxSpoolBytes); err != nil {
+		_ = file.Close()
+		t.Fatalf("Truncate returned error: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	err = store.Write([]json.RawMessage{json.RawMessage(`{"message":"new"}`)})
+	if err == nil || !strings.Contains(err.Error(), "byte capacity exceeded") {
+		t.Fatalf("Write error = %v, want byte capacity rejection", err)
+	}
+}
+
 func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 	t.Parallel()
 
@@ -486,10 +531,7 @@ func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 	defer server.Close()
 
 	sink, err := newExportSink(context.Background(), Config{
-		ExportURL:        server.URL,
-		ExportAuthHeader: "Authorization",
-		ExportBatchSize:  10,
-		ExportFlush:      time.Hour,
+		ExportURL: server.URL,
 	}, telemetry.NewRegistry())
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
@@ -665,6 +707,15 @@ func decodeLogLines(t *testing.T, buffer *bytes.Buffer) []map[string]any {
 		decoded = append(decoded, entry)
 	}
 	return decoded
+}
+
+func mustMarshalRecord(t *testing.T, entry record) json.RawMessage {
+	t.Helper()
+	payload, err := marshalSingleRecord(entry)
+	if err != nil {
+		t.Fatalf("marshalSingleRecord returned error: %v", err)
+	}
+	return payload
 }
 
 func writeClientCertificate(t *testing.T, dir string) (string, string) {

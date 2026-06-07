@@ -23,9 +23,6 @@ const (
 	defaultLogFormat       = "json"
 	defaultMetricsAddr     = ":9091"
 	defaultProcessCacheTTL = 2 * time.Minute
-	defaultExportBatchSize = 50
-	defaultExportFlush     = 5 * time.Second
-	defaultExportSpoolPath = "/var/lib/traceguard/export-spool"
 	defaultSyslogFacility  = "local0"
 	defaultSyslogTag       = "traceguard"
 	defaultSyslogTimeout   = 5 * time.Second
@@ -54,43 +51,39 @@ func (d *domainList) Set(value string) error {
 }
 
 type Config struct {
-	Block                 bool
-	DryRun                bool
-	BlocklistURL          string
-	ManualDomains         []string
-	ManualAllow           []string
-	CachePath             string
-	RefreshInterval       time.Duration
-	CgroupPath            string
-	LogPath               string
-	LogFormat             string
-	MetricsAddr           string
-	EventArchivePath      string
-	EventExportURL        string
-	EventExportAuthHeader string
-	EventExportAuthToken  string
-	EventExportBatchSize  int
-	EventExportFlush      time.Duration
-	EventExportSpoolPath  string
-	EventExportCAPath     string
-	EventExportClientCert string
-	EventExportClientKey  string
-	EventExportGzip       bool
-	EventSyslogURL        string
-	EventSyslogFacility   string
-	EventSyslogTag        string
-	EventSyslogTimeout    time.Duration
-	EventSyslogCAPath     string
-	ProcessCacheTTL       time.Duration
-	FileAudit             bool
-	KubernetesEnrich      bool
-	KubernetesAPIURL      string
-	KubernetesTokenPath   string
-	KubernetesCAPath      string
-	KubernetesNodeName    string
-	KubernetesPoll        time.Duration
-	PrintVersion          bool
-	Doctor                bool
+	Block                    bool
+	DryRun                   bool
+	BlocklistURL             string
+	ManualDomains            []string
+	ManualAllow              []string
+	CachePath                string
+	RefreshInterval          time.Duration
+	CgroupPath               string
+	LogPath                  string
+	LogFormat                string
+	MetricsAddr              string
+	EventArchivePath         string
+	EventExportURL           string
+	EventExportAuthorization string
+	EventExportSpool         bool
+	EventExportCAPath        string
+	EventExportClientCert    string
+	EventExportClientKey     string
+	EventSyslogURL           string
+	EventSyslogFacility      string
+	EventSyslogTag           string
+	EventSyslogTimeout       time.Duration
+	EventSyslogCAPath        string
+	ProcessCacheTTL          time.Duration
+	FileAudit                bool
+	KubernetesEnrich         bool
+	KubernetesAPIURL         string
+	KubernetesTokenPath      string
+	KubernetesCAPath         string
+	KubernetesNodeName       string
+	KubernetesPoll           time.Duration
+	PrintVersion             bool
+	Doctor                   bool
 }
 
 func Parse() (Config, error) {
@@ -112,15 +105,11 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", defaultMetricsAddr), "listen address for /metrics and /health, for example :9091")
 	fs.StringVar(&cfg.EventArchivePath, "event-archive-path", envString("TRACEGUARD_EVENT_ARCHIVE_PATH", ""), "absolute path to an optional JSONL event archive")
 	fs.StringVar(&cfg.EventExportURL, "event-export-url", envString("TRACEGUARD_EVENT_EXPORT_URL", ""), "HTTPS URL to receive JSON event POSTs")
-	fs.StringVar(&cfg.EventExportAuthHeader, "event-export-auth-header", envString("TRACEGUARD_EVENT_EXPORT_AUTH_HEADER", "Authorization"), "HTTP header name used for event export authentication")
-	fs.StringVar(&cfg.EventExportAuthToken, "event-export-auth-token", envString("TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN", ""), "HTTP header value used for event export authentication")
-	fs.IntVar(&cfg.EventExportBatchSize, "event-export-batch-size", envInt("TRACEGUARD_EVENT_EXPORT_BATCH_SIZE", defaultExportBatchSize), "maximum number of events to include in one export batch")
-	fs.DurationVar(&cfg.EventExportFlush, "event-export-flush-interval", envDuration("TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL", defaultExportFlush), "maximum time to wait before flushing a partial export batch")
-	fs.StringVar(&cfg.EventExportSpoolPath, "event-export-spool-path", envString("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", defaultExportSpoolPath), "absolute path to an optional export retry spool directory")
+	fs.StringVar(&cfg.EventExportAuthorization, "event-export-authorization", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", ""), "optional Authorization header value for HTTPS event export, for example 'Bearer token'")
+	fs.BoolVar(&cfg.EventExportSpool, "event-export-spool", envBool("TRACEGUARD_EVENT_EXPORT_SPOOL", true), "durably spool failed HTTPS export batches to disk for replay")
 	fs.StringVar(&cfg.EventExportCAPath, "event-export-ca-path", envString("TRACEGUARD_EVENT_EXPORT_CA_PATH", ""), "path to an optional CA bundle for the HTTPS event export endpoint")
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
 	fs.StringVar(&cfg.EventExportClientKey, "event-export-client-key", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_KEY", ""), "path to an optional client key for HTTPS event export")
-	fs.BoolVar(&cfg.EventExportGzip, "event-export-gzip", envBool("TRACEGUARD_EVENT_EXPORT_GZIP", false), "gzip-compress event export batches")
 	fs.StringVar(&cfg.EventSyslogURL, "event-syslog-url", envString("TRACEGUARD_EVENT_SYSLOG_URL", ""), "remote syslog URL: syslog+udp://host:514, syslog+tcp://host:514, or syslog+tls://host:6514")
 	fs.StringVar(&cfg.EventSyslogFacility, "event-syslog-facility", envString("TRACEGUARD_EVENT_SYSLOG_FACILITY", defaultSyslogFacility), "remote syslog facility, for example local0")
 	fs.StringVar(&cfg.EventSyslogTag, "event-syslog-tag", envString("TRACEGUARD_EVENT_SYSLOG_TAG", defaultSyslogTag), "remote syslog app-name/tag")
@@ -180,9 +169,6 @@ func Parse() (Config, error) {
 	if cfg.EventArchivePath != "" && !filepath.IsAbs(cfg.EventArchivePath) {
 		return Config{}, errors.New("event-archive-path must be an absolute path")
 	}
-	if cfg.EventExportSpoolPath != "" && !filepath.IsAbs(cfg.EventExportSpoolPath) {
-		return Config{}, errors.New("event-export-spool-path must be an absolute path")
-	}
 	if cfg.EventExportCAPath != "" && !filepath.IsAbs(cfg.EventExportCAPath) {
 		return Config{}, errors.New("event-export-ca-path must be an absolute path")
 	}
@@ -213,15 +199,6 @@ func Parse() (Config, error) {
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
 			return Config{}, errors.New("event-export-url must use https://")
-		}
-		if strings.TrimSpace(cfg.EventExportAuthHeader) == "" {
-			return Config{}, errors.New("event-export-auth-header must not be empty when event-export-url is set")
-		}
-		if cfg.EventExportBatchSize <= 0 {
-			return Config{}, errors.New("event-export-batch-size must be positive")
-		}
-		if cfg.EventExportFlush <= 0 {
-			return Config{}, errors.New("event-export-flush-interval must be positive")
 		}
 		if (cfg.EventExportClientCert == "") != (cfg.EventExportClientKey == "") {
 			return Config{}, errors.New("event-export-client-cert and event-export-client-key must be set together")

@@ -65,7 +65,7 @@ Because TraceGuard runs with elevated privileges, treat deployment choices as pa
 - Prefer the packaged systemd unit or an equivalent hardened service definition with a tight capability set and restricted writable paths.
 - Expose `-metrics-addr` only on localhost or a trusted management network. The built-in `/health` and `/metrics` server is plain HTTP and does not provide authentication.
 - Keep `-blocklist-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS for event export where appropriate. Prefer `syslog+tls://` over UDP or plaintext TCP when sending syslog events outside a trusted management network.
-- Protect `TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN`, client certificates, cache files, export spool data, and logs with least-privilege filesystem permissions.
+- Protect `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION`, event export client keys, cache files, export spool data, and logs with least-privilege filesystem permissions. The HTTPS export spool can contain structured telemetry from failed batches until replay succeeds.
 - The packaged env file enables file access auditing. Set `TRACEGUARD_FILE_AUDIT=false` when the expected event volume or retained path data is not acceptable for the host.
 - Review Kubernetes API credentials and RBAC carefully before enabling `-kubernetes-enrich`.
 - Run `./traceguard -doctor` before production rollout and after significant environment changes.

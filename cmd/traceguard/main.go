@@ -76,23 +76,19 @@ func main() {
 	}
 
 	recorder, err := eventsink.NewRecorder(ctx, logger, metrics, eventsink.Config{
-		ArchivePath:      cfg.EventArchivePath,
-		BlockedPath:      filepath.Join(filepath.Dir(cfg.LogPath), "blocked.log"),
-		ExportURL:        cfg.EventExportURL,
-		ExportAuthHeader: cfg.EventExportAuthHeader,
-		ExportAuthToken:  cfg.EventExportAuthToken,
-		ExportBatchSize:  cfg.EventExportBatchSize,
-		ExportFlush:      cfg.EventExportFlush,
-		ExportSpoolPath:  cfg.EventExportSpoolPath,
-		ExportCAPath:     cfg.EventExportCAPath,
-		ExportClientCert: cfg.EventExportClientCert,
-		ExportClientKey:  cfg.EventExportClientKey,
-		ExportGzip:       cfg.EventExportGzip,
-		SyslogURL:        cfg.EventSyslogURL,
-		SyslogFacility:   cfg.EventSyslogFacility,
-		SyslogTag:        cfg.EventSyslogTag,
-		SyslogTimeout:    cfg.EventSyslogTimeout,
-		SyslogCAPath:     cfg.EventSyslogCAPath,
+		ArchivePath:         cfg.EventArchivePath,
+		BlockedPath:         filepath.Join(filepath.Dir(cfg.LogPath), "blocked.log"),
+		ExportURL:           cfg.EventExportURL,
+		ExportAuthorization: cfg.EventExportAuthorization,
+		ExportSpool:         cfg.EventExportSpool,
+		ExportCAPath:        cfg.EventExportCAPath,
+		ExportClientCert:    cfg.EventExportClientCert,
+		ExportClientKey:     cfg.EventExportClientKey,
+		SyslogURL:           cfg.EventSyslogURL,
+		SyslogFacility:      cfg.EventSyslogFacility,
+		SyslogTag:           cfg.EventSyslogTag,
+		SyslogTimeout:       cfg.EventSyslogTimeout,
+		SyslogCAPath:        cfg.EventSyslogCAPath,
 	})
 	if err != nil {
 		logger.Error("initialize event recorder", err, nil)

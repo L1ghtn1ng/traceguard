@@ -1164,7 +1164,10 @@ int trace_dns(struct __sk_buff *skb)
 			}
 			payload_offset = transport_offset + sizeof(udph);
 			if (parse_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match) < 0) {
-				return 1;
+				/* Fragmented or malformed UDP DNS cannot be matched against the
+				 * policy map. Block mode fails closed; observe mode passes it.
+				 */
+				return is_block_enabled() ? 0 : 1;
 			}
 			kind = dns_event_kind(&key, allow_suffix_match);
 			return emit_dns4_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, iph.daddr);

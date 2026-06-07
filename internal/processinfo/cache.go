@@ -40,14 +40,16 @@ const (
 	SourceProc     = "proc"
 
 	processIdentityRecheckInterval = time.Second
+	processCachePruneInterval      = time.Minute
 )
 
 type Cache struct {
-	mu      sync.Mutex
-	root    string
-	ttl     time.Duration
-	now     func() time.Time
-	entries map[uint32]cacheEntry
+	mu          sync.Mutex
+	root        string
+	ttl         time.Duration
+	now         func() time.Time
+	nextPruneAt time.Time
+	entries     map[uint32]cacheEntry
 }
 
 type cacheEntry struct {
@@ -90,6 +92,7 @@ func (c *Cache) Lookup(pid uint32, fallbackComm string) (Metadata, bool) {
 	metadata := c.readMetadata(pid, fallbackComm)
 
 	c.mu.Lock()
+	c.pruneExpiredLocked(now)
 	c.entries[pid] = cacheEntry{
 		expiresAt: now.Add(c.ttl),
 		checkedAt: now,
@@ -104,6 +107,18 @@ func (c *Cache) Invalidate(pid uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.entries, pid)
+}
+
+func (c *Cache) pruneExpiredLocked(now time.Time) {
+	if !c.nextPruneAt.IsZero() && now.Before(c.nextPruneAt) {
+		return
+	}
+	for pid, entry := range c.entries {
+		if !now.Before(entry.expiresAt) {
+			delete(c.entries, pid)
+		}
+	}
+	c.nextPruneAt = now.Add(processCachePruneInterval)
 }
 
 func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {

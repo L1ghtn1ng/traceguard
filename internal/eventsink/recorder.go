@@ -2,7 +2,6 @@ package eventsink
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -11,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -30,28 +28,30 @@ const (
 	exportQueueSize      = 1024
 	exportReplayInterval = 15 * time.Second
 	exportShutdownFlush  = 10 * time.Second
+	exportBatchSize      = 50
+	exportFlushEvery     = 5 * time.Second
 	syslogQueueSize      = 1024
 	maxSpoolFiles        = 10000
+	maxSpoolBytes        = 256 * 1024 * 1024
+	maxSpoolPayloadBytes = 1024 * 1024
 )
 
+var exportSpoolPath = "/var/lib/traceguard/export-spool"
+
 type Config struct {
-	ArchivePath      string
-	BlockedPath      string
-	ExportURL        string
-	ExportAuthHeader string
-	ExportAuthToken  string
-	ExportBatchSize  int
-	ExportFlush      time.Duration
-	ExportSpoolPath  string
-	ExportCAPath     string
-	ExportClientCert string
-	ExportClientKey  string
-	ExportGzip       bool
-	SyslogURL        string
-	SyslogFacility   string
-	SyslogTag        string
-	SyslogTimeout    time.Duration
-	SyslogCAPath     string
+	ArchivePath         string
+	BlockedPath         string
+	ExportURL           string
+	ExportAuthorization string
+	ExportSpool         bool
+	ExportCAPath        string
+	ExportClientCert    string
+	ExportClientKey     string
+	SyslogURL           string
+	SyslogFacility      string
+	SyslogTag           string
+	SyslogTimeout       time.Duration
+	SyslogCAPath        string
 }
 
 type Recorder struct {
@@ -365,18 +365,14 @@ func isBlockedRecord(entry record) bool {
 }
 
 type exportSink struct {
-	client     *http.Client
-	target     string
-	authHeader string
-	authToken  string
-	batchSize  int
-	flushEvery time.Duration
-	gzip       bool
-	queue      chan json.RawMessage
-	metrics    *telemetry.Registry
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	spool      *spoolStore
+	client        *http.Client
+	target        string
+	authorization string
+	queue         chan json.RawMessage
+	metrics       *telemetry.Registry
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	spool         *spoolStore
 }
 
 func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*exportSink, error) {
@@ -396,8 +392,8 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 	}
 
 	var spool *spoolStore
-	if strings.TrimSpace(cfg.ExportSpoolPath) != "" {
-		spool, err = newSpoolStore(cfg.ExportSpoolPath)
+	if cfg.ExportSpool {
+		spool, err = newSpoolStore(exportSpoolPath)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -418,16 +414,12 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 				return nil
 			},
 		},
-		target:     parsed.String(),
-		authHeader: strings.TrimSpace(cfg.ExportAuthHeader),
-		authToken:  cfg.ExportAuthToken,
-		batchSize:  cfg.ExportBatchSize,
-		flushEvery: cfg.ExportFlush,
-		gzip:       cfg.ExportGzip,
-		queue:      make(chan json.RawMessage, exportQueueSize),
-		metrics:    metrics,
-		cancel:     cancel,
-		spool:      spool,
+		target:        parsed.String(),
+		authorization: strings.TrimSpace(cfg.ExportAuthorization),
+		queue:         make(chan json.RawMessage, exportQueueSize),
+		metrics:       metrics,
+		cancel:        cancel,
+		spool:         spool,
 	}
 	sink.updateQueueDepth()
 	sink.updateSpoolFiles()
@@ -457,12 +449,12 @@ func (e *exportSink) Enqueue(entry record) {
 }
 
 func (e *exportSink) run(ctx context.Context) {
-	flushTicker := time.NewTicker(e.flushEvery)
+	flushTicker := time.NewTicker(exportFlushEvery)
 	defer flushTicker.Stop()
 	replayTicker := time.NewTicker(exportReplayInterval)
 	defer replayTicker.Stop()
 
-	batch := make([]json.RawMessage, 0, e.batchSize)
+	batch := make([]json.RawMessage, 0, exportBatchSize)
 	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
@@ -510,7 +502,7 @@ func (e *exportSink) run(ctx context.Context) {
 		case payload := <-e.queue:
 			batch = append(batch, payload)
 			e.updateQueueDepth()
-			if len(batch) >= e.batchSize {
+			if len(batch) >= exportBatchSize {
 				flush(ctx)
 			}
 		case <-flushTicker.C:
@@ -565,20 +557,8 @@ func (e *exportSink) sendPayload(ctx context.Context, payload []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if e.gzip {
-		compressed, err := gzipPayload(payload)
-		if err != nil {
-			return err
-		}
-		req.Body = io.NopCloser(bytes.NewReader(compressed))
-		req.ContentLength = int64(len(compressed))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(compressed)), nil
-		}
-		req.Header.Set("Content-Encoding", "gzip")
-	}
-	if e.authHeader != "" && e.authToken != "" {
-		req.Header.Set(e.authHeader, e.authToken)
+	if e.authorization != "" {
+		req.Header.Set("Authorization", e.authorization)
 	}
 
 	resp, err := e.client.Do(req)
@@ -874,22 +854,6 @@ func newExportTransport(cfg Config) (*http.Transport, error) {
 	}, nil
 }
 
-func gzipPayload(payload []byte) ([]byte, error) {
-	var buffer bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestSpeed)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := writer.Write(payload); err != nil {
-		_ = writer.Close()
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
 func (e *exportSink) Close() error {
 	e.cancel()
 	e.wg.Wait()
@@ -939,6 +903,16 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 	if err != nil {
 		return err
 	}
+	if len(payload) > maxSpoolPayloadBytes {
+		return fmt.Errorf("export spool payload exceeds %d bytes", maxSpoolPayloadBytes)
+	}
+	usage, err := s.usage(existing)
+	if err != nil {
+		return err
+	}
+	if usage+int64(len(payload)) > maxSpoolBytes {
+		return fmt.Errorf("export spool byte capacity exceeded")
+	}
 
 	name, err := spoolFilename()
 	if err != nil {
@@ -954,6 +928,25 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 		return err
 	}
 	return nil
+}
+
+func (s *spoolStore) usage(files []string) (int64, error) {
+	var total int64
+	for _, file := range files {
+		path := filepath.Join(s.dir, file)
+		if err := rejectSymlink(path); err != nil {
+			return 0, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, err
+		}
+		total += info.Size()
+		if total > maxSpoolBytes {
+			return total, nil
+		}
+	}
+	return total, nil
 }
 
 func (s *spoolStore) Replay(send func([]byte) error) error {

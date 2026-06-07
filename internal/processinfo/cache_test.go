@@ -164,6 +164,37 @@ func TestCacheLookupSkipsImmediateIdentityRecheck(t *testing.T) {
 	}
 }
 
+func TestCacheLookupPrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeProcEntry(t, root, 100, "status", "Name:\tcurl\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
+	writeProcEntry(t, root, 100, "stat", statWithStartTime("curl", 1000))
+	writeProcEntry(t, root, 200, "status", "Name:\tbash\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
+	writeProcEntry(t, root, 200, "stat", statWithStartTime("bash", 2000))
+
+	now := time.Date(2026, time.June, 7, 12, 0, 0, 0, time.UTC)
+	cache := NewCache(root, time.Second)
+	cache.now = func() time.Time { return now }
+	if _, hit := cache.Lookup(100, "fallback"); hit {
+		t.Fatal("first lookup unexpectedly hit cache")
+	}
+	if len(cache.entries) != 1 {
+		t.Fatalf("cache entries = %d, want 1", len(cache.entries))
+	}
+
+	now = now.Add(processCachePruneInterval + time.Second)
+	if _, hit := cache.Lookup(200, "fallback"); hit {
+		t.Fatal("second PID lookup unexpectedly hit cache")
+	}
+	if _, ok := cache.entries[100]; ok {
+		t.Fatal("expired PID 100 entry was not pruned")
+	}
+	if _, ok := cache.entries[200]; !ok {
+		t.Fatal("new PID 200 entry was not cached")
+	}
+}
+
 func TestExtractContainerID(t *testing.T) {
 	t.Parallel()
 

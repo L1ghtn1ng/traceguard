@@ -127,10 +127,8 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_LOG_PATH",
 		"TRACEGUARD_LOG_FORMAT",
 		"TRACEGUARD_METRICS_ADDR",
-		"TRACEGUARD_EVENT_EXPORT_SPOOL_PATH",
-		"TRACEGUARD_EVENT_EXPORT_BATCH_SIZE",
-		"TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL",
-		"TRACEGUARD_EVENT_EXPORT_GZIP",
+		"TRACEGUARD_EVENT_EXPORT_AUTHORIZATION",
+		"TRACEGUARD_EVENT_EXPORT_SPOOL",
 		"TRACEGUARD_EVENT_SYSLOG_URL",
 		"TRACEGUARD_EVENT_SYSLOG_FACILITY",
 		"TRACEGUARD_EVENT_SYSLOG_TAG",
@@ -165,11 +163,8 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	if cfg.MetricsAddr != ":9091" {
 		t.Fatalf("MetricsAddr = %q, want :9091", cfg.MetricsAddr)
 	}
-	if cfg.EventExportSpoolPath != "/var/lib/traceguard/export-spool" {
-		t.Fatalf("EventExportSpoolPath = %q, want packaged default", cfg.EventExportSpoolPath)
-	}
-	if cfg.EventExportBatchSize != 50 || cfg.EventExportFlush.String() != "5s" || cfg.EventExportGzip {
-		t.Fatalf("export defaults = batch %d flush %s gzip %v, want packaged defaults", cfg.EventExportBatchSize, cfg.EventExportFlush, cfg.EventExportGzip)
+	if cfg.EventExportAuthorization != "" || !cfg.EventExportSpool {
+		t.Fatalf("export defaults = authorization %q spool %v, want packaged defaults", cfg.EventExportAuthorization, cfg.EventExportSpool)
 	}
 	if cfg.EventSyslogURL != "" || cfg.EventSyslogFacility != "local0" || cfg.EventSyslogTag != "traceguard" || cfg.EventSyslogTimeout != 5*time.Second || cfg.EventSyslogCAPath != "" {
 		t.Fatalf("syslog defaults = url %q facility %q tag %q timeout %s ca %q, want packaged defaults", cfg.EventSyslogURL, cfg.EventSyslogFacility, cfg.EventSyslogTag, cfg.EventSyslogTimeout, cfg.EventSyslogCAPath)
@@ -217,12 +212,13 @@ func TestParseVersionDoesNotRequireUserCacheDir(t *testing.T) {
 	}
 }
 
-func TestParsePreservesExplicitEmptyExportSpoolPath(t *testing.T) {
-	t.Setenv("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", "")
+func TestParseDisablesHTTPSExportSpoolFromEnv(t *testing.T) {
+	t.Setenv("TRACEGUARD_EVENT_EXPORT_SPOOL", "false")
+	t.Setenv("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", "Bearer token")
 
 	originalArgs := os.Args
 	t.Cleanup(func() { os.Args = originalArgs })
-	os.Args = []string{"traceguard"}
+	os.Args = []string{"traceguard", "-event-export-url", "https://collector.example/traceguard"}
 
 	clearPolicyEnv(t)
 
@@ -230,8 +226,40 @@ func TestParsePreservesExplicitEmptyExportSpoolPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse returned error: %v", err)
 	}
-	if cfg.EventExportSpoolPath != "" {
-		t.Fatalf("EventExportSpoolPath = %q, want explicit empty value", cfg.EventExportSpoolPath)
+	if cfg.EventExportSpool {
+		t.Fatal("EventExportSpool = true, want false")
+	}
+	if cfg.EventExportAuthorization != "Bearer token" {
+		t.Fatalf("EventExportAuthorization = %q, want Bearer token", cfg.EventExportAuthorization)
+	}
+}
+
+func TestParseRejectsRemovedHTTPSExportFlags(t *testing.T) {
+	tests := []string{
+		"-event-export-auth-header",
+		"-event-export-auth-token",
+		"-event-export-batch-size",
+		"-event-export-flush-interval",
+		"-event-export-spool-path",
+		"-event-export-gzip",
+	}
+	for _, flagName := range tests {
+		flagName := flagName
+		t.Run(flagName, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard", flagName, "value"}
+
+			clearPolicyEnv(t)
+
+			_, err := Parse()
+			if err == nil {
+				t.Fatalf("Parse accepted removed %s flag", flagName)
+			}
+			if !strings.Contains(err.Error(), "flag provided but not defined") || !strings.Contains(err.Error(), flagName) {
+				t.Fatalf("Parse error = %q, want unknown flag for %s", err, flagName)
+			}
+		})
 	}
 }
 
