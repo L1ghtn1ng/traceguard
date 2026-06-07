@@ -29,19 +29,16 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) IncEvent(kind, transport string) {
-	r.incCounter(metricKey("traceguard_events_total", map[string]string{
-		"kind":      kind,
-		"transport": transport,
-	}))
+	r.incCounter(metricKey2("traceguard_events_total", "kind", kind, "transport", transport))
 }
 
 func (r *Registry) IncConnection(direction, family, protocol, attribution string) {
-	r.incCounter(metricKey("traceguard_connections_total", map[string]string{
-		"direction":   direction,
-		"family":      family,
-		"protocol":    protocol,
-		"attribution": attribution,
-	}))
+	r.incCounter(metricKey4("traceguard_connections_total",
+		"attribution", attribution,
+		"direction", direction,
+		"family", family,
+		"protocol", protocol,
+	))
 }
 
 func (r *Registry) IncBlocklistRefresh(success bool) {
@@ -66,9 +63,7 @@ func (r *Registry) IncProcessCache(hit bool) {
 }
 
 func (r *Registry) IncPolicyDecision(decision string) {
-	r.incCounter(metricKey("traceguard_policy_decisions_total", map[string]string{
-		"decision": decision,
-	}))
+	r.incCounter(metricKey1("traceguard_policy_decisions_total", "decision", decision))
 }
 
 func (r *Registry) IncPolicyReload(trigger string, success bool) {
@@ -76,22 +71,15 @@ func (r *Registry) IncPolicyReload(trigger string, success bool) {
 	if success {
 		status = "success"
 	}
-	r.incCounter(metricKey("traceguard_policy_reload_total", map[string]string{
-		"trigger": trigger,
-		"status":  status,
-	}))
+	r.incCounter(metricKey2("traceguard_policy_reload_total", "status", status, "trigger", trigger))
 }
 
 func (r *Registry) IncEventArchive(status string) {
-	r.incCounter(metricKey("traceguard_event_archive_total", map[string]string{
-		"status": status,
-	}))
+	r.incCounter(metricKey1("traceguard_event_archive_total", "status", status))
 }
 
 func (r *Registry) IncEventExport(status string) {
-	r.incCounter(metricKey("traceguard_event_export_total", map[string]string{
-		"status": status,
-	}))
+	r.incCounter(metricKey1("traceguard_event_export_total", "status", status))
 }
 
 func (r *Registry) IncKubernetesRefresh(success bool) {
@@ -99,9 +87,7 @@ func (r *Registry) IncKubernetesRefresh(success bool) {
 	if success {
 		status = "success"
 	}
-	r.incCounter(metricKey("traceguard_kubernetes_refresh_total", map[string]string{
-		"status": status,
-	}))
+	r.incCounter(metricKey1("traceguard_kubernetes_refresh_total", "status", status))
 }
 
 func (r *Registry) SetKubernetesPodCount(count int) {
@@ -194,31 +180,49 @@ func (r *Registry) setGauge(name string, value int64) {
 	r.gauges[name] = value
 }
 
-func metricKey(name string, labels map[string]string) string {
-	if len(labels) == 0 {
-		return name
-	}
-
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
+func metricKey1(name, key, value string) string {
 	var builder strings.Builder
+	builder.Grow(len(name) + len(key) + len(value) + 5)
 	builder.WriteString(name)
 	builder.WriteByte('{')
-	for idx, key := range keys {
-		if idx > 0 {
-			builder.WriteByte(',')
-		}
-		builder.WriteString(key)
-		builder.WriteString("=\"")
-		builder.WriteString(escapeLabelValue(labels[key]))
-		builder.WriteByte('"')
-	}
+	writeMetricLabel(&builder, key, value)
 	builder.WriteByte('}')
 	return builder.String()
+}
+
+func metricKey2(name, key1, value1, key2, value2 string) string {
+	var builder strings.Builder
+	builder.Grow(len(name) + len(key1) + len(value1) + len(key2) + len(value2) + 10)
+	builder.WriteString(name)
+	builder.WriteByte('{')
+	writeMetricLabel(&builder, key1, value1)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key2, value2)
+	builder.WriteByte('}')
+	return builder.String()
+}
+
+func metricKey4(name, key1, value1, key2, value2, key3, value3, key4, value4 string) string {
+	var builder strings.Builder
+	builder.Grow(len(name) + len(key1) + len(value1) + len(key2) + len(value2) + len(key3) + len(value3) + len(key4) + len(value4) + 20)
+	builder.WriteString(name)
+	builder.WriteByte('{')
+	writeMetricLabel(&builder, key1, value1)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key2, value2)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key3, value3)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key4, value4)
+	builder.WriteByte('}')
+	return builder.String()
+}
+
+func writeMetricLabel(builder *strings.Builder, key, value string) {
+	builder.WriteString(key)
+	builder.WriteString("=\"")
+	builder.WriteString(escapeLabelValue(value))
+	builder.WriteByte('"')
 }
 
 func escapeLabelValue(value string) string {

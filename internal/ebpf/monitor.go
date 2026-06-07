@@ -87,6 +87,10 @@ type Monitor struct {
 	reader  *ringbuf.Reader
 }
 
+type Options struct {
+	FileAudit bool
+}
+
 type monitorObjects struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
@@ -100,6 +104,10 @@ type monitorObjects struct {
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
+	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
+	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
+	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
@@ -131,6 +139,10 @@ func (o *monitorObjects) Close() error {
 		o.TracePostBind6,
 		o.TraceExecve,
 		o.TraceExecveat,
+		o.TraceOpen,
+		o.TraceOpenat,
+		o.TraceOpenat2,
+		o.TraceCreat,
 		o.Allowlist,
 		o.AllowSuffixes,
 		o.Blocklist,
@@ -152,7 +164,7 @@ func (o *monitorObjects) Close() error {
 	return errors.Join(errs...)
 }
 
-func NewMonitor(cgroupPath string) (*Monitor, error) {
+func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("raise memlock rlimit: %w", err)
 	}
@@ -220,25 +232,63 @@ func NewMonitor(cgroupPath string) (*Monitor, error) {
 		}
 	}
 
-	execveLink, err := link.Tracepoint("syscalls", "sys_enter_execve", objects.TraceExecve, nil)
-	if err != nil {
-		cleanup()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach execve tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
+	attachRequiredTracepoint := func(category, name string, program *ebpf.Program) error {
+		lnk, err := link.Tracepoint(category, name, program, nil)
+		if err != nil {
+			if isPermissionDenied(err) {
+				return fmt.Errorf("%w: attach %s tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, name, err)
+			}
+			return fmt.Errorf("attach %s tracepoint: %w", name, err)
 		}
-		return nil, fmt.Errorf("attach execve tracepoint: %w", err)
+		links = append(links, lnk)
+		return nil
 	}
-	links = append(links, execveLink)
+	attachOptionalTracepoint := func(category, name string, program *ebpf.Program) (bool, error) {
+		lnk, err := link.Tracepoint(category, name, program, nil)
+		if err != nil {
+			if isPermissionDenied(err) {
+				return false, fmt.Errorf("%w: attach %s tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, name, err)
+			}
+			return false, nil
+		}
+		links = append(links, lnk)
+		return true, nil
+	}
 
-	execveatLink, err := link.Tracepoint("syscalls", "sys_enter_execveat", objects.TraceExecveat, nil)
-	if err != nil {
+	if err := attachRequiredTracepoint("syscalls", "sys_enter_execve", objects.TraceExecve); err != nil {
 		cleanup()
-		if isPermissionDenied(err) {
-			return nil, fmt.Errorf("%w: attach execveat tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, err)
-		}
-		return nil, fmt.Errorf("attach execveat tracepoint: %w", err)
+		return nil, err
 	}
-	links = append(links, execveatLink)
+	if err := attachRequiredTracepoint("syscalls", "sys_enter_execveat", objects.TraceExecveat); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	if opts.FileAudit {
+		var attachedFileAudit int
+		for _, spec := range []struct {
+			name    string
+			program *ebpf.Program
+		}{
+			{name: "sys_enter_open", program: objects.TraceOpen},
+			{name: "sys_enter_openat", program: objects.TraceOpenat},
+			{name: "sys_enter_openat2", program: objects.TraceOpenat2},
+			{name: "sys_enter_creat", program: objects.TraceCreat},
+		} {
+			attached, err := attachOptionalTracepoint("syscalls", spec.name, spec.program)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			if attached {
+				attachedFileAudit++
+			}
+		}
+		if attachedFileAudit == 0 {
+			cleanup()
+			return nil, errors.New("file audit enabled but no open-style syscall tracepoints could be attached")
+		}
+	}
 
 	return &Monitor{objects: objects, links: links, reader: reader}, nil
 }

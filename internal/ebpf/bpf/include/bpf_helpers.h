@@ -19,6 +19,7 @@ static __u64 (*const bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_curr
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
 static void *(*const bpf_ringbuf_reserve)(void *ringbuf, __u64 size, __u64 flags) = (void *)BPF_FUNC_ringbuf_reserve;
 static void (*const bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_FUNC_ringbuf_submit;
+static long (*const bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user;
 static long (*const bpf_probe_read_user_str)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user_str;
 static long (*const bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to, __u32 len) = (void *)BPF_FUNC_skb_load_bytes;
 

@@ -160,9 +160,13 @@ type traceguardProgramSpecs struct {
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
+	TraceCreat             *ebpf.ProgramSpec `ebpf:"trace_creat"`
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceOpen              *ebpf.ProgramSpec `ebpf:"trace_open"`
+	TraceOpenat            *ebpf.ProgramSpec `ebpf:"trace_openat"`
+	TraceOpenat2           *ebpf.ProgramSpec `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.ProgramSpec `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
@@ -271,9 +275,13 @@ type traceguardPrograms struct {
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
+	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
+	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
+	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
@@ -287,9 +295,13 @@ func (p *traceguardPrograms) Close() error {
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectionIngress,
+		p.TraceCreat,
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceOpen,
+		p.TraceOpenat,
+		p.TraceOpenat2,
 		p.TracePostBind4,
 		p.TracePostBind6,
 		p.TraceRecvmsg4,

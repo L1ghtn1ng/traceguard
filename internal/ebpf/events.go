@@ -23,6 +23,7 @@ const (
 	EventResolver
 	EventResolverBlocked
 	EventConnection
+	EventFileAccess
 )
 
 type rawEvent struct {
@@ -40,9 +41,12 @@ type rawEvent struct {
 	Direction   uint8
 	Port        uint16
 	LocalPort   uint16
-	_           uint16
+	CPad        uint16
+	FileFlags   uint32
+	FileMode    uint32
 	Addr        [16]byte
 	LocalAddr   [16]byte
+	TailPad     uint32
 }
 
 type Event struct {
@@ -57,6 +61,8 @@ type Event struct {
 	Port           uint16
 	LocalAddress   string
 	LocalPort      uint16
+	FileFlags      uint32
+	FileMode       uint32
 	Attribution    string
 	Direction      string
 	SocketHook     string
@@ -85,6 +91,8 @@ func decodeEvent(record []byte) (Event, error) {
 		Port:           raw.Port,
 		LocalAddress:   decodeAddress(raw.Family, raw.LocalAddr),
 		LocalPort:      raw.LocalPort,
+		FileFlags:      raw.FileFlags,
+		FileMode:       raw.FileMode,
 		Attribution:    attributionName(raw.Attribution),
 		Direction:      directionName(raw.Direction),
 		SocketHook:     socketHookName(raw.SocketHook),

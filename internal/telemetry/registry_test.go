@@ -46,6 +46,19 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	}
 }
 
+func TestRenderEscapesDirectMetricLabels(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	registry.IncEvent("dns\"query", "udp\\test\nline")
+
+	rendered := registry.Render()
+	check := `traceguard_events_total{kind="dns\"query",transport="udp\\test\nline"} 1`
+	if !strings.Contains(rendered, check) {
+		t.Fatalf("Render() missing escaped label %q in %q", check, rendered)
+	}
+}
+
 func TestStartServerReturnsListenError(t *testing.T) {
 	t.Parallel()
 

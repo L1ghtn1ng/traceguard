@@ -132,6 +132,16 @@ func passingChecks(t *testing.T, root string) environmentChecks {
 
 	return environmentChecks{
 		stat: os.Stat,
+		readFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/sys/fs/selinux/enforce":
+				return []byte("1\n"), nil
+			case "/sys/module/apparmor/parameters/enabled":
+				return []byte("Y\n"), nil
+			default:
+				return nil, &fs.PathError{Op: "read", Path: path, Err: fs.ErrNotExist}
+			}
+		},
 		statfs: func(path string, out *unix.Statfs_t) error {
 			if _, err := os.Stat(path); err != nil {
 				return err

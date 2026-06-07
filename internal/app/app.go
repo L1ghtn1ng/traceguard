@@ -18,7 +18,10 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
-const kubernetesRefreshErrorDedupeTTL = 5 * time.Minute
+const (
+	kubernetesRefreshErrorDedupeTTL = 5 * time.Minute
+	fileAccessDedupeTTL             = 5 * time.Minute
+)
 
 func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, reloadCh <-chan struct{}) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -44,7 +47,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		}
 	}
 
-	monitor, err := ebpf.NewMonitor(cfg.CgroupPath)
+	monitor, err := ebpf.NewMonitor(cfg.CgroupPath, ebpf.Options{
+		FileAudit: cfg.FileAudit,
+	})
 	if err != nil {
 		return err
 	}
@@ -204,13 +209,17 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			}
 			process, hit := processCache.Lookup(event.PID, event.Comm)
 			metrics.IncProcessCache(hit)
-			metrics.IncEvent(eventKindName(event.Kind), event.Transport)
+			eventName := eventKindName(event.Kind)
+			if event.Kind == ebpf.EventFileAccess {
+				eventName = fileAuditEventName(event.FileFlags)
+			}
+			metrics.IncEvent(eventName, event.Transport)
 			if event.Kind == ebpf.EventConnection {
 				metrics.IncConnection(event.Direction, event.SocketFamily, event.SocketProtocol, eventAttribution(event, process))
 			}
 
 			fields := map[string]any{
-				"event":          eventKindName(event.Kind),
+				"event":          eventName,
 				"program":        process.Comm,
 				"pid":            event.PID,
 				"transport":      event.Transport,
@@ -235,6 +244,21 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			}
 			if process.Runtime != "" {
 				fields["runtime"] = process.Runtime
+			}
+			if process.LSMLabel != "" {
+				fields["lsm_label"] = process.LSMLabel
+			}
+			if process.LSMSource != "" {
+				fields["lsm_source"] = process.LSMSource
+			}
+			if process.SELinux != "" {
+				fields["selinux_context"] = process.SELinux
+			}
+			if process.AppArmor != "" {
+				fields["apparmor_profile"] = process.AppArmor
+			}
+			if process.AppArmorMode != "" {
+				fields["apparmor_mode"] = process.AppArmorMode
 			}
 			if kubeEnricher != nil && process.PodUID != "" {
 				if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
@@ -322,6 +346,12 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				fields["local_address"] = event.LocalAddress
 				fields["local_port"] = event.LocalPort
 				recorder.Info("connection", fields)
+			case ebpf.EventFileAccess:
+				fields["path"] = event.Filename
+				fields["file_flags"] = event.FileFlags
+				fields["file_mode"] = event.FileMode
+				fields["file_access"] = fileAccessName(event.FileFlags)
+				recorder.InfoDedup(eventName, fields, fileAccessDedupeTTL)
 			default:
 				fields["kind"] = event.Kind
 				recorder.Info("event", fields)
@@ -444,7 +474,47 @@ func eventKindName(kind uint32) string {
 		return "resolver_blocked"
 	case ebpf.EventConnection:
 		return "connection"
+	case ebpf.EventFileAccess:
+		return "file_access"
 	default:
 		return "unknown"
 	}
+}
+
+func fileAccessName(flags uint32) string {
+	const (
+		unknownFlags = 1 << 31
+		oAccMode     = 0x3
+		oWritable    = 0x1
+		oReadWrite   = 0x2
+		oCreat       = 0x40
+		oTrunc       = 0x200
+	)
+	if flags&unknownFlags != 0 {
+		return "unknown"
+	}
+	if flags&(oCreat|oTrunc) != 0 {
+		return "write"
+	}
+	switch flags & oAccMode {
+	case oWritable, oReadWrite:
+		return "write"
+	default:
+		return "read"
+	}
+}
+
+func fileAuditEventName(flags uint32) string {
+	if fileCreated(flags) {
+		return "file_created"
+	}
+	return "file_access"
+}
+
+func fileCreated(flags uint32) bool {
+	const (
+		unknownFlags = 1 << 31
+		oCreat       = 0x40
+	)
+	return flags&unknownFlags == 0 && flags&oCreat != 0
 }

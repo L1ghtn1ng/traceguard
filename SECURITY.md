@@ -26,7 +26,7 @@ Include as much of the following as you can:
 - Whether the issue occurs in observe, dry-run, or enforced block mode
 - Relevant configuration, with secrets and tokens redacted
 - Reproduction steps, proof of impact, and any suggested mitigation
-- Whether Kubernetes enrichment, remote blocklists, metrics, or event export are enabled
+- Whether Kubernetes enrichment, file access auditing, remote blocklists, metrics, or event export are enabled
 
 ## Response Process
 
@@ -43,6 +43,7 @@ The following are generally considered security issues:
 - Exposure of sensitive telemetry, credentials, or local files
 - TLS verification flaws in remote blocklist fetch or HTTPS event export
 - Unauthorized access introduced by metrics, logging, cache, or spool handling
+- Incorrect SELinux/AppArmor label reporting or file access auditing behavior that materially affects security decisions
 - Denial of service caused by untrusted network input or malformed policy input in privileged paths
 - Kubernetes enrichment behavior that exposes data beyond the configured node or cluster permissions
 
@@ -65,6 +66,7 @@ Because TraceGuard runs with elevated privileges, treat deployment choices as pa
 - Expose `-metrics-addr` only on localhost or a trusted management network. The built-in `/health` and `/metrics` server is plain HTTP and does not provide authentication.
 - Keep `-blocklist-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS for event export where appropriate.
 - Protect `TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN`, client certificates, cache files, export spool data, and logs with least-privilege filesystem permissions.
+- The packaged env file enables file access auditing. Set `TRACEGUARD_FILE_AUDIT=false` when the expected event volume or retained path data is not acceptable for the host.
 - Review Kubernetes API credentials and RBAC carefully before enabling `-kubernetes-enrich`.
 - Run `./traceguard -doctor` before production rollout and after significant environment changes.
 

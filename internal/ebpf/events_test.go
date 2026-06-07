@@ -207,3 +207,48 @@ func TestDecodeConnectionEvent(t *testing.T) {
 		t.Fatalf("SocketHook = %q, want cgroup_skb_ingress", event.SocketHook)
 	}
 }
+
+func TestDecodeFileAccessEvent(t *testing.T) {
+	t.Parallel()
+
+	record := make([]byte, binary.Size(rawEvent{}))
+	writeLE := func(offset int, value any) {
+		t.Helper()
+		buf := bytes.NewBuffer(record[offset:offset])
+		if err := binary.Write(buf, binary.LittleEndian, value); err != nil {
+			t.Fatalf("binary.Write returned error: %v", err)
+		}
+	}
+
+	writeLE(8, uint32(EventFileAccess))
+	writeLE(12, uint32(123))
+	copy(record[16:32], "cat")
+	copy(record[288:544], "/etc/passwd")
+	writeLE(556, uint16(0x40))
+	writeLE(560, uint32(0o600))
+
+	event, err := decodeEvent(record)
+	if err != nil {
+		t.Fatalf("decodeEvent returned error: %v", err)
+	}
+	if event.Kind != EventFileAccess {
+		t.Fatalf("Kind = %d, want %d", event.Kind, EventFileAccess)
+	}
+	if event.Filename != "/etc/passwd" {
+		t.Fatalf("Filename = %q, want /etc/passwd", event.Filename)
+	}
+	if event.FileFlags != 0x40 {
+		t.Fatalf("FileFlags = %#x, want 0x40", event.FileFlags)
+	}
+	if event.FileMode != 0o600 {
+		t.Fatalf("FileMode = %#o, want 0600", event.FileMode)
+	}
+}
+
+func TestRawEventSizeMatchesBPFEvent(t *testing.T) {
+	t.Parallel()
+
+	if got, want := binary.Size(rawEvent{}), 600; got != want {
+		t.Fatalf("rawEvent size = %d, want BPF struct event size %d", got, want)
+	}
+}

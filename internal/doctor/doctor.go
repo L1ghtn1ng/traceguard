@@ -22,6 +22,7 @@ import (
 
 var defaultChecks = environmentChecks{
 	stat:                      os.Stat,
+	readFile:                  os.ReadFile,
 	statfs:                    unix.Statfs,
 	geteuid:                   os.Geteuid,
 	validateProcRoot:          processinfo.ValidateRoot,
@@ -30,6 +31,7 @@ var defaultChecks = environmentChecks{
 
 type environmentChecks struct {
 	stat                      func(string) (fs.FileInfo, error)
+	readFile                  func(string) ([]byte, error)
 	statfs                    func(string, *unix.Statfs_t) error
 	geteuid                   func() int
 	validateProcRoot          func(string) error
@@ -137,6 +139,9 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 
 	check(cfg.LogFormat == "text" || cfg.LogFormat == "json", "log-format", cfg.LogFormat)
 	check(cfg.ProcessCacheTTL > 0, "process-cache-ttl", cfg.ProcessCacheTTL.String())
+	check(true, "file-audit", enabledDetail(cfg.FileAudit))
+	check(true, "selinux", selinuxStatus(env))
+	check(true, "apparmor", apparmorStatus(env))
 	if cfg.KubernetesEnrich {
 		parsed, err := url.Parse(cfg.KubernetesAPIURL)
 		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "kubernetes-api-url", cfg.KubernetesAPIURL)
@@ -172,6 +177,43 @@ func Summary(err error) string {
 		return "ok"
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+func enabledDetail(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func selinuxStatus(env environmentChecks) string {
+	raw, err := env.readFile("/sys/fs/selinux/enforce")
+	if err != nil {
+		return "not detected"
+	}
+	switch strings.TrimSpace(string(raw)) {
+	case "1":
+		return "enforcing"
+	case "0":
+		return "permissive"
+	default:
+		return "detected"
+	}
+}
+
+func apparmorStatus(env environmentChecks) string {
+	raw, err := env.readFile("/sys/module/apparmor/parameters/enabled")
+	if err != nil {
+		return "not detected"
+	}
+	switch strings.ToUpper(strings.TrimSpace(string(raw))) {
+	case "Y", "1":
+		return "enabled"
+	case "N", "0":
+		return "disabled"
+	default:
+		return "detected"
+	}
 }
 
 func checkTracepointPerfEventAccess() error {

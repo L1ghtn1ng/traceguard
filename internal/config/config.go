@@ -18,11 +18,14 @@ import (
 const (
 	defaultRefreshInterval = 6 * time.Hour
 	defaultCgroupPath      = "/sys/fs/cgroup"
+	defaultCachePath       = "/var/lib/traceguard/blocklist.txt"
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
 	defaultLogFormat       = "json"
-	defaultProcessCacheTTL = 10 * time.Minute
+	defaultMetricsAddr     = ":9091"
+	defaultProcessCacheTTL = 2 * time.Minute
 	defaultExportBatchSize = 50
 	defaultExportFlush     = 5 * time.Second
+	defaultExportSpoolPath = "/var/lib/traceguard/export-spool"
 	// #nosec G101 -- this is the standard Kubernetes service-account token path, not an embedded credential value.
 	defaultKubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultKubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -71,6 +74,7 @@ type Config struct {
 	EventExportClientKey  string
 	EventExportGzip       bool
 	ProcessCacheTTL       time.Duration
+	FileAudit             bool
 	KubernetesEnrich      bool
 	KubernetesAPIURL      string
 	KubernetesTokenPath   string
@@ -92,26 +96,27 @@ func Parse() (Config, error) {
 	var manualAllow domainList
 	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
 	fs.Var(&manualAllow, "allow-domain", "exact or wildcard domain, @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to allow even if it also appears in a block policy; may be specified more than once")
-	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", ""), "path to the cached remote blocklist")
+	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", defaultCachePath), "path to the cached remote blocklist")
 	fs.DurationVar(&cfg.RefreshInterval, "refresh-interval", envDuration("TRACEGUARD_REFRESH_INTERVAL", defaultRefreshInterval), "remote blocklist refresh interval")
 	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for egress attachment")
 	fs.StringVar(&cfg.LogPath, "log-path", envString("TRACEGUARD_LOG_PATH", defaultLogPath), "absolute path to the primary log file")
 	fs.StringVar(&cfg.LogFormat, "log-format", envString("TRACEGUARD_LOG_FORMAT", defaultLogFormat), "log format: text or json")
-	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", ""), "listen address for /metrics and /health, for example :9090")
+	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", defaultMetricsAddr), "listen address for /metrics and /health, for example :9091")
 	fs.StringVar(&cfg.EventArchivePath, "event-archive-path", envString("TRACEGUARD_EVENT_ARCHIVE_PATH", ""), "absolute path to an optional JSONL event archive")
 	fs.StringVar(&cfg.EventExportURL, "event-export-url", envString("TRACEGUARD_EVENT_EXPORT_URL", ""), "HTTPS URL to receive JSON event POSTs")
 	fs.StringVar(&cfg.EventExportAuthHeader, "event-export-auth-header", envString("TRACEGUARD_EVENT_EXPORT_AUTH_HEADER", "Authorization"), "HTTP header name used for event export authentication")
 	fs.StringVar(&cfg.EventExportAuthToken, "event-export-auth-token", envString("TRACEGUARD_EVENT_EXPORT_AUTH_TOKEN", ""), "HTTP header value used for event export authentication")
 	fs.IntVar(&cfg.EventExportBatchSize, "event-export-batch-size", envInt("TRACEGUARD_EVENT_EXPORT_BATCH_SIZE", defaultExportBatchSize), "maximum number of events to include in one export batch")
 	fs.DurationVar(&cfg.EventExportFlush, "event-export-flush-interval", envDuration("TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL", defaultExportFlush), "maximum time to wait before flushing a partial export batch")
-	fs.StringVar(&cfg.EventExportSpoolPath, "event-export-spool-path", envString("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", ""), "absolute path to an optional export retry spool directory")
+	fs.StringVar(&cfg.EventExportSpoolPath, "event-export-spool-path", envString("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH", defaultExportSpoolPath), "absolute path to an optional export retry spool directory")
 	fs.StringVar(&cfg.EventExportCAPath, "event-export-ca-path", envString("TRACEGUARD_EVENT_EXPORT_CA_PATH", ""), "path to an optional CA bundle for the HTTPS event export endpoint")
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
 	fs.StringVar(&cfg.EventExportClientKey, "event-export-client-key", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_KEY", ""), "path to an optional client key for HTTPS event export")
 	fs.BoolVar(&cfg.EventExportGzip, "event-export-gzip", envBool("TRACEGUARD_EVENT_EXPORT_GZIP", false), "gzip-compress event export batches")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", envDuration("TRACEGUARD_PROCESS_CACHE_TTL", defaultProcessCacheTTL), "how long to cache process metadata from /proc")
+	fs.BoolVar(&cfg.FileAudit, "file-audit", envBool("TRACEGUARD_FILE_AUDIT", true), "emit file access audit events for open-style syscalls")
 	fs.BoolVar(&cfg.KubernetesEnrich, "kubernetes-enrich", envBool("TRACEGUARD_KUBERNETES_ENRICH", false), "enrich events with Kubernetes pod metadata from the API")
-	fs.StringVar(&cfg.KubernetesAPIURL, "kubernetes-api-url", envString("TRACEGUARD_KUBERNETES_API_URL", defaultKubernetesAPIURL()), "HTTPS URL for the Kubernetes API server")
+	fs.StringVar(&cfg.KubernetesAPIURL, "kubernetes-api-url", envString("TRACEGUARD_KUBERNETES_API_URL", ""), "HTTPS URL for the Kubernetes API server")
 	fs.StringVar(&cfg.KubernetesTokenPath, "kubernetes-token-path", envString("TRACEGUARD_KUBERNETES_TOKEN_PATH", defaultKubeTokenPath), "path to the Kubernetes bearer token file")
 	fs.StringVar(&cfg.KubernetesCAPath, "kubernetes-ca-path", envString("TRACEGUARD_KUBERNETES_CA_PATH", defaultKubeCAPath), "path to the Kubernetes CA certificate bundle")
 	fs.StringVar(&cfg.KubernetesNodeName, "kubernetes-node-name", envString("TRACEGUARD_KUBERNETES_NODE_NAME", ""), "optional Kubernetes node name used to scope pod metadata listing")
@@ -127,21 +132,6 @@ func Parse() (Config, error) {
 	}
 	if cfg.PrintVersion || cfg.Doctor {
 		return cfg, nil
-	}
-
-	if cfg.CachePath == "" && !flagWasSet(fs, "cache-path") && !envWasSet("TRACEGUARD_CACHE_PATH") {
-		defaultCachePath, err := defaultCachePath()
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.CachePath = defaultCachePath
-	}
-	if cfg.EventExportSpoolPath == "" && !flagWasSet(fs, "event-export-spool-path") && !envWasSet("TRACEGUARD_EVENT_EXPORT_SPOOL_PATH") {
-		defaultExportSpoolPath, err := defaultExportSpoolPath()
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.EventExportSpoolPath = defaultExportSpoolPath
 	}
 
 	var err error
@@ -248,22 +238,6 @@ func Parse() (Config, error) {
 	return cfg, nil
 }
 
-func defaultCachePath() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache dir: %w", err)
-	}
-	return filepath.Join(base, "traceguard", "blocklist.txt"), nil
-}
-
-func defaultExportSpoolPath() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache dir: %w", err)
-	}
-	return filepath.Join(base, "traceguard", "export-spool"), nil
-}
-
 func compact(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, value := range values {
@@ -281,21 +255,6 @@ func envString(key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(value)
-}
-
-func envWasSet(key string) bool {
-	_, ok := os.LookupEnv(key)
-	return ok
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	found := false
-	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == name {
-			found = true
-		}
-	})
-	return found
 }
 
 func envBool(key string, fallback bool) bool {
@@ -402,19 +361,4 @@ func splitDomainEntries(value string) []string {
 		}
 	}
 	return out
-}
-
-func defaultKubernetesAPIURL() string {
-	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
-	if host == "" {
-		return ""
-	}
-	port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS"))
-	if port == "" {
-		port = strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
-	}
-	if port == "" {
-		port = "443"
-	}
-	return "https://" + net.JoinHostPort(host, port)
 }

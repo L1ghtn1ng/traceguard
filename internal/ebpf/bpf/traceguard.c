@@ -21,6 +21,7 @@
 #define EVENT_RESOLVER 4
 #define EVENT_RESOLVER_BLOCKED 5
 #define EVENT_CONNECTION 6
+#define EVENT_FILE_ACCESS 7
 #define TRANSPORT_UDP 1
 #define TRANSPORT_TCP 2
 #define TRANSPORT_DOT 3
@@ -53,6 +54,11 @@
 #define LISTENER_INFO_MAX_ENTRIES 16384
 #define CONNECTION_DEDUPE_MAX_ENTRIES 32768
 #define CONNECTION_DEDUPE_WINDOW_NS 60000000000ULL
+#define FILE_ACCESS_FLAG_UNKNOWN (1U << 31)
+#define TRACEGUARD_O_WRONLY 01
+#define TRACEGUARD_O_CREAT 0100
+#define TRACEGUARD_O_TRUNC 01000
+#define TRACEGUARD_CREAT_FLAGS (TRACEGUARD_O_WRONLY | TRACEGUARD_O_CREAT | TRACEGUARD_O_TRUNC)
 
 #ifndef AF_INET
 #define AF_INET 2
@@ -186,7 +192,8 @@ struct event {
 	__u8 direction;
 	__u16 port;
 	__u16 local_port;
-	__u16 _pad0;
+	__u32 file_flags;
+	__u32 file_mode;
 	__u8 addr[16];
 	__u8 local_addr[16];
 };
@@ -207,6 +214,12 @@ struct trace_event_raw_sys_enter {
 	__s32 common_pid;
 	long id;
 	unsigned long args[6];
+};
+
+struct traceguard_open_how {
+	__u64 flags;
+	__u64 mode;
+	__u64 resolve;
 };
 
 struct ipv6_ext_header {
@@ -1727,6 +1740,25 @@ static __always_inline int emit_exec_event(const char *filename)
 	return 0;
 }
 
+static __always_inline int emit_file_access_event(const char *filename, __u64 flags, __u64 mode)
+{
+	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+
+	if (!event) {
+		return 0;
+	}
+
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_ACCESS, 0);
+	event->file_flags = (__u32)flags;
+	event->file_mode = (__u32)mode;
+	if (filename) {
+		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
+	}
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
 SEC("tracepoint/syscalls/sys_enter_execve")
 int trace_execve(struct trace_event_raw_sys_enter *ctx)
 {
@@ -1737,4 +1769,34 @@ SEC("tracepoint/syscalls/sys_enter_execveat")
 int trace_execveat(struct trace_event_raw_sys_enter *ctx)
 {
 	return emit_exec_event((const char *)ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_open")
+int trace_open(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_access_event((const char *)ctx->args[0], ctx->args[1], ctx->args[2]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat")
+int trace_openat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_access_event((const char *)ctx->args[1], ctx->args[2], ctx->args[3]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat2")
+int trace_openat2(struct trace_event_raw_sys_enter *ctx)
+{
+	struct traceguard_open_how how = {0};
+	__u64 flags = FILE_ACCESS_FLAG_UNKNOWN;
+
+	if (bpf_probe_read_user(&how, sizeof(how), (const void *)ctx->args[2]) == 0) {
+		flags = how.flags;
+	}
+	return emit_file_access_event((const char *)ctx->args[1], flags, how.mode);
+}
+
+SEC("tracepoint/syscalls/sys_enter_creat")
+int trace_creat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_access_event((const char *)ctx->args[0], TRACEGUARD_CREAT_FLAGS, ctx->args[1]);
 }

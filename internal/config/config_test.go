@@ -113,6 +113,75 @@ func TestParseDefaultsLogFormatToJSON(t *testing.T) {
 	}
 }
 
+func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+	unsetEnv(t,
+		"TRACEGUARD_CACHE_PATH",
+		"TRACEGUARD_REFRESH_INTERVAL",
+		"TRACEGUARD_CGROUP_PATH",
+		"TRACEGUARD_LOG_PATH",
+		"TRACEGUARD_LOG_FORMAT",
+		"TRACEGUARD_METRICS_ADDR",
+		"TRACEGUARD_EVENT_EXPORT_SPOOL_PATH",
+		"TRACEGUARD_EVENT_EXPORT_BATCH_SIZE",
+		"TRACEGUARD_EVENT_EXPORT_FLUSH_INTERVAL",
+		"TRACEGUARD_EVENT_EXPORT_GZIP",
+		"TRACEGUARD_PROCESS_CACHE_TTL",
+		"TRACEGUARD_FILE_AUDIT",
+		"TRACEGUARD_KUBERNETES_ENRICH",
+		"TRACEGUARD_KUBERNETES_API_URL",
+		"TRACEGUARD_KUBERNETES_TOKEN_PATH",
+		"TRACEGUARD_KUBERNETES_CA_PATH",
+		"TRACEGUARD_KUBERNETES_NODE_NAME",
+		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+	)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.CachePath != "/var/lib/traceguard/blocklist.txt" {
+		t.Fatalf("CachePath = %q, want packaged default", cfg.CachePath)
+	}
+	if cfg.RefreshInterval.String() != "6h0m0s" {
+		t.Fatalf("RefreshInterval = %s, want 6h", cfg.RefreshInterval)
+	}
+	if cfg.CgroupPath != "/sys/fs/cgroup" {
+		t.Fatalf("CgroupPath = %q, want packaged default", cfg.CgroupPath)
+	}
+	if cfg.LogPath != "/var/log/traceguard/traceguard.log" || cfg.LogFormat != "json" {
+		t.Fatalf("log defaults = path %q format %q, want packaged defaults", cfg.LogPath, cfg.LogFormat)
+	}
+	if cfg.MetricsAddr != ":9091" {
+		t.Fatalf("MetricsAddr = %q, want :9091", cfg.MetricsAddr)
+	}
+	if cfg.EventExportSpoolPath != "/var/lib/traceguard/export-spool" {
+		t.Fatalf("EventExportSpoolPath = %q, want packaged default", cfg.EventExportSpoolPath)
+	}
+	if cfg.EventExportBatchSize != 50 || cfg.EventExportFlush.String() != "5s" || cfg.EventExportGzip {
+		t.Fatalf("export defaults = batch %d flush %s gzip %v, want packaged defaults", cfg.EventExportBatchSize, cfg.EventExportFlush, cfg.EventExportGzip)
+	}
+	if cfg.ProcessCacheTTL.String() != "2m0s" {
+		t.Fatalf("ProcessCacheTTL = %s, want 2m", cfg.ProcessCacheTTL)
+	}
+	if !cfg.FileAudit {
+		t.Fatal("FileAudit = false, want packaged default true")
+	}
+	if cfg.KubernetesEnrich {
+		t.Fatal("KubernetesEnrich = true, want packaged default false")
+	}
+	if cfg.KubernetesAPIURL != "" || cfg.KubernetesNodeName != "" {
+		t.Fatalf("Kubernetes defaults = api %q node %q, want empty packaged defaults", cfg.KubernetesAPIURL, cfg.KubernetesNodeName)
+	}
+	if cfg.KubernetesTokenPath != "/var/run/secrets/kubernetes.io/serviceaccount/token" || cfg.KubernetesCAPath != "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" || cfg.KubernetesPoll.String() != "2m0s" {
+		t.Fatalf("Kubernetes path/poll defaults = token %q ca %q poll %s, want packaged defaults", cfg.KubernetesTokenPath, cfg.KubernetesCAPath, cfg.KubernetesPoll)
+	}
+}
+
 func TestParseVersionDoesNotRequireUserCacheDir(t *testing.T) {
 	originalArgs := os.Args
 	originalHome, hadHome := os.LookupEnv("HOME")
@@ -157,6 +226,24 @@ func TestParsePreservesExplicitEmptyExportSpoolPath(t *testing.T) {
 	}
 }
 
+func TestParseEnablesFileAuditFromEnv(t *testing.T) {
+	t.Setenv("TRACEGUARD_FILE_AUDIT", "true")
+
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.FileAudit {
+		t.Fatal("FileAudit = false, want true")
+	}
+}
+
 func TestParseLoadsDomainFileFromEnv(t *testing.T) {
 	path := writeDomainFile(t, "example.com\n# comment\nbad.example.org,one.one.one.one\n")
 
@@ -187,6 +274,17 @@ func restoreEnv(key, value string, present bool) {
 		return
 	}
 	_ = os.Unsetenv(key)
+}
+
+func unsetEnv(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		value, present := os.LookupEnv(key)
+		t.Cleanup(func() { restoreEnv(key, value, present) })
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("Unsetenv %s returned error: %v", key, err)
+		}
+	}
 }
 
 func TestParseLoadsDomainFileFromFlag(t *testing.T) {

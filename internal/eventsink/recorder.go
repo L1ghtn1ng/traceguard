@@ -57,6 +57,7 @@ type Recorder struct {
 
 	dedupeMu     sync.Mutex
 	errorStates  map[string]errorDedupeState
+	infoStates   map[string]errorDedupeState
 	changeStates map[string]string
 }
 
@@ -77,6 +78,7 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 		logger:       logger,
 		now:          time.Now,
 		errorStates:  make(map[string]errorDedupeState),
+		infoStates:   make(map[string]errorDedupeState),
 		changeStates: make(map[string]string),
 	}
 	if strings.TrimSpace(cfg.ArchivePath) != "" {
@@ -128,6 +130,36 @@ func (r *Recorder) Close() error {
 
 func (r *Recorder) Info(msg string, fields map[string]any) {
 	r.emit("info", msg, fields)
+}
+
+func (r *Recorder) InfoDedup(msg string, fields map[string]any, ttl time.Duration) {
+	if ttl <= 0 {
+		r.emit("info", msg, fields)
+		return
+	}
+
+	now := r.now().UTC()
+	key := fingerprintRecord("info", msg, fields)
+
+	r.dedupeMu.Lock()
+	state := r.infoStates[key]
+	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
+		state.suppressedCount++
+		r.infoStates[key] = state
+		r.dedupeMu.Unlock()
+		return
+	}
+	suppressedCount := state.suppressedCount
+	r.infoStates[key] = errorDedupeState{lastEmitted: now}
+	r.dedupeMu.Unlock()
+
+	if suppressedCount > 0 {
+		merged := cloneFields(fields)
+		merged["suppressed_count"] = suppressedCount
+		r.emitAt("info", msg, merged, now)
+		return
+	}
+	r.emitAt("info", msg, fields, now)
 }
 
 func (r *Recorder) Error(msg string, err error, fields map[string]any) {

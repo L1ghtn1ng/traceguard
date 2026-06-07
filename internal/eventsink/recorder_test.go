@@ -205,6 +205,70 @@ func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
 	}
 }
 
+func TestRecorderInfoDedupSuppressesRepeatedPayload(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	fields := map[string]any{
+		"event":            "file_access",
+		"path":             "/etc/passwd",
+		"file_access":      "read",
+		"selinux_context":  "system_u:system_r:user_t:s0",
+		"apparmor_profile": "traceguard-default",
+		"apparmor_mode":    "enforce",
+		"lsm_source":       "apparmor",
+		"program":          "cat",
+		"pid":              123,
+		"uid":              1000,
+	}
+
+	recorder.InfoDedup("file_access", fields, 5*time.Minute)
+	now = now.Add(time.Minute)
+	recorder.InfoDedup("file_access", fields, 5*time.Minute)
+	now = now.Add(5 * time.Minute)
+	recorder.InfoDedup("file_access", fields, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if _, ok := lines[0]["suppressed_count"]; ok {
+		t.Fatalf("first log line unexpectedly had suppressed_count: %#v", lines[0])
+	}
+	if got := lines[1]["suppressed_count"]; got != float64(1) {
+		t.Fatalf("suppressed_count = %#v, want 1", got)
+	}
+}
+
+func TestRecorderInfoDedupEmitsChangedPayload(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.InfoDedup("file_access", map[string]any{
+		"path":        "/etc/passwd",
+		"file_access": "read",
+	}, 5*time.Minute)
+	now = now.Add(time.Minute)
+	recorder.InfoDedup("file_access", map[string]any{
+		"path":        "/etc/shadow",
+		"file_access": "read",
+	}, 5*time.Minute)
+
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+	if got := lines[1]["path"]; got != "/etc/shadow" {
+		t.Fatalf("second path = %#v, want /etc/shadow", got)
+	}
+}
+
 func TestExportSinkBatchesAndSetsAuthHeader(t *testing.T) {
 	t.Parallel()
 

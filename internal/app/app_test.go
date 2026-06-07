@@ -258,6 +258,7 @@ func TestEventKindNameAndSocketAwareness(t *testing.T) {
 		{name: "resolver", kind: ebpfmonitor.EventResolver, wantName: "resolver", wantSockets: true},
 		{name: "resolver blocked", kind: ebpfmonitor.EventResolverBlocked, wantName: "resolver_blocked", wantSockets: true},
 		{name: "connection", kind: ebpfmonitor.EventConnection, wantName: "connection", wantSockets: true},
+		{name: "file access", kind: ebpfmonitor.EventFileAccess, wantName: "file_access", wantSockets: false},
 		{name: "unknown", kind: 99, wantName: "unknown", wantSockets: false},
 	}
 
@@ -271,6 +272,61 @@ func TestEventKindNameAndSocketAwareness(t *testing.T) {
 			}
 			if got := isSocketAwareEvent(tt.kind); got != tt.wantSockets {
 				t.Fatalf("isSocketAwareEvent(%d) = %v, want %v", tt.kind, got, tt.wantSockets)
+			}
+		})
+	}
+}
+
+func TestFileAccessName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		flags uint32
+		want  string
+	}{
+		{name: "read only", flags: 0, want: "read"},
+		{name: "write only", flags: 0x1, want: "write"},
+		{name: "read write", flags: 0x2, want: "write"},
+		{name: "create", flags: 0x40, want: "write"},
+		{name: "truncate", flags: 0x200, want: "write"},
+		{name: "unknown", flags: 1 << 31, want: "unknown"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := fileAccessName(tt.flags); got != tt.want {
+				t.Fatalf("fileAccessName(%#x) = %q, want %q", tt.flags, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileAuditEventName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		flags uint32
+		want  string
+	}{
+		{name: "read only", flags: 0, want: "file_access"},
+		{name: "write only", flags: 0x1, want: "file_access"},
+		{name: "create", flags: 0x40, want: "file_created"},
+		{name: "creat syscall", flags: 01101, want: "file_created"},
+		{name: "unknown", flags: 1 << 31, want: "file_access"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := fileAuditEventName(tt.flags); got != tt.want {
+				t.Fatalf("fileAuditEventName(%#x) = %q, want %q", tt.flags, got, tt.want)
 			}
 		})
 	}
