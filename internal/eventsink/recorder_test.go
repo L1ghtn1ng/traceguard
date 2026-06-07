@@ -385,13 +385,14 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	defer server.Close()
 
 	spoolDir := filepath.Join(t.TempDir(), "spool")
+	metrics := telemetry.NewRegistry()
 	sink, err := newExportSink(context.Background(), Config{
 		ExportURL:        server.URL,
 		ExportAuthHeader: "Authorization",
 		ExportBatchSize:  1,
 		ExportFlush:      10 * time.Millisecond,
 		ExportSpoolPath:  spoolDir,
-	}, telemetry.NewRegistry())
+	}, metrics)
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
@@ -416,13 +417,26 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	rendered := metrics.Render()
+	if !strings.Contains(rendered, `traceguard_event_export_spool_files 1`) {
+		t.Fatalf("metrics missing spool file count after failed export in %q", rendered)
+	}
+	if !strings.Contains(rendered, `traceguard_event_export_last_error_timestamp_seconds`) {
+		t.Fatalf("metrics missing last export error timestamp in %q", rendered)
+	}
 
 	failMode.Store(false)
 	if err := sink.spool.Replay(func(payload []byte) error {
-		return sink.sendPayload(context.Background(), payload)
+		if err := sink.sendPayload(context.Background(), payload); err != nil {
+			metrics.SetEventExportLastError()
+			return err
+		}
+		metrics.SetEventExportLastSuccess()
+		return nil
 	}); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
+	sink.updateSpoolFiles()
 
 	files, err := os.ReadDir(spoolDir)
 	if err != nil {
@@ -430,6 +444,13 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("expected empty spool after replay, got %d files", len(files))
+	}
+	rendered = metrics.Render()
+	if !strings.Contains(rendered, `traceguard_event_export_spool_files 0`) {
+		t.Fatalf("metrics missing empty spool file count after replay in %q", rendered)
+	}
+	if !strings.Contains(rendered, `traceguard_event_export_last_success_timestamp_seconds`) {
+		t.Fatalf("metrics missing last export success timestamp in %q", rendered)
 	}
 }
 

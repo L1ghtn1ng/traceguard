@@ -87,6 +87,10 @@ type Monitor struct {
 	reader  *ringbuf.Reader
 }
 
+type RuntimeMetrics interface {
+	IncEBPFReadError()
+}
+
 type Options struct {
 	FileAudit bool
 }
@@ -449,6 +453,10 @@ func (m *Monitor) Close() error {
 	return errors.Join(errs...)
 }
 
+func (m *Monitor) AttachedPrograms() int {
+	return len(m.links)
+}
+
 func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers, allowSuffixesEnabled bool) error {
 	value := runtimeSettings{}
 	if enabled {
@@ -649,7 +657,7 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blo
 	return nil
 }
 
-func (m *Monitor) Run(ctx context.Context, handler func(Event)) error {
+func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeMetrics) error {
 	go func() {
 		<-ctx.Done()
 		_ = m.reader.Close()
@@ -661,11 +669,16 @@ func (m *Monitor) Run(ctx context.Context, handler func(Event)) error {
 			if errors.Is(err, ringbuf.ErrClosed) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				return nil
 			}
+			if metrics != nil {
+				metrics.IncEBPFReadError()
+			}
 			return fmt.Errorf("read ring buffer: %w", err)
 		}
-
 		event, err := decodeEvent(record.RawSample)
 		if err != nil {
+			if metrics != nil {
+				metrics.IncEBPFReadError()
+			}
 			return err
 		}
 		handler(event)

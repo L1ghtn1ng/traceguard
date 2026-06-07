@@ -276,6 +276,148 @@ func TestManagerFileBackedAllowDomainStaysExact(t *testing.T) {
 	}
 }
 
+func TestManagerLoadWithMetadataReportsManualSource(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(Config{
+		ManualDomains: []string{"example.com"},
+	})
+	rules, metadata, err := manager.LoadWithMetadata(t.Context())
+	if err != nil {
+		t.Fatalf("LoadWithMetadata returned error: %v", err)
+	}
+	if metadata.Source != LoadSourceManual {
+		t.Fatalf("metadata.Source = %q, want %q", metadata.Source, LoadSourceManual)
+	}
+	if len(rules.BlockDomains) != 1 || rules.BlockDomains[0] != "example.com" {
+		t.Fatalf("BlockDomains = %v, want example.com", rules.BlockDomains)
+	}
+}
+
+func TestManagerLoadWithMetadataReportsRemoteSource(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("remote.example\n"))
+	}))
+	defer server.Close()
+
+	manager := NewManager(Config{
+		URL:           server.URL,
+		CachePath:     filepath.Join(t.TempDir(), "blocklist.txt"),
+		RefreshPeriod: time.Hour,
+	})
+	allowTestServerTLS(manager)
+
+	rules, metadata, err := manager.LoadWithMetadata(t.Context())
+	if err != nil {
+		t.Fatalf("LoadWithMetadata returned error: %v", err)
+	}
+	if metadata.Source != LoadSourceRemote {
+		t.Fatalf("metadata.Source = %q, want %q", metadata.Source, LoadSourceRemote)
+	}
+	if len(rules.BlockDomains) != 1 || rules.BlockDomains[0] != "remote.example" {
+		t.Fatalf("BlockDomains = %v, want remote.example", rules.BlockDomains)
+	}
+}
+
+func TestManagerLoadWithMetadataReportsFreshCacheSource(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "blocklist.txt")
+	if err := os.WriteFile(path, []byte("cached.example\n"), 0o640); err != nil {
+		t.Fatalf("WriteFile cache: %v", err)
+	}
+	manager := NewManager(Config{
+		URL:           "https://blocklist.example.test/list.txt",
+		CachePath:     path,
+		RefreshPeriod: time.Hour,
+	})
+
+	rules, metadata, err := manager.LoadWithMetadata(t.Context())
+	if err != nil {
+		t.Fatalf("LoadWithMetadata returned error: %v", err)
+	}
+	if metadata.Source != LoadSourceCache {
+		t.Fatalf("metadata.Source = %q, want %q", metadata.Source, LoadSourceCache)
+	}
+	if len(rules.BlockDomains) != 1 || rules.BlockDomains[0] != "cached.example" {
+		t.Fatalf("BlockDomains = %v, want cached.example", rules.BlockDomains)
+	}
+}
+
+func TestManagerLoadWithMetadataReportsStaleCacheSource(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "blocklist.txt")
+	if err := os.WriteFile(path, []byte("stale.example\n"), 0o640); err != nil {
+		t.Fatalf("WriteFile cache: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes cache: %v", err)
+	}
+	manager := NewManager(Config{
+		URL:           server.URL,
+		CachePath:     path,
+		RefreshPeriod: time.Hour,
+	})
+	allowTestServerTLS(manager)
+
+	rules, metadata, err := manager.LoadWithMetadata(t.Context())
+	if err != nil {
+		t.Fatalf("LoadWithMetadata returned error: %v", err)
+	}
+	if metadata.Source != LoadSourceStaleCache {
+		t.Fatalf("metadata.Source = %q, want %q", metadata.Source, LoadSourceStaleCache)
+	}
+	if len(rules.BlockDomains) != 1 || rules.BlockDomains[0] != "stale.example" {
+		t.Fatalf("BlockDomains = %v, want stale.example", rules.BlockDomains)
+	}
+}
+
+func TestManagerWatchWithMetadataReportsFailedRefresh(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	manager := NewManager(Config{
+		URL:           server.URL,
+		CachePath:     filepath.Join(t.TempDir(), "blocklist.txt"),
+		RefreshPeriod: time.Millisecond,
+	})
+	allowTestServerTLS(manager)
+
+	seen := make(chan LoadMetadata, 1)
+	err := manager.WatchWithMetadata(t.Context(), func(_ Rules, metadata LoadMetadata, loadErr error) error {
+		if loadErr == nil {
+			t.Fatal("WatchWithMetadata callback got nil loadErr, want failed refresh")
+		}
+		seen <- metadata
+		return loadErr
+	})
+	if err == nil || !strings.Contains(err.Error(), "refresh blocklist") {
+		t.Fatalf("WatchWithMetadata error = %v, want refresh blocklist error", err)
+	}
+
+	select {
+	case metadata := <-seen:
+		if metadata.Source != LoadSourceRemote {
+			t.Fatalf("metadata.Source = %q, want %q", metadata.Source, LoadSourceRemote)
+		}
+	default:
+		t.Fatal("WatchWithMetadata did not report failed load metadata")
+	}
+}
+
 func TestPolicyDenyAllUsesAllowOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -374,15 +516,19 @@ func TestManagerRejectsOversizedRemoteBlocklist(t *testing.T) {
 		CachePath:     filepath.Join(t.TempDir(), "blocklist.txt"),
 		RefreshPeriod: time.Hour,
 	})
+	allowTestServerTLS(manager)
+
+	if _, err := manager.Load(t.Context()); err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("Load() error = %v, want oversize response rejection", err)
+	}
+}
+
+func allowTestServerTLS(manager *Manager) {
 	if transport, ok := manager.client.Transport.(*http.Transport); ok {
 		transport.TLSClientConfig = &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: true,
 		}
-	}
-
-	if _, err := manager.Load(t.Context()); err == nil || !strings.Contains(err.Error(), "response exceeds") {
-		t.Fatalf("Load() error = %v, want oversize response rejection", err)
 	}
 }
 

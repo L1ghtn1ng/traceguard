@@ -64,6 +64,58 @@ func TestValidateRulesForModeAllowsDenyAllWithExactExceptions(t *testing.T) {
 	}
 }
 
+func TestPolicyMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{name: "observe", cfg: config.Config{}, want: "observe"},
+		{name: "dry run", cfg: config.Config{DryRun: true}, want: "dry_run"},
+		{name: "block", cfg: config.Config{Block: true}, want: "block"},
+		{name: "block dry run", cfg: config.Config{Block: true, DryRun: true}, want: "dry_run"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := policyMode(tt.cfg); got != tt.want {
+				t.Fatalf("policyMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPolicyRuleCounts(t *testing.T) {
+	t.Parallel()
+
+	got := policyRuleCounts(blocklist.Rules{
+		BlockDomains:       []string{"bad.example"},
+		AllowDomains:       []string{"good.example"},
+		BlockSuffixes:      []string{"bad.test"},
+		AllowSuffixes:      []string{"good.test"},
+		BlockEndpointCIDRs: []blocklist.EndpointCIDR{{}},
+		AllowEndpointCIDRs: []blocklist.EndpointCIDR{{}, {}},
+	}, 3, 4)
+
+	want := map[string]int{
+		"block|domain":        1,
+		"allow|domain":        1,
+		"block|suffix":        1,
+		"allow|suffix":        1,
+		"block|endpoint":      3,
+		"allow|endpoint":      4,
+		"block|endpoint_cidr": 1,
+		"allow|endpoint_cidr": 2,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("policyRuleCounts() = %#v, want %#v", got, want)
+	}
+}
+
 func TestAppendSocketFieldsPrefersProcAttribution(t *testing.T) {
 	t.Parallel()
 

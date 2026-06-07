@@ -43,15 +43,54 @@ func (r *Registry) IncConnection(direction, family, protocol, attribution string
 
 func (r *Registry) IncBlocklistRefresh(success bool) {
 	name := "traceguard_blocklist_refresh_errors_total"
+	status := "error"
 	if success {
 		name = "traceguard_blocklist_refresh_success_total"
+		status = "success"
 	}
 	r.incCounter(name)
+	r.setGauge(metricKey1("traceguard_blocklist_last_refresh_timestamp_seconds", "status", status), time.Now().UTC().Unix())
+}
+
+func (r *Registry) IncBlocklistLoad(source string, success bool) {
+	status := "error"
+	if success {
+		status = "success"
+	}
+	r.incCounter(metricKey2("traceguard_blocklist_load_total", "source", source, "status", status))
 }
 
 func (r *Registry) SetPolicyCounts(domains, endpoints int) {
 	r.setGauge("traceguard_policy_domains", int64(domains))
 	r.setGauge("traceguard_policy_endpoints", int64(endpoints))
+}
+
+func (r *Registry) SetPolicyLastLoaded() {
+	r.setGauge("traceguard_policy_last_loaded_timestamp_seconds", time.Now().UTC().Unix())
+}
+
+func (r *Registry) SetPolicyMode(mode string) {
+	gauges := make(map[string]int64, 3)
+	for _, candidate := range []string{"observe", "dry_run", "block"} {
+		value := int64(0)
+		if candidate == mode {
+			value = 1
+		}
+		gauges[metricKey1("traceguard_policy_mode", "mode", candidate)] = value
+	}
+	r.replaceGauges("traceguard_policy_mode", gauges)
+}
+
+func (r *Registry) SetPolicyRuleCounts(counts map[string]int) {
+	gauges := make(map[string]int64, len(counts))
+	for key, value := range counts {
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		gauges[metricKey2("traceguard_policy_rules", "action", parts[0], "type", parts[1])] = int64(value)
+	}
+	r.replaceGauges("traceguard_policy_rules", gauges)
 }
 
 func (r *Registry) IncProcessCache(hit bool) {
@@ -60,6 +99,24 @@ func (r *Registry) IncProcessCache(hit bool) {
 		name = "traceguard_process_cache_hit_total"
 	}
 	r.incCounter(name)
+}
+
+func (r *Registry) IncProcessMetadata(source string) {
+	switch source {
+	case "proc", "fallback":
+	default:
+		source = "fallback"
+	}
+	r.incCounter(metricKey1("traceguard_process_metadata_total", "source", source))
+}
+
+func (r *Registry) IncProcessLSMMetadata(source string) {
+	switch source {
+	case "selinux", "apparmor":
+	default:
+		source = "none"
+	}
+	r.incCounter(metricKey1("traceguard_process_lsm_metadata_total", "source", source))
 }
 
 func (r *Registry) IncPolicyDecision(decision string) {
@@ -82,6 +139,22 @@ func (r *Registry) IncEventExport(status string) {
 	r.incCounter(metricKey1("traceguard_event_export_total", "status", status))
 }
 
+func (r *Registry) SetEventExportQueueDepth(depth int) {
+	r.setGauge("traceguard_event_export_queue_depth", int64(depth))
+}
+
+func (r *Registry) SetEventExportSpoolFiles(count int) {
+	r.setGauge("traceguard_event_export_spool_files", int64(count))
+}
+
+func (r *Registry) SetEventExportLastSuccess() {
+	r.setGauge("traceguard_event_export_last_success_timestamp_seconds", time.Now().UTC().Unix())
+}
+
+func (r *Registry) SetEventExportLastError() {
+	r.setGauge("traceguard_event_export_last_error_timestamp_seconds", time.Now().UTC().Unix())
+}
+
 func (r *Registry) IncKubernetesRefresh(success bool) {
 	status := "error"
 	if success {
@@ -92,6 +165,22 @@ func (r *Registry) IncKubernetesRefresh(success bool) {
 
 func (r *Registry) SetKubernetesPodCount(count int) {
 	r.setGauge("traceguard_kubernetes_pods", int64(count))
+}
+
+func (r *Registry) IncKubernetesEnrichment(hit bool) {
+	status := "miss"
+	if hit {
+		status = "hit"
+	}
+	r.incCounter(metricKey1("traceguard_kubernetes_enrichment_total", "status", status))
+}
+
+func (r *Registry) SetEBPFAttachedPrograms(count int) {
+	r.setGauge("traceguard_ebpf_attached_programs", int64(count))
+}
+
+func (r *Registry) IncEBPFReadError() {
+	r.incCounter("traceguard_ebpf_read_errors_total")
 }
 
 func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging.Logger) error {
@@ -178,6 +267,19 @@ func (r *Registry) setGauge(name string, value int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.gauges[name] = value
+}
+
+func (r *Registry) replaceGauges(prefix string, values map[string]int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.gauges {
+		if key == prefix || strings.HasPrefix(key, prefix+"{") {
+			delete(r.gauges, key)
+		}
+	}
+	for key, value := range values {
+		r.gauges[key] = value
+	}
 }
 
 func metricKey1(name, key, value string) string {

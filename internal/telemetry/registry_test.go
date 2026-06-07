@@ -20,21 +20,49 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.IncPolicyReload("sighup", true)
 	registry.IncEventArchive("success")
 	registry.IncEventExport("queued")
+	registry.SetEventExportQueueDepth(7)
+	registry.SetEventExportSpoolFiles(2)
+	registry.SetEventExportLastSuccess()
+	registry.SetEventExportLastError()
 	registry.IncKubernetesRefresh(true)
+	registry.IncKubernetesEnrichment(true)
 	registry.IncConnection("inbound", "ipv4", "tcp", "kernel-ingress")
 	registry.SetPolicyCounts(4, 2)
+	registry.SetPolicyLastLoaded()
+	registry.SetPolicyMode("block")
+	registry.SetPolicyRuleCounts(map[string]int{
+		"block|domain":   2,
+		"allow|endpoint": 1,
+	})
 	registry.SetKubernetesPodCount(3)
+	registry.IncBlocklistLoad("remote", true)
+	registry.IncProcessMetadata("proc")
+	registry.IncProcessLSMMetadata("apparmor")
+	registry.SetEBPFAttachedPrograms(14)
+	registry.IncEBPFReadError()
 
 	rendered := registry.Render()
 	checks := []string{
+		`traceguard_blocklist_load_total{source="remote",status="success"} 1`,
+		`traceguard_ebpf_attached_programs 14`,
+		`traceguard_ebpf_read_errors_total 1`,
 		`traceguard_events_total{kind="dns",transport="udp"} 1`,
+		`traceguard_event_export_queue_depth 7`,
+		`traceguard_event_export_spool_files 2`,
 		`traceguard_policy_decisions_total{decision="block"} 1`,
+		`traceguard_policy_mode{mode="block"} 1`,
+		`traceguard_policy_mode{mode="dry_run"} 0`,
+		`traceguard_policy_rules{action="allow",type="endpoint"} 1`,
+		`traceguard_policy_rules{action="block",type="domain"} 2`,
 		`traceguard_policy_reload_total{status="success",trigger="sighup"} 1`,
 		`traceguard_event_archive_total{status="success"} 1`,
 		`traceguard_event_export_total{status="queued"} 1`,
 		`traceguard_kubernetes_refresh_total{status="success"} 1`,
+		`traceguard_kubernetes_enrichment_total{status="hit"} 1`,
 		`traceguard_connections_total{attribution="kernel-ingress",direction="inbound",family="ipv4",protocol="tcp"} 1`,
 		`traceguard_process_cache_hit_total 1`,
+		`traceguard_process_metadata_total{source="proc"} 1`,
+		`traceguard_process_lsm_metadata_total{source="apparmor"} 1`,
 		`traceguard_policy_domains 4`,
 		`traceguard_policy_endpoints 2`,
 		`traceguard_kubernetes_pods 3`,
@@ -43,6 +71,27 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+}
+
+func TestSetPolicyRuleCountsReplacesStaleGauges(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	registry.SetPolicyRuleCounts(map[string]int{
+		"block|domain": 4,
+		"allow|domain": 1,
+	})
+	registry.SetPolicyRuleCounts(map[string]int{
+		"block|domain": 2,
+	})
+
+	rendered := registry.Render()
+	if !strings.Contains(rendered, `traceguard_policy_rules{action="block",type="domain"} 2`) {
+		t.Fatalf("Render() missing replacement policy rule count in %q", rendered)
+	}
+	if strings.Contains(rendered, `traceguard_policy_rules{action="allow",type="domain"}`) {
+		t.Fatalf("Render() kept stale policy rule count in %q", rendered)
 	}
 }
 

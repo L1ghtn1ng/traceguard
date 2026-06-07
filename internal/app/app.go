@@ -27,6 +27,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	metrics.SetPolicyMode(policyMode(cfg))
 	processCache := processinfo.NewCache("/proc", cfg.ProcessCacheTTL)
 	var kubeEnricher *kubeinfo.Enricher
 	if cfg.KubernetesEnrich {
@@ -54,6 +55,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		return err
 	}
 	defer monitor.Close()
+	metrics.SetEBPFAttachedPrograms(monitor.AttachedPrograms())
 
 	errCh := make(chan error, 2)
 	var endpointIndex atomic.Pointer[map[string]string]
@@ -125,6 +127,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		endpointIndex.Store(&index)
 		runtimePolicy.Store(policy)
 		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
+		metrics.SetPolicyRuleCounts(policyRuleCounts(rules, len(blockResolved), len(allowResolved)))
+		metrics.SetPolicyLastLoaded()
 		metrics.IncBlocklistRefresh(true)
 		recorder.InfoIfChanged("policy loaded", map[string]any{
 			"block_all_domains":    rules.BlockAllDomains,
@@ -154,7 +158,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			ManualAllow:   cfg.ManualAllow,
 		})
 
-		rules, err := manager.Load(ctx)
+		rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
+		metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
 		if err != nil {
 			metrics.IncBlocklistRefresh(false)
 			return fmt.Errorf("load blocklist: %w", err)
@@ -166,7 +171,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 		if cfg.BlocklistURL != "" {
 			go func() {
-				err := manager.Watch(ctx, applyRules)
+				err := manager.WatchWithMetadata(ctx, func(rules blocklist.Rules, loadMetadata blocklist.LoadMetadata, loadErr error) error {
+					metrics.IncBlocklistLoad(string(loadMetadata.Source), loadErr == nil)
+					if loadErr != nil {
+						return loadErr
+					}
+					return applyRules(rules)
+				})
 				if err != nil {
 					metrics.IncBlocklistRefresh(false)
 				}
@@ -182,7 +193,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				case <-ctx.Done():
 					return
 				case <-reloadCh:
-					rules, err := manager.Load(ctx)
+					rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
+					metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
 					if err != nil {
 						metrics.IncPolicyReload("sighup", false)
 						errCh <- fmt.Errorf("reload policy: %w", err)
@@ -209,6 +221,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			}
 			process, hit := processCache.Lookup(event.PID, event.Comm)
 			metrics.IncProcessCache(hit)
+			metrics.IncProcessMetadata(process.Source)
+			metrics.IncProcessLSMMetadata(process.LSMSource)
 			eventName := eventKindName(event.Kind)
 			if event.Kind == ebpf.EventFileAccess {
 				eventName = fileAuditEventName(event.FileFlags)
@@ -262,6 +276,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			}
 			if kubeEnricher != nil && process.PodUID != "" {
 				if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
+					metrics.IncKubernetesEnrichment(true)
 					if pod.Namespace != "" {
 						fields["k8s_namespace"] = pod.Namespace
 					}
@@ -292,6 +307,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 					if len(pod.Images) > 0 {
 						fields["k8s_images"] = pod.Images
 					}
+				} else {
+					metrics.IncKubernetesEnrichment(false)
 				}
 			}
 			if len(process.Cmdline) > 0 {
@@ -356,7 +373,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				fields["kind"] = event.Kind
 				recorder.Info("event", fields)
 			}
-		})
+		}, metrics)
 	}()
 
 	select {
@@ -365,6 +382,30 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		return err
 	case <-ctx.Done():
 		return nil
+	}
+}
+
+func policyMode(cfg config.Config) string {
+	switch {
+	case cfg.Block && !cfg.DryRun:
+		return "block"
+	case cfg.DryRun:
+		return "dry_run"
+	default:
+		return "observe"
+	}
+}
+
+func policyRuleCounts(rules blocklist.Rules, resolvedBlockEndpoints, resolvedAllowEndpoints int) map[string]int {
+	return map[string]int{
+		"block|domain":        len(rules.BlockDomains),
+		"allow|domain":        len(rules.AllowDomains),
+		"block|suffix":        len(rules.BlockSuffixes),
+		"allow|suffix":        len(rules.AllowSuffixes),
+		"block|endpoint":      resolvedBlockEndpoints,
+		"allow|endpoint":      resolvedAllowEndpoints,
+		"block|endpoint_cidr": len(rules.BlockEndpointCIDRs),
+		"allow|endpoint_cidr": len(rules.AllowEndpointCIDRs),
 	}
 }
 

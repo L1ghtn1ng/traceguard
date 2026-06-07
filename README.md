@@ -365,6 +365,7 @@ The generated packages install:
 - `dry-run` uses the same policy engine as enforcement mode but logs `would-block` decisions instead of enabling kernel drops.
 - `SIGHUP` triggers an immediate policy reload from local and remote sources.
 - Metrics and health endpoints are served when `-metrics-addr` is set. The packaged env file enables them on `:9091`.
+- Metrics include event volume, policy decisions, blocklist refresh/load status, policy size and mode, eBPF attachment/read health, export queue and spool backlog, process attribution quality, Kubernetes refreshes, and enrichment hit/miss counts.
 - Event export requires an HTTPS endpoint and uses bounded in-memory queuing to avoid blocking the main event loop.
 - Event export batches records as JSON arrays, supports a configurable auth header, optional gzip compression, optional mTLS, and can spool failed batches to disk for replay.
 - Kubernetes enrichment uses HTTPS, a bearer token, bounded response sizes, and a periodic cache refresh instead of live per-event API calls.

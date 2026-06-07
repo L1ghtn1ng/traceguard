@@ -62,6 +62,19 @@ type Rules struct {
 	AllowEndpointCIDRs []EndpointCIDR
 }
 
+type LoadSource string
+
+const (
+	LoadSourceManual     LoadSource = "manual"
+	LoadSourceRemote     LoadSource = "remote"
+	LoadSourceCache      LoadSource = "cache"
+	LoadSourceStaleCache LoadSource = "stale_cache"
+)
+
+type LoadMetadata struct {
+	Source LoadSource
+}
+
 type ResolvedEndpoint struct {
 	Kind EndpointKind
 	Host string
@@ -144,6 +157,15 @@ func (m *Manager) Run(ctx context.Context, apply func(Rules) error) error {
 }
 
 func (m *Manager) Watch(ctx context.Context, apply func(Rules) error) error {
+	return m.WatchWithMetadata(ctx, func(rules Rules, _ LoadMetadata, err error) error {
+		if err != nil {
+			return err
+		}
+		return apply(rules)
+	})
+}
+
+func (m *Manager) WatchWithMetadata(ctx context.Context, apply func(Rules, LoadMetadata, error) error) error {
 	if m.cfg.URL == "" {
 		<-ctx.Done()
 		return nil
@@ -157,11 +179,14 @@ func (m *Manager) Watch(ctx context.Context, apply func(Rules) error) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			rules, err := m.Load(ctx)
+			rules, metadata, err := m.LoadWithMetadata(ctx)
 			if err != nil {
+				if callbackErr := apply(rules, metadata, err); callbackErr != nil {
+					return fmt.Errorf("refresh blocklist: %w", callbackErr)
+				}
 				return fmt.Errorf("refresh blocklist: %w", err)
 			}
-			if err := apply(rules); err != nil {
+			if err := apply(rules, metadata, nil); err != nil {
 				return fmt.Errorf("apply refreshed blocklist: %w", err)
 			}
 		}
@@ -169,6 +194,11 @@ func (m *Manager) Watch(ctx context.Context, apply func(Rules) error) error {
 }
 
 func (m *Manager) Load(ctx context.Context) (Rules, error) {
+	rules, _, err := m.LoadWithMetadata(ctx)
+	return rules, err
+}
+
+func (m *Manager) LoadWithMetadata(ctx context.Context) (Rules, LoadMetadata, error) {
 	manualEntries := make([]string, 0, len(m.cfg.ManualDomains)+len(m.cfg.ManualAllow))
 	manualEntries = append(manualEntries, m.cfg.ManualDomains...)
 	for _, value := range m.cfg.ManualAllow {
@@ -177,37 +207,40 @@ func (m *Manager) Load(ctx context.Context) (Rules, error) {
 
 	manual, err := ParseRules(strings.NewReader(strings.Join(manualEntries, "\n")))
 	if err != nil {
-		return Rules{}, fmt.Errorf("parse manual rules: %w", err)
+		return Rules{}, LoadMetadata{Source: LoadSourceManual}, fmt.Errorf("parse manual rules: %w", err)
 	}
 
 	if m.cfg.URL == "" {
-		return manual, nil
+		return manual, LoadMetadata{Source: LoadSourceManual}, nil
 	}
 
 	cacheFresh, err := isCacheFresh(m.cfg.CachePath, m.cfg.RefreshPeriod)
 	if err != nil {
-		return Rules{}, err
+		return Rules{}, LoadMetadata{Source: LoadSourceCache}, err
 	}
 
 	var remote Rules
+	source := LoadSourceRemote
 	switch {
 	case cacheFresh:
+		source = LoadSourceCache
 		remote, err = m.readCache()
 		if err != nil {
-			return Rules{}, err
+			return Rules{}, LoadMetadata{Source: source}, err
 		}
 	default:
 		remote, err = m.fetchAndCache(ctx)
 		if err != nil {
 			stale, staleErr := m.readCache()
 			if staleErr != nil {
-				return Rules{}, err
+				return Rules{}, LoadMetadata{Source: source}, err
 			}
 			remote = stale
+			source = LoadSourceStaleCache
 		}
 	}
 
-	return mergeRules(manual, remote), nil
+	return mergeRules(manual, remote), LoadMetadata{Source: source}, nil
 }
 
 func (m *Manager) fetchAndCache(ctx context.Context) (Rules, error) {

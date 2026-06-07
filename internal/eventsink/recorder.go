@@ -400,6 +400,8 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		cancel:     cancel,
 		spool:      spool,
 	}
+	sink.updateQueueDepth()
+	sink.updateSpoolFiles()
 	sink.wg.Add(1)
 	go func() {
 		defer sink.wg.Done()
@@ -417,8 +419,11 @@ func (e *exportSink) Enqueue(entry record) {
 	select {
 	case e.queue <- payload:
 		e.metrics.IncEventExport("queued")
+		e.updateQueueDepth()
 	default:
 		e.metrics.IncEventExport("dropped")
+		e.metrics.SetEventExportLastError()
+		e.updateQueueDepth()
 	}
 }
 
@@ -435,15 +440,19 @@ func (e *exportSink) run(ctx context.Context) {
 		}
 		if err := e.sendBatch(flushCtx, batch); err != nil {
 			e.metrics.IncEventExport("error")
+			e.metrics.SetEventExportLastError()
 			if e.spool != nil {
 				if spoolErr := e.spool.Write(batch); spoolErr == nil {
 					e.metrics.IncEventExport("spooled")
+					e.updateSpoolFiles()
 				} else {
 					e.metrics.IncEventExport("spool_error")
+					e.metrics.SetEventExportLastError()
 				}
 			}
 		} else {
 			e.metrics.IncEventExport("success")
+			e.metrics.SetEventExportLastSuccess()
 		}
 		batch = batch[:0]
 	}
@@ -452,6 +461,7 @@ func (e *exportSink) run(ctx context.Context) {
 			select {
 			case payload := <-e.queue:
 				batch = append(batch, payload)
+				e.updateQueueDepth()
 			default:
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), exportShutdownFlush)
 				defer cancel()
@@ -470,6 +480,7 @@ func (e *exportSink) run(ctx context.Context) {
 			return
 		case payload := <-e.queue:
 			batch = append(batch, payload)
+			e.updateQueueDepth()
 			if len(batch) >= e.batchSize {
 				flush(ctx)
 			}
@@ -482,13 +493,33 @@ func (e *exportSink) run(ctx context.Context) {
 			_ = e.spool.Replay(func(payload []byte) error {
 				if err := e.sendPayload(ctx, payload); err != nil {
 					e.metrics.IncEventExport("replay_error")
+					e.metrics.SetEventExportLastError()
 					return err
 				}
 				e.metrics.IncEventExport("replayed")
+				e.metrics.SetEventExportLastSuccess()
 				return nil
 			})
+			e.updateSpoolFiles()
 		}
 	}
+}
+
+func (e *exportSink) updateQueueDepth() {
+	e.metrics.SetEventExportQueueDepth(len(e.queue))
+}
+
+func (e *exportSink) updateSpoolFiles() {
+	if e.spool == nil {
+		e.metrics.SetEventExportSpoolFiles(0)
+		return
+	}
+	files, err := e.spool.files()
+	if err != nil {
+		e.metrics.SetEventExportLastError()
+		return
+	}
+	e.metrics.SetEventExportSpoolFiles(len(files))
 }
 
 func (e *exportSink) sendBatch(ctx context.Context, batch []json.RawMessage) error {
