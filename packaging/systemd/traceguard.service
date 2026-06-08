@@ -10,7 +10,6 @@ ExecStart=/usr/bin/traceguard
 Restart=on-failure
 RestartSec=5s
 StateDirectory=traceguard
-LogsDirectory=/var/log/traceguard
 WorkingDirectory=/var/lib/traceguard
 User=root
 Group=root
