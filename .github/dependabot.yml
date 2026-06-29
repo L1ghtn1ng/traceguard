@@ -1,24 +1,30 @@
 version: 2
-
+multi-ecosystem-groups:
+  all-dependencies:
+    schedule:
+      interval: daily
+      timezone: Europe/London
+    open-pull-requests-limit: 10
+    target-branch: main
 updates:
-  - package-ecosystem: gomod
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "deps"
-    labels:
-      - dependencies
-      - go
-
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "ci"
-    labels:
-      - dependencies
-      - github-actions
+- package-ecosystem: github-actions
+  directory: "/"
+  schedule:
+    interval: daily
+    timezone: Europe/London
+  cooldown:
+    default-days: 5
+  patterns: ["*"]
+  multi-ecosystem-group: all-dependencies
+- package-ecosystem: gomod
+  directory: "/"
+  schedule:
+    interval: daily
+    timezone: Europe/London
+  cooldown:
+    default-days: 5
+  patterns: ["*"]
+  multi-ecosystem-group: all-dependencies
+  allow:
+  - dependency-type: direct
+  - dependency-type: indirect
