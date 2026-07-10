@@ -125,7 +125,8 @@ struct domain_key {
 struct domain_suffix_key {
 	__u64 hash;
 	__u16 length;
-	__u16 _pad0;
+	__u8 policy_slot;
+	__u8 _pad0;
 	__u32 _pad1;
 };
 
@@ -148,7 +149,9 @@ struct policy_snapshot {
 
 struct dns_parse_result {
 	struct domain_key key;
+	__u16 qname_length;
 	__u8 allow_suffix_match;
+	__u8 _pad[5];
 };
 
 struct socket_info_key {
@@ -302,6 +305,13 @@ struct {
 	__type(key, __u32);
 	__type(value, struct settings);
 } settings SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct dns_parse_result);
+} dns_scratch SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -721,34 +731,62 @@ static __always_inline __u8 *lookup_endpoint6_cidr_allow_rule(const __u8 addr[16
 	return policy_rule_active(value, policy_mask) ? value : 0;
 }
 
-static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __u32 packet_len, struct domain_key *key)
+struct qname_load_context {
+	struct __sk_buff *skb;
+	struct dns_parse_result *parsed;
+	__u32 start;
+	__u8 cursor;
+	__u8 done;
+	__u8 failed;
+};
+
+static long load_qname_byte(__u64 index, void *data)
 {
+	struct qname_load_context *ctx = data;
+	__u8 c;
+
+	(void)index;
+	if (bpf_skb_load_bytes(ctx->skb, ctx->start + ctx->cursor, &c, sizeof(c)) < 0) {
+		ctx->failed = 1;
+		return 1;
+	}
+	if (c >= 'A' && c <= 'Z') {
+		c += 'a' - 'A';
+	}
+
+	ctx->parsed->key.domain[ctx->cursor] = c;
+	if (c == 0) {
+		ctx->parsed->qname_length = (__u16)ctx->cursor + 1;
+		ctx->done = 1;
+		return 1;
+	}
+	ctx->cursor++;
+	return 0;
+}
+
+static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __u32 packet_len, struct dns_parse_result *parsed)
+{
+	struct qname_load_context ctx = {
+		.skb = skb,
+		.parsed = parsed,
+		.start = start,
+	};
+	__u32 available;
+
 	if (packet_len <= start) {
 		return -1;
 	}
-
-	__builtin_memset(key, 0, sizeof(*key));
-#pragma clang loop unroll(disable)
-	for (int i = 0; i < DOMAIN_KEY_SIZE; i++) {
-		__u8 c;
-
-		if (start + (__u32)i >= packet_len) {
-			return -1;
-		}
-		if (bpf_skb_load_bytes(skb, start + (__u32)i, &c, sizeof(c)) < 0) {
-			return -1;
-		}
-		if (c >= 'A' && c <= 'Z') {
-			c += 'a' - 'A';
-		}
-
-		key->domain[i] = c;
-		if (c == 0) {
-			return 0;
-		}
+	available = packet_len - start;
+	if (available > MAX_DOMAIN_LEN) {
+		available = MAX_DOMAIN_LEN;
 	}
 
-	return -1;
+	__builtin_memset(&parsed->key, 0, sizeof(parsed->key));
+	parsed->qname_length = 0;
+	if (bpf_loop(available, load_qname_byte, &ctx, 0) < 0 || ctx.failed || !ctx.done) {
+		return -1;
+	}
+	return 0;
 }
 
 static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct domain_key *key, __u32 kind, __u8 transport, __u32 addr)
@@ -816,57 +854,82 @@ static __always_inline __u32 dns_event_kind(const struct dns_parse_result *parse
 	return EVENT_DNS;
 }
 
-static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __u32 qname_offset, __u32 packet_len, __u8 policy_mask)
+struct suffix_hash_context {
+	__u64 hash;
+	__u16 length;
+	__u8 cursor;
+	__u8 failed;
+};
+
+static long hash_suffix_byte(__u64 index, void *data)
 {
-	__u32 offset = qname_offset;
+	struct suffix_hash_context *ctx = data;
+	__u32 zero = 0;
+	const struct dns_parse_result *source;
+	__u8 c;
+
+	(void)index;
+	source = bpf_map_lookup_elem(&dns_scratch, &zero);
+	if (!source) {
+		ctx->failed = 1;
+		return 1;
+	}
+	c = source->key.domain[ctx->cursor];
+	ctx->hash ^= c;
+	ctx->hash *= 1099511628211ULL;
+	ctx->length++;
+	ctx->cursor++;
+	return 0;
+}
+
+static __noinline __u8 qname_matches_allow_suffix(const struct dns_parse_result *parsed, __u8 policy_slot)
+{
+	__u8 offset = 0;
 
 #pragma clang loop unroll(disable)
 	for (int i = 0; i < MAX_SUFFIX_LABELS; i++) {
-		struct domain_suffix_key suffix = {0};
+		struct suffix_hash_context hash = {
+			.hash = 14695981039346656037ULL,
+			.cursor = offset,
+		};
+		struct domain_suffix_key suffix;
 		__u8 *present;
 		__u8 label_len;
-		__u32 cursor;
+		__u16 suffix_length;
+		__u16 next_offset;
 
-		if (offset >= packet_len) {
+		if (offset >= MAX_DOMAIN_LEN) {
 			break;
 		}
-		if (bpf_skb_load_bytes(skb, offset, &label_len, sizeof(label_len)) < 0) {
-			break;
-		}
+		label_len = parsed->key.domain[offset];
 		if (label_len == 0) {
 			break;
 		}
-		if (label_len > 63 || offset + 1 + (__u32)label_len >= packet_len) {
+		next_offset = (__u16)offset + 1 + (__u16)label_len;
+		if (label_len > 63 || next_offset >= MAX_DOMAIN_LEN) {
 			break;
 		}
-		cursor = offset;
-		suffix.hash = 14695981039346656037ULL;
-#pragma clang loop unroll(disable)
-		for (int j = 0; j < MAX_SUFFIX_WIRE_LEN; j++) {
-			__u8 c;
-
-			if (cursor >= packet_len) {
-				break;
-			}
-			if (bpf_skb_load_bytes(skb, cursor, &c, sizeof(c)) < 0) {
-				break;
-			}
-			if (c >= 'A' && c <= 'Z') {
-				c += 'a' - 'A';
-			}
-			suffix.hash ^= c;
-			suffix.hash *= 1099511628211ULL;
-			suffix.length++;
-			cursor++;
-			if (c == 0) {
-				break;
-			}
+		if (parsed->qname_length <= offset) {
+			break;
 		}
+		suffix_length = parsed->qname_length - offset;
+		if (suffix_length > MAX_SUFFIX_WIRE_LEN) {
+			offset = (__u8)next_offset;
+			continue;
+		}
+		if (bpf_loop(suffix_length, hash_suffix_byte, &hash, 0) < 0 || hash.failed) {
+			return 0;
+		}
+		suffix = (struct domain_suffix_key){
+			.hash = hash.hash,
+			.length = hash.length,
+			.policy_slot = policy_slot,
+		};
 		present = bpf_map_lookup_elem(&allow_suffixes, &suffix);
-		if (policy_rule_active(present, policy_mask)) {
+		if (present) {
 			return 1;
 		}
-		offset += 1 + (__u32)label_len;
+		offset = (__u8)next_offset;
 	}
 
 	return 0;
@@ -880,6 +943,7 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 	__u16 qdcount;
 	int parse_status;
 
+	parsed->allow_suffix_match = 0;
 	if (payload_offset + sizeof(dns) > packet_len) {
 		return -1;
 	}
@@ -894,12 +958,12 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 	}
 
 	qname_offset = payload_offset + sizeof(dns);
-	parse_status = load_qname_key(skb, qname_offset, packet_len, &parsed->key);
+	parse_status = load_qname_key(skb, qname_offset, packet_len, parsed);
 	if (parse_status < 0) {
 		return -1;
 	}
 	if (policy->allow_suffix_rules_enabled) {
-		parsed->allow_suffix_match = qname_matches_allow_suffix(skb, qname_offset, packet_len, policy->policy_mask);
+		parsed->allow_suffix_match = qname_matches_allow_suffix(parsed, policy->policy_mask >> 1);
 	}
 
 	return 0;
@@ -1204,6 +1268,7 @@ int trace_dns(struct __sk_buff *skb)
 	__u32 packet_len = skb->len;
 	__u32 zero = 0;
 	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+	struct dns_parse_result *parsed = bpf_map_lookup_elem(&dns_scratch, &zero);
 	struct policy_snapshot policy = {
 		.block_enabled = cfg && cfg->block_enabled,
 		.block_all_domains = cfg && cfg->block_all_domains,
@@ -1214,6 +1279,9 @@ int trace_dns(struct __sk_buff *skb)
 	__u8 version_ihl;
 	__u8 version;
 
+	if (!parsed) {
+		return 1;
+	}
 	if (packet_len < 1) {
 		return 1;
 	}
@@ -1226,7 +1294,6 @@ int trace_dns(struct __sk_buff *skb)
 		struct iphdr iph = {0};
 		__u32 header_len;
 		__u32 transport_offset;
-		struct dns_parse_result parsed = {0};
 		__u32 kind;
 
 		if (packet_len < sizeof(iph)) {
@@ -1256,14 +1323,14 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &parsed, &policy) < 0) {
+			if (parse_dns_payload(skb, payload_offset, packet_len, parsed, &policy) < 0) {
 				/* Fragmented or malformed UDP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return policy.block_enabled ? 0 : 1;
 			}
-			kind = dns_event_kind(&parsed, &policy);
-			return emit_dns4_event(skb, &parsed.key, kind, TRANSPORT_UDP, iph.daddr);
+			kind = dns_event_kind(parsed, &policy);
+			return emit_dns4_event(skb, &parsed->key, kind, TRANSPORT_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1286,15 +1353,15 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &parsed, &policy);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, parsed, &policy);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&parsed, &policy);
-			return emit_dns4_event(skb, &parsed.key, kind, TRANSPORT_TCP, iph.daddr);
+			kind = dns_event_kind(parsed, &policy);
+			return emit_dns4_event(skb, &parsed->key, kind, TRANSPORT_TCP, iph.daddr);
 		}
 		return 1;
 	}
@@ -1304,7 +1371,6 @@ int trace_dns(struct __sk_buff *skb)
 		__u32 transport_offset = sizeof(ip6h);
 		__u8 nexthdr;
 		__u8 fragmented;
-		struct dns_parse_result parsed = {0};
 		__u32 kind;
 
 		if (packet_len < sizeof(ip6h)) {
@@ -1335,14 +1401,14 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &parsed, &policy) < 0) {
+			if (parse_dns_payload(skb, payload_offset, packet_len, parsed, &policy) < 0) {
 				/* Fragmented or malformed UDP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return policy.block_enabled ? 0 : 1;
 			}
-			kind = dns_event_kind(&parsed, &policy);
-			return emit_dns6_event(skb, &parsed.key, kind, TRANSPORT_UDP, ip6h.daddr.s6_addr);
+			kind = dns_event_kind(parsed, &policy);
+			return emit_dns6_event(skb, &parsed->key, kind, TRANSPORT_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1365,15 +1431,15 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &parsed, &policy);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, parsed, &policy);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&parsed, &policy);
-			return emit_dns6_event(skb, &parsed.key, kind, TRANSPORT_TCP, ip6h.daddr.s6_addr);
+			kind = dns_event_kind(parsed, &policy);
+			return emit_dns6_event(skb, &parsed->key, kind, TRANSPORT_TCP, ip6h.daddr.s6_addr);
 		}
 	}
 

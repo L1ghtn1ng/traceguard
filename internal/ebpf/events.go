@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	commSize     = 16
-	domainSize   = 256
-	filenameSize = 256
+	commSize            = 16
+	domainSize          = 256
+	maxDNSWireNameBytes = 255
+	filenameSize        = 256
 )
 
 const (

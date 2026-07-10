@@ -3,6 +3,7 @@ package ebpf
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +58,24 @@ func TestEncodeDomainKeyRejectsInvalidDomains(t *testing.T) {
 				t.Fatalf("encodeDomainKey(%q) returned nil error", tt.domain)
 			}
 		})
+	}
+}
+
+func TestEncodeDomainKeyEnforcesDNSWireLength(t *testing.T) {
+	t.Parallel()
+
+	legal := strings.Join([]string{
+		strings.Repeat("a", 63),
+		strings.Repeat("b", 63),
+		strings.Repeat("c", 63),
+		strings.Repeat("d", 61),
+	}, ".")
+	if _, err := encodeDomainKey(legal); err != nil {
+		t.Fatalf("encodeDomainKey rejected 255-byte wire name: %v", err)
+	}
+	illegal := legal + "e"
+	if _, err := encodeDomainKey(illegal); err == nil {
+		t.Fatal("encodeDomainKey accepted 256-byte wire name")
 	}
 }
 

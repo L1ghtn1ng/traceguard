@@ -52,7 +52,21 @@ jobs:
         run: go test -race ./...
 
       - name: Run eBPF kernel integration tests
-        run: sudo env "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" "$(command -v go)" test -tags ebpfintegration ./internal/ebpf
+        run: |
+          set +e
+          sudo env "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+            "$(command -v go)" test -tags ebpfintegration ./internal/ebpf 2>&1 | tee ebpf-integration.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if (( status != 0 )); then
+            while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              line=${line//$'\r'/'%0D'}
+              line=${line//$'\n'/'%0A'}
+              printf '::error title=eBPF integration::%s\n' "$line"
+            done < <(tail -n 15 ebpf-integration.log)
+            exit "$status"
+          fi
 
       - name: Build traceguard
         run: go build ./cmd/traceguard

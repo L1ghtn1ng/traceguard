@@ -11,6 +11,9 @@
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
 #endif
+#ifndef __noinline
+#define __noinline __attribute__((noinline))
+#endif
 
 static void *(*const bpf_map_lookup_elem)(const void *map, const void *key) = (void *)BPF_FUNC_map_lookup_elem;
 static long (*const bpf_map_update_elem)(const void *map, const void *key, const void *value, __u64 flags) = (void *)BPF_FUNC_map_update_elem;
@@ -26,6 +29,7 @@ static void (*const bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_F
 static long (*const bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user;
 static long (*const bpf_probe_read_user_str)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user_str;
 static long (*const bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to, __u32 len) = (void *)BPF_FUNC_skb_load_bytes;
+static long (*const bpf_loop)(__u32 nr_loops, void *callback_fn, void *callback_ctx, __u64 flags) = (void *)BPF_FUNC_loop;
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 

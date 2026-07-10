@@ -36,7 +36,8 @@ type domainKey struct {
 type domainSuffixKey struct {
 	Hash   uint64
 	Length uint16
-	_      [6]byte
+	Slot   uint8
+	_      [5]byte
 }
 
 type runtimeSettings struct {
@@ -137,6 +138,7 @@ type monitorObjects struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
+	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -171,6 +173,7 @@ func (o *monitorObjects) Close() error {
 		o.Allowlist,
 		o.AllowSuffixes,
 		o.Blocklist,
+		o.DnsScratch,
 		o.Endpoint4AllowRules,
 		o.Endpoint4CidrAllowRules,
 		o.Endpoint4CidrRules,
@@ -743,7 +746,7 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	}{
 		{name: "blocklist", fn: func() error { return syncMapSlot(m.objects.Blocklist, nextBlock, inactiveSlot) }},
 		{name: "allowlist", fn: func() error { return syncMapSlot(m.objects.Allowlist, nextAllow, inactiveSlot) }},
-		{name: "allow suffix list", fn: func() error { return syncMapSlot(m.objects.AllowSuffixes, nextAllowSuffixes, inactiveSlot) }},
+		{name: "allow suffix list", fn: func() error { return syncSuffixMapSlot(m.objects.AllowSuffixes, nextAllowSuffixes, inactiveSlot) }},
 		{name: "endpoint4 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4Rules, nextBlock4, inactiveSlot) }},
 		{name: "endpoint6 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6Rules, nextBlock6, inactiveSlot) }},
 		{name: "endpoint4 allow rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4AllowRules, nextAllow4, inactiveSlot) }},
@@ -822,7 +825,7 @@ func encodeDomainKey(domain string) (domainKey, error) {
 		if labelLen > 63 {
 			return key, fmt.Errorf("label %q exceeds 63 bytes", label)
 		}
-		if offset+1+labelLen+1 > len(key.Domain) {
+		if offset+1+labelLen+1 > maxDNSWireNameBytes {
 			return key, errors.New("domain exceeds DNS wire-format limit")
 		}
 
@@ -898,6 +901,43 @@ func syncMapSlot[K comparable](m *ebpf.Map, next map[K]struct{}, slot uint8) err
 			continue
 		}
 		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncSuffixMapSlot(m *ebpf.Map, next map[domainSuffixKey]struct{}, slot uint8) error {
+	if slot > 1 {
+		return fmt.Errorf("invalid policy slot %d", slot)
+	}
+	current := make(map[domainSuffixKey]struct{})
+	iter := m.Iterate()
+	var key domainSuffixKey
+	var value uint8
+	for iter.Next(&key, &value) {
+		current[key] = struct{}{}
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+
+	for key := range next {
+		key.Slot = slot
+		if err := m.Put(key, uint8(1)); err != nil {
+			return err
+		}
+	}
+	for key := range current {
+		if key.Slot != slot {
+			continue
+		}
+		stored := key
+		key.Slot = 0
+		if _, keep := next[key]; keep {
+			continue
+		}
+		if err := m.Delete(stored); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return err
 		}
 	}

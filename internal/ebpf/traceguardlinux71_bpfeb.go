@@ -31,17 +31,26 @@ type traceguardLinux71ConnectionDedupeValue struct {
 	LastSeenNs uint64
 }
 
+type traceguardLinux71DnsParseResult struct {
+	_                structs.HostLayout
+	Key              traceguardLinux71DomainKey
+	QnameLength      uint16
+	AllowSuffixMatch uint8
+	Pad              [5]uint8
+}
+
 type traceguardLinux71DomainKey struct {
 	_      structs.HostLayout
 	Domain [256]uint8
 }
 
 type traceguardLinux71DomainSuffixKey struct {
-	_      structs.HostLayout
-	Hash   uint64
-	Length uint16
-	Pad0   uint16
-	Pad1   uint32
+	_          structs.HostLayout
+	Hash       uint64
+	Length     uint16
+	PolicySlot uint8
+	Pad0       uint8
+	Pad1       uint32
 }
 
 type traceguardLinux71Endpoint4CidrKey struct {
@@ -116,6 +125,45 @@ type traceguardLinux71SocketInfoValue struct {
 	Pad      uint8
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	traceguardLinux71MapAllowSuffixes           = "allow_suffixes"
+	traceguardLinux71MapAllowlist               = "allowlist"
+	traceguardLinux71MapBlocklist               = "blocklist"
+	traceguardLinux71MapConnectionDedupe        = "connection_dedupe"
+	traceguardLinux71MapDnsScratch              = "dns_scratch"
+	traceguardLinux71MapEndpoint4AllowRules     = "endpoint4_allow_rules"
+	traceguardLinux71MapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
+	traceguardLinux71MapEndpoint4CidrRules      = "endpoint4_cidr_rules"
+	traceguardLinux71MapEndpoint4Rules          = "endpoint4_rules"
+	traceguardLinux71MapEndpoint6AllowRules     = "endpoint6_allow_rules"
+	traceguardLinux71MapEndpoint6CidrAllowRules = "endpoint6_cidr_allow_rules"
+	traceguardLinux71MapEndpoint6CidrRules      = "endpoint6_cidr_rules"
+	traceguardLinux71MapEndpoint6Rules          = "endpoint6_rules"
+	traceguardLinux71MapEvents                  = "events"
+	traceguardLinux71MapListenerInfo            = "listener_info"
+	traceguardLinux71MapSettings                = "settings"
+	traceguardLinux71MapSocketInfo              = "socket_info"
+	traceguardLinux71ProgTraceConnect4          = "trace_connect4"
+	traceguardLinux71ProgTraceConnect6          = "trace_connect6"
+	traceguardLinux71ProgTraceConnectionIngress = "trace_connection_ingress"
+	traceguardLinux71ProgTraceCreat             = "trace_creat"
+	traceguardLinux71ProgTraceDns               = "trace_dns"
+	traceguardLinux71ProgTraceExecve            = "trace_execve"
+	traceguardLinux71ProgTraceExecveat          = "trace_execveat"
+	traceguardLinux71ProgTraceOpen              = "trace_open"
+	traceguardLinux71ProgTraceOpenat            = "trace_openat"
+	traceguardLinux71ProgTraceOpenat2           = "trace_openat2"
+	traceguardLinux71ProgTracePostBind4         = "trace_post_bind4"
+	traceguardLinux71ProgTracePostBind6         = "trace_post_bind6"
+	traceguardLinux71ProgTraceRecvmsg4          = "trace_recvmsg4"
+	traceguardLinux71ProgTraceRecvmsg6          = "trace_recvmsg6"
+	traceguardLinux71ProgTraceSendmsg4          = "trace_sendmsg4"
+	traceguardLinux71ProgTraceSendmsg6          = "trace_sendmsg6"
+)
+
 // loadTraceguardLinux71 returns the embedded CollectionSpec for traceguardLinux71.
 func loadTraceguardLinux71() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_TraceguardLinux71Bytes)
@@ -136,7 +184,7 @@ func loadTraceguardLinux71() (*ebpf.CollectionSpec, error) {
 //	*traceguardLinux71Maps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadTraceguardLinux71Objects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadTraceguardLinux71Objects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadTraceguardLinux71()
 	if err != nil {
 		return err
@@ -184,6 +232,7 @@ type traceguardLinux71MapSpecs struct {
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
+	DnsScratch              *ebpf.MapSpec `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.MapSpec `ebpf:"endpoint4_cidr_rules"`
@@ -228,6 +277,7 @@ type traceguardLinux71Maps struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
+	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -248,6 +298,7 @@ func (m *traceguardLinux71Maps) Close() error {
 		m.Allowlist,
 		m.Blocklist,
 		m.ConnectionDedupe,
+		m.DnsScratch,
 		m.Endpoint4AllowRules,
 		m.Endpoint4CidrAllowRules,
 		m.Endpoint4CidrRules,

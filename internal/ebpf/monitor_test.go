@@ -61,6 +61,23 @@ func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
 	if got := binary.Size(runtimeSettings{}); got != 8 {
 		t.Fatalf("runtimeSettings size = %d, want 8", got)
 	}
+	if got := binary.Size(domainSuffixKey{}); got != 16 {
+		t.Fatalf("domainSuffixKey size = %d, want 16", got)
+	}
+}
+
+func TestDomainSuffixPolicySlotsProduceDistinctKeys(t *testing.T) {
+	t.Parallel()
+
+	key, err := encodeDomainSuffixKey("example.com")
+	if err != nil {
+		t.Fatalf("encodeDomainSuffixKey returned error: %v", err)
+	}
+	other := key
+	other.Slot = 1
+	if key == other {
+		t.Fatal("policy slot did not change the suffix map key")
+	}
 }
 
 func TestIsKernelAtLeast(t *testing.T) {
