@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
+	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
@@ -27,6 +28,7 @@ var defaultChecks = environmentChecks{
 	geteuid:                   os.Geteuid,
 	validateProcRoot:          processinfo.ValidateRoot,
 	checkTracepointPerfAccess: checkTracepointPerfEventAccess,
+	detectKernelFeatures:      ebpfmonitor.ProbeKernelFeatures,
 }
 
 type environmentChecks struct {
@@ -36,6 +38,7 @@ type environmentChecks struct {
 	geteuid                   func() int
 	validateProcRoot          func(string) error
 	checkTracepointPerfAccess func() error
+	detectKernelFeatures      func() ebpfmonitor.KernelFeatures
 }
 
 func Run(cfg config.Config, w io.Writer) error {
@@ -44,6 +47,7 @@ func Run(cfg config.Config, w io.Writer) error {
 
 func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error {
 	var failures int
+	var writeErr error
 
 	check := func(ok bool, name, detail string) {
 		state := "PASS"
@@ -51,7 +55,9 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 			state = "FAIL"
 			failures++
 		}
-		_, _ = fmt.Fprintf(w, "%s %s: %s\n", state, name, detail)
+		if _, err := fmt.Fprintf(w, "%s %s: %s\n", state, name, detail); err != nil {
+			writeErr = errors.Join(writeErr, err)
+		}
 	}
 
 	check(runtime.GOOS == "linux", "os", fmt.Sprintf("runtime=%s", runtime.GOOS))
@@ -81,6 +87,7 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	} else {
 		check(false, "log-path", err.Error())
 	}
+	check(strings.TrimSpace(cfg.CachePath) != "" && filepath.IsAbs(cfg.CachePath), "cache-path", emptyDetail(cfg.CachePath, "must be a non-empty absolute path"))
 
 	if cfg.BlocklistURL != "" {
 		parsed, err := url.Parse(cfg.BlocklistURL)
@@ -154,6 +161,14 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	} else {
 		check(true, "tracepoint-perf-event", "syscalls/sys_enter_execve")
 	}
+	features := env.detectKernelFeatures()
+	check(true, "kernel-release", emptyDetail(features.Release, "unknown"))
+	check(features.KernelAtLeast612, "kernel-at-least-6.12", enabledDetail(features.KernelAtLeast612))
+	check(true, "kernel-at-least-7.1", enabledDetail(features.KernelAtLeast71))
+	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
+	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
+	check(true, "kernel-bpf-object", emptyDetail(features.SelectedObject, "none"))
+	check(true, "kernel-enhanced-telemetry", enhancedTelemetryDetail(features))
 
 	check(cfg.LogFormat == "text" || cfg.LogFormat == "json", "log-format", cfg.LogFormat)
 	check(cfg.ProcessCacheTTL > 0, "process-cache-ttl", cfg.ProcessCacheTTL.String())
@@ -183,10 +198,15 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 		check(true, "kubernetes-enrich", "disabled")
 	}
 
+	if writeErr != nil {
+		return fmt.Errorf("write doctor output: %w", writeErr)
+	}
 	if failures > 0 {
 		return fmt.Errorf("doctor found %d failing checks", failures)
 	}
-	_, _ = io.WriteString(w, "PASS summary: environment looks ready for TraceGuard\n")
+	if _, err := io.WriteString(w, "PASS summary: environment looks ready for TraceGuard\n"); err != nil {
+		return fmt.Errorf("write doctor summary: %w", err)
+	}
 	return nil
 }
 
@@ -227,6 +247,23 @@ func Summary(err error) string {
 func enabledDetail(enabled bool) string {
 	if enabled {
 		return "enabled"
+	}
+	return "disabled"
+}
+
+func emptyDetail(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func enhancedTelemetryDetail(features ebpfmonitor.KernelFeatures) string {
+	if features.EnhancedTelemetry {
+		return "enabled"
+	}
+	if features.EnhancedLoadFailure != "" {
+		return "disabled: " + features.EnhancedLoadFailure
 	}
 	return "disabled"
 }

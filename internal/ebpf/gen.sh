@@ -29,6 +29,50 @@ go run github.com/cilium/ebpf/cmd/bpf2go \
   -no-strip \
   -cc clang \
   -cflags "${cflags[*]}" \
+  traceguardLinux71 \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
+  -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardLinux71DNSCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
+  -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardLinux71RecvmsgCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
+  -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
+  traceguardLinux71DNSRecvmsgCompat \
+  "$script_dir/bpf/traceguard.c" \
+  -- \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
+  -target bpfel
+
+go run github.com/cilium/ebpf/cmd/bpf2go \
+  -no-strip \
+  -cc clang \
+  -cflags "${cflags[*]}" \
   traceguard \
   "$script_dir/bpf/traceguard.c" \
   -- \

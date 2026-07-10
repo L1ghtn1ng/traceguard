@@ -31,17 +31,26 @@ type traceguardDNSRecvmsgCompatConnectionDedupeValue struct {
 	LastSeenNs uint64
 }
 
+type traceguardDNSRecvmsgCompatDnsParseResult struct {
+	_                structs.HostLayout
+	Key              traceguardDNSRecvmsgCompatDomainKey
+	QnameLength      uint16
+	AllowSuffixMatch uint8
+	Pad              [5]uint8
+}
+
 type traceguardDNSRecvmsgCompatDomainKey struct {
 	_      structs.HostLayout
 	Domain [256]uint8
 }
 
 type traceguardDNSRecvmsgCompatDomainSuffixKey struct {
-	_      structs.HostLayout
-	Hash   uint64
-	Length uint16
-	Pad0   uint16
-	Pad1   uint32
+	_          structs.HostLayout
+	Hash       uint64
+	Length     uint16
+	PolicySlot uint8
+	Pad0       uint8
+	Pad1       uint32
 }
 
 type traceguardDNSRecvmsgCompatEndpoint4CidrKey struct {
@@ -94,7 +103,8 @@ type traceguardDNSRecvmsgCompatSettings struct {
 	BlockAllDomains      uint8
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
-	Pad                  [4]uint8
+	ActivePolicySlot     uint8
+	Pad                  [3]uint8
 }
 
 type traceguardDNSRecvmsgCompatSocketInfoKey struct {
@@ -114,6 +124,45 @@ type traceguardDNSRecvmsgCompatSocketInfoValue struct {
 	Protocol uint8
 	Pad      uint8
 }
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	traceguardDNSRecvmsgCompatMapAllowSuffixes           = "allow_suffixes"
+	traceguardDNSRecvmsgCompatMapAllowlist               = "allowlist"
+	traceguardDNSRecvmsgCompatMapBlocklist               = "blocklist"
+	traceguardDNSRecvmsgCompatMapConnectionDedupe        = "connection_dedupe"
+	traceguardDNSRecvmsgCompatMapDnsScratch              = "dns_scratch"
+	traceguardDNSRecvmsgCompatMapEndpoint4AllowRules     = "endpoint4_allow_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint4CidrRules      = "endpoint4_cidr_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint4Rules          = "endpoint4_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint6AllowRules     = "endpoint6_allow_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint6CidrAllowRules = "endpoint6_cidr_allow_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint6CidrRules      = "endpoint6_cidr_rules"
+	traceguardDNSRecvmsgCompatMapEndpoint6Rules          = "endpoint6_rules"
+	traceguardDNSRecvmsgCompatMapEvents                  = "events"
+	traceguardDNSRecvmsgCompatMapListenerInfo            = "listener_info"
+	traceguardDNSRecvmsgCompatMapSettings                = "settings"
+	traceguardDNSRecvmsgCompatMapSocketInfo              = "socket_info"
+	traceguardDNSRecvmsgCompatProgTraceConnect4          = "trace_connect4"
+	traceguardDNSRecvmsgCompatProgTraceConnect6          = "trace_connect6"
+	traceguardDNSRecvmsgCompatProgTraceConnectionIngress = "trace_connection_ingress"
+	traceguardDNSRecvmsgCompatProgTraceCreat             = "trace_creat"
+	traceguardDNSRecvmsgCompatProgTraceDns               = "trace_dns"
+	traceguardDNSRecvmsgCompatProgTraceExecve            = "trace_execve"
+	traceguardDNSRecvmsgCompatProgTraceExecveat          = "trace_execveat"
+	traceguardDNSRecvmsgCompatProgTraceOpen              = "trace_open"
+	traceguardDNSRecvmsgCompatProgTraceOpenat            = "trace_openat"
+	traceguardDNSRecvmsgCompatProgTraceOpenat2           = "trace_openat2"
+	traceguardDNSRecvmsgCompatProgTracePostBind4         = "trace_post_bind4"
+	traceguardDNSRecvmsgCompatProgTracePostBind6         = "trace_post_bind6"
+	traceguardDNSRecvmsgCompatProgTraceRecvmsg4          = "trace_recvmsg4"
+	traceguardDNSRecvmsgCompatProgTraceRecvmsg6          = "trace_recvmsg6"
+	traceguardDNSRecvmsgCompatProgTraceSendmsg4          = "trace_sendmsg4"
+	traceguardDNSRecvmsgCompatProgTraceSendmsg6          = "trace_sendmsg6"
+)
 
 // loadTraceguardDNSRecvmsgCompat returns the embedded CollectionSpec for traceguardDNSRecvmsgCompat.
 func loadTraceguardDNSRecvmsgCompat() (*ebpf.CollectionSpec, error) {
@@ -135,7 +184,7 @@ func loadTraceguardDNSRecvmsgCompat() (*ebpf.CollectionSpec, error) {
 //	*traceguardDNSRecvmsgCompatMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadTraceguardDNSRecvmsgCompatObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadTraceguardDNSRecvmsgCompatObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadTraceguardDNSRecvmsgCompat()
 	if err != nil {
 		return err
@@ -183,6 +232,7 @@ type traceguardDNSRecvmsgCompatMapSpecs struct {
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
+	DnsScratch              *ebpf.MapSpec `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.MapSpec `ebpf:"endpoint4_cidr_rules"`
@@ -227,6 +277,7 @@ type traceguardDNSRecvmsgCompatMaps struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
+	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -247,6 +298,7 @@ func (m *traceguardDNSRecvmsgCompatMaps) Close() error {
 		m.Allowlist,
 		m.Blocklist,
 		m.ConnectionDedupe,
+		m.DnsScratch,
 		m.Endpoint4AllowRules,
 		m.Endpoint4CidrAllowRules,
 		m.Endpoint4CidrRules,

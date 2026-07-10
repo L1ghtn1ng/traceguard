@@ -37,3 +37,21 @@ func TestLoggerJSON(t *testing.T) {
 		t.Fatalf("level = %v, want info", decoded["level"])
 	}
 }
+
+func TestLoggerJSONProtectsReservedFields(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger, err := NewLogger(&buf, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	logger.Info("dns", map[string]any{"timestamp": "forged", "level": "forged", "message": "forged"})
+	var decoded map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if decoded["level"] != "info" || decoded["message"] != "dns" || decoded["timestamp"] == "forged" {
+		t.Fatalf("reserved fields were overwritten: %#v", decoded)
+	}
+}

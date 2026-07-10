@@ -95,6 +95,9 @@ func (p *Policy) EndpointDecision(transport, address string, port uint16) Decisi
 		return DecisionAllow
 	}
 	addr, err := netip.ParseAddr(address)
+	if err == nil {
+		addr = addr.Unmap()
+	}
 	if err == nil && matchesEndpointCIDR(transport, addr, port, p.allowEndpointCIDRs) {
 		return DecisionAllow
 	}

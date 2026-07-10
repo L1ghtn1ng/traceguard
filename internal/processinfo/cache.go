@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type Metadata struct {
@@ -39,8 +41,8 @@ const (
 	SourceFallback = "fallback"
 	SourceProc     = "proc"
 
-	processIdentityRecheckInterval = time.Second
-	processCachePruneInterval      = time.Minute
+	processCachePruneInterval = time.Minute
+	maxProcessCacheEntries    = 4096
 )
 
 type Cache struct {
@@ -50,12 +52,15 @@ type Cache struct {
 	now         func() time.Time
 	nextPruneAt time.Time
 	entries     map[uint32]cacheEntry
+	sequence    uint64
+	usePidfds   bool
 }
 
 type cacheEntry struct {
 	expiresAt time.Time
-	checkedAt time.Time
 	metadata  Metadata
+	pidfd     int
+	lastUsed  uint64
 }
 
 func NewCache(root string, ttl time.Duration) *Cache {
@@ -63,10 +68,11 @@ func NewCache(root string, ttl time.Duration) *Cache {
 		root = "/proc"
 	}
 	return &Cache{
-		root:    root,
-		ttl:     ttl,
-		now:     time.Now,
-		entries: make(map[uint32]cacheEntry),
+		root:      root,
+		ttl:       ttl,
+		now:       time.Now,
+		entries:   make(map[uint32]cacheEntry),
+		usePidfds: root == "/proc",
 	}
 }
 
@@ -76,37 +82,72 @@ func (c *Cache) Lookup(pid uint32, fallbackComm string) (Metadata, bool) {
 	c.mu.Lock()
 	entry, ok := c.entries[pid]
 	if ok && now.Before(entry.expiresAt) {
-		if now.Sub(entry.checkedAt) < processIdentityRecheckInterval {
-			c.mu.Unlock()
-			return entry.metadata, true
-		}
-		if c.sameProcess(pid, entry.metadata.StartTime) {
-			entry.checkedAt = now
+		if (entry.pidfd >= 0 && pidfdAlive(entry.pidfd)) || (entry.pidfd < 0 && c.sameProcess(pid, entry.metadata.StartTime)) {
+			c.sequence++
+			entry.lastUsed = c.sequence
 			c.entries[pid] = entry
 			c.mu.Unlock()
 			return entry.metadata, true
 		}
 	}
+	if ok {
+		c.closeEntry(entry)
+		delete(c.entries, pid)
+	}
 	c.mu.Unlock()
 
+	pidfd := -1
+	if c.usePidfds {
+		if fd, err := unix.PidfdOpen(int(pid), 0); err == nil {
+			pidfd = fd
+		}
+	}
 	metadata := c.readMetadata(pid, fallbackComm)
+	if pidfd >= 0 && !pidfdAlive(pidfd) {
+		_ = unix.Close(pidfd)
+		pidfd = -1
+		metadata = Metadata{PID: pid, Comm: fallbackComm, Source: SourceFallback}
+	}
 
 	c.mu.Lock()
 	c.pruneExpiredLocked(now)
-	c.entries[pid] = cacheEntry{
+	c.evictLRULocked()
+	c.sequence++
+	c.storeEntryLocked(pid, cacheEntry{
 		expiresAt: now.Add(c.ttl),
-		checkedAt: now,
 		metadata:  metadata,
-	}
+		pidfd:     pidfd,
+		lastUsed:  c.sequence,
+	})
 	c.mu.Unlock()
 
 	return metadata, false
 }
 
+func (c *Cache) storeEntryLocked(pid uint32, entry cacheEntry) {
+	if existing, ok := c.entries[pid]; ok {
+		c.closeEntry(existing)
+	}
+	c.entries[pid] = entry
+}
+
 func (c *Cache) Invalidate(pid uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if entry, ok := c.entries[pid]; ok {
+		c.closeEntry(entry)
+	}
 	delete(c.entries, pid)
+}
+
+func (c *Cache) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for pid, entry := range c.entries {
+		c.closeEntry(entry)
+		delete(c.entries, pid)
+	}
+	return nil
 }
 
 func (c *Cache) pruneExpiredLocked(now time.Time) {
@@ -115,10 +156,38 @@ func (c *Cache) pruneExpiredLocked(now time.Time) {
 	}
 	for pid, entry := range c.entries {
 		if !now.Before(entry.expiresAt) {
+			c.closeEntry(entry)
 			delete(c.entries, pid)
 		}
 	}
 	c.nextPruneAt = now.Add(processCachePruneInterval)
+}
+
+func (c *Cache) evictLRULocked() {
+	for len(c.entries) >= maxProcessCacheEntries {
+		var oldestPID uint32
+		var oldest cacheEntry
+		first := true
+		for pid, entry := range c.entries {
+			if first || entry.lastUsed < oldest.lastUsed {
+				oldestPID, oldest, first = pid, entry, false
+			}
+		}
+		c.closeEntry(oldest)
+		delete(c.entries, oldestPID)
+	}
+}
+
+func (c *Cache) closeEntry(entry cacheEntry) {
+	if entry.pidfd >= 0 {
+		_ = unix.Close(entry.pidfd)
+	}
+}
+
+func pidfdAlive(fd int) bool {
+	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	n, err := unix.Poll(poll, 0)
+	return err == nil && n == 0
 }
 
 func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
@@ -128,6 +197,10 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 		Source: SourceFallback,
 	}
 
+	startTime := c.readStartTime(pid)
+	if startTime == 0 {
+		return metadata
+	}
 	status := c.readStatus(pid)
 	if status.Name != "" {
 		metadata.Comm = status.Name
@@ -135,7 +208,7 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 	}
 	metadata.UID = status.UID
 	metadata.PPID = status.PPID
-	metadata.StartTime = c.readStartTime(pid)
+	metadata.StartTime = startTime
 
 	if exe, err := os.Readlink(c.procPath(pid, "exe")); err == nil {
 		metadata.Exe = exe
@@ -154,6 +227,9 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 		if exe, err := os.Readlink(c.procPath(metadata.PPID, "exe")); err == nil {
 			metadata.ParentExe = exe
 		}
+	}
+	if currentStartTime := c.readStartTime(pid); currentStartTime == 0 || currentStartTime != startTime {
+		return Metadata{PID: pid, Comm: fallbackComm, Source: SourceFallback}
 	}
 
 	return metadata

@@ -13,7 +13,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type traceguardDNSCompatConnectionDedupeKey struct {
+type traceguardLinux71ConnectionDedupeKey struct {
 	_         structs.HostLayout
 	Pid       uint32
 	Port      uint16
@@ -26,25 +26,25 @@ type traceguardDNSCompatConnectionDedupeKey struct {
 	LocalAddr [16]uint8
 }
 
-type traceguardDNSCompatConnectionDedupeValue struct {
+type traceguardLinux71ConnectionDedupeValue struct {
 	_          structs.HostLayout
 	LastSeenNs uint64
 }
 
-type traceguardDNSCompatDnsParseResult struct {
+type traceguardLinux71DnsParseResult struct {
 	_                structs.HostLayout
-	Key              traceguardDNSCompatDomainKey
+	Key              traceguardLinux71DomainKey
 	QnameLength      uint16
 	AllowSuffixMatch uint8
 	Pad              [5]uint8
 }
 
-type traceguardDNSCompatDomainKey struct {
+type traceguardLinux71DomainKey struct {
 	_      structs.HostLayout
 	Domain [256]uint8
 }
 
-type traceguardDNSCompatDomainSuffixKey struct {
+type traceguardLinux71DomainSuffixKey struct {
 	_          structs.HostLayout
 	Hash       uint64
 	Length     uint16
@@ -53,14 +53,14 @@ type traceguardDNSCompatDomainSuffixKey struct {
 	Pad1       uint32
 }
 
-type traceguardDNSCompatEndpoint4CidrKey struct {
+type traceguardLinux71Endpoint4CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [7]uint8
 	Pad       uint8
 }
 
-type traceguardDNSCompatEndpoint4Key struct {
+type traceguardLinux71Endpoint4Key struct {
 	_         structs.HostLayout
 	Addr      uint32
 	Port      uint16
@@ -68,14 +68,14 @@ type traceguardDNSCompatEndpoint4Key struct {
 	Pad       uint8
 }
 
-type traceguardDNSCompatEndpoint6CidrKey struct {
+type traceguardLinux71Endpoint6CidrKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [19]uint8
 	Pad       uint8
 }
 
-type traceguardDNSCompatEndpoint6Key struct {
+type traceguardLinux71Endpoint6Key struct {
 	_         structs.HostLayout
 	Addr      [16]uint8
 	Port      uint16
@@ -83,7 +83,7 @@ type traceguardDNSCompatEndpoint6Key struct {
 	Pad       uint8
 }
 
-type traceguardDNSCompatListenerInfoKey struct {
+type traceguardLinux71ListenerInfoKey struct {
 	_        structs.HostLayout
 	Port     uint16
 	Family   uint8
@@ -91,13 +91,13 @@ type traceguardDNSCompatListenerInfoKey struct {
 	Addr     [16]uint8
 }
 
-type traceguardDNSCompatListenerInfoValue struct {
+type traceguardLinux71ListenerInfoValue struct {
 	_    structs.HostLayout
 	Pid  uint32
 	Comm [16]int8
 }
 
-type traceguardDNSCompatSettings struct {
+type traceguardLinux71Settings struct {
 	_                    structs.HostLayout
 	BlockEnabled         uint8
 	BlockAllDomains      uint8
@@ -107,7 +107,7 @@ type traceguardDNSCompatSettings struct {
 	Pad                  [3]uint8
 }
 
-type traceguardDNSCompatSocketInfoKey struct {
+type traceguardLinux71SocketInfoKey struct {
 	_        structs.HostLayout
 	Pid      uint32
 	Port     uint16
@@ -116,7 +116,7 @@ type traceguardDNSCompatSocketInfoKey struct {
 	Addr     [16]uint8
 }
 
-type traceguardDNSCompatSocketInfoValue struct {
+type traceguardLinux71SocketInfoValue struct {
 	_        structs.HostLayout
 	Comm     [16]int8
 	Hook     uint8
@@ -129,63 +129,63 @@ type traceguardDNSCompatSocketInfoValue struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	traceguardDNSCompatMapAllowSuffixes           = "allow_suffixes"
-	traceguardDNSCompatMapAllowlist               = "allowlist"
-	traceguardDNSCompatMapBlocklist               = "blocklist"
-	traceguardDNSCompatMapConnectionDedupe        = "connection_dedupe"
-	traceguardDNSCompatMapDnsScratch              = "dns_scratch"
-	traceguardDNSCompatMapEndpoint4AllowRules     = "endpoint4_allow_rules"
-	traceguardDNSCompatMapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
-	traceguardDNSCompatMapEndpoint4CidrRules      = "endpoint4_cidr_rules"
-	traceguardDNSCompatMapEndpoint4Rules          = "endpoint4_rules"
-	traceguardDNSCompatMapEndpoint6AllowRules     = "endpoint6_allow_rules"
-	traceguardDNSCompatMapEndpoint6CidrAllowRules = "endpoint6_cidr_allow_rules"
-	traceguardDNSCompatMapEndpoint6CidrRules      = "endpoint6_cidr_rules"
-	traceguardDNSCompatMapEndpoint6Rules          = "endpoint6_rules"
-	traceguardDNSCompatMapEvents                  = "events"
-	traceguardDNSCompatMapListenerInfo            = "listener_info"
-	traceguardDNSCompatMapSettings                = "settings"
-	traceguardDNSCompatMapSocketInfo              = "socket_info"
-	traceguardDNSCompatProgTraceConnect4          = "trace_connect4"
-	traceguardDNSCompatProgTraceConnect6          = "trace_connect6"
-	traceguardDNSCompatProgTraceConnectionIngress = "trace_connection_ingress"
-	traceguardDNSCompatProgTraceCreat             = "trace_creat"
-	traceguardDNSCompatProgTraceDns               = "trace_dns"
-	traceguardDNSCompatProgTraceExecve            = "trace_execve"
-	traceguardDNSCompatProgTraceExecveat          = "trace_execveat"
-	traceguardDNSCompatProgTraceOpen              = "trace_open"
-	traceguardDNSCompatProgTraceOpenat            = "trace_openat"
-	traceguardDNSCompatProgTraceOpenat2           = "trace_openat2"
-	traceguardDNSCompatProgTracePostBind4         = "trace_post_bind4"
-	traceguardDNSCompatProgTracePostBind6         = "trace_post_bind6"
-	traceguardDNSCompatProgTraceRecvmsg4          = "trace_recvmsg4"
-	traceguardDNSCompatProgTraceRecvmsg6          = "trace_recvmsg6"
-	traceguardDNSCompatProgTraceSendmsg4          = "trace_sendmsg4"
-	traceguardDNSCompatProgTraceSendmsg6          = "trace_sendmsg6"
+	traceguardLinux71MapAllowSuffixes           = "allow_suffixes"
+	traceguardLinux71MapAllowlist               = "allowlist"
+	traceguardLinux71MapBlocklist               = "blocklist"
+	traceguardLinux71MapConnectionDedupe        = "connection_dedupe"
+	traceguardLinux71MapDnsScratch              = "dns_scratch"
+	traceguardLinux71MapEndpoint4AllowRules     = "endpoint4_allow_rules"
+	traceguardLinux71MapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
+	traceguardLinux71MapEndpoint4CidrRules      = "endpoint4_cidr_rules"
+	traceguardLinux71MapEndpoint4Rules          = "endpoint4_rules"
+	traceguardLinux71MapEndpoint6AllowRules     = "endpoint6_allow_rules"
+	traceguardLinux71MapEndpoint6CidrAllowRules = "endpoint6_cidr_allow_rules"
+	traceguardLinux71MapEndpoint6CidrRules      = "endpoint6_cidr_rules"
+	traceguardLinux71MapEndpoint6Rules          = "endpoint6_rules"
+	traceguardLinux71MapEvents                  = "events"
+	traceguardLinux71MapListenerInfo            = "listener_info"
+	traceguardLinux71MapSettings                = "settings"
+	traceguardLinux71MapSocketInfo              = "socket_info"
+	traceguardLinux71ProgTraceConnect4          = "trace_connect4"
+	traceguardLinux71ProgTraceConnect6          = "trace_connect6"
+	traceguardLinux71ProgTraceConnectionIngress = "trace_connection_ingress"
+	traceguardLinux71ProgTraceCreat             = "trace_creat"
+	traceguardLinux71ProgTraceDns               = "trace_dns"
+	traceguardLinux71ProgTraceExecve            = "trace_execve"
+	traceguardLinux71ProgTraceExecveat          = "trace_execveat"
+	traceguardLinux71ProgTraceOpen              = "trace_open"
+	traceguardLinux71ProgTraceOpenat            = "trace_openat"
+	traceguardLinux71ProgTraceOpenat2           = "trace_openat2"
+	traceguardLinux71ProgTracePostBind4         = "trace_post_bind4"
+	traceguardLinux71ProgTracePostBind6         = "trace_post_bind6"
+	traceguardLinux71ProgTraceRecvmsg4          = "trace_recvmsg4"
+	traceguardLinux71ProgTraceRecvmsg6          = "trace_recvmsg6"
+	traceguardLinux71ProgTraceSendmsg4          = "trace_sendmsg4"
+	traceguardLinux71ProgTraceSendmsg6          = "trace_sendmsg6"
 )
 
-// loadTraceguardDNSCompat returns the embedded CollectionSpec for traceguardDNSCompat.
-func loadTraceguardDNSCompat() (*ebpf.CollectionSpec, error) {
-	reader := bytes.NewReader(_TraceguardDNSCompatBytes)
+// loadTraceguardLinux71 returns the embedded CollectionSpec for traceguardLinux71.
+func loadTraceguardLinux71() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_TraceguardLinux71Bytes)
 	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
 	if err != nil {
-		return nil, fmt.Errorf("can't load traceguardDNSCompat: %w", err)
+		return nil, fmt.Errorf("can't load traceguardLinux71: %w", err)
 	}
 
 	return spec, err
 }
 
-// loadTraceguardDNSCompatObjects loads traceguardDNSCompat and converts it into a struct.
+// loadTraceguardLinux71Objects loads traceguardLinux71 and converts it into a struct.
 //
 // The following types are suitable as obj argument:
 //
-//	*traceguardDNSCompatObjects
-//	*traceguardDNSCompatPrograms
-//	*traceguardDNSCompatMaps
+//	*traceguardLinux71Objects
+//	*traceguardLinux71Programs
+//	*traceguardLinux71Maps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadTraceguardDNSCompatObjects(obj any, opts *ebpf.CollectionOptions) error {
-	spec, err := loadTraceguardDNSCompat()
+func loadTraceguardLinux71Objects(obj any, opts *ebpf.CollectionOptions) error {
+	spec, err := loadTraceguardLinux71()
 	if err != nil {
 		return err
 	}
@@ -193,19 +193,19 @@ func loadTraceguardDNSCompatObjects(obj any, opts *ebpf.CollectionOptions) error
 	return spec.LoadAndAssign(obj, opts)
 }
 
-// traceguardDNSCompatSpecs contains maps and programs before they are loaded into the kernel.
+// traceguardLinux71Specs contains maps and programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardDNSCompatSpecs struct {
-	traceguardDNSCompatProgramSpecs
-	traceguardDNSCompatMapSpecs
-	traceguardDNSCompatVariableSpecs
+type traceguardLinux71Specs struct {
+	traceguardLinux71ProgramSpecs
+	traceguardLinux71MapSpecs
+	traceguardLinux71VariableSpecs
 }
 
-// traceguardDNSCompatProgramSpecs contains programs before they are loaded into the kernel.
+// traceguardLinux71ProgramSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardDNSCompatProgramSpecs struct {
+type traceguardLinux71ProgramSpecs struct {
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
@@ -224,10 +224,10 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 }
 
-// traceguardDNSCompatMapSpecs contains maps before they are loaded into the kernel.
+// traceguardLinux71MapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardDNSCompatMapSpecs struct {
+type traceguardLinux71MapSpecs struct {
 	AllowSuffixes           *ebpf.MapSpec `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
@@ -247,32 +247,32 @@ type traceguardDNSCompatMapSpecs struct {
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
 }
 
-// traceguardDNSCompatVariableSpecs contains global variables before they are loaded into the kernel.
+// traceguardLinux71VariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type traceguardDNSCompatVariableSpecs struct {
+type traceguardLinux71VariableSpecs struct {
 }
 
-// traceguardDNSCompatObjects contains all objects after they have been loaded into the kernel.
+// traceguardLinux71Objects contains all objects after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardDNSCompatObjects struct {
-	traceguardDNSCompatPrograms
-	traceguardDNSCompatMaps
-	traceguardDNSCompatVariables
+// It can be passed to loadTraceguardLinux71Objects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardLinux71Objects struct {
+	traceguardLinux71Programs
+	traceguardLinux71Maps
+	traceguardLinux71Variables
 }
 
-func (o *traceguardDNSCompatObjects) Close() error {
-	return _TraceguardDNSCompatClose(
-		&o.traceguardDNSCompatPrograms,
-		&o.traceguardDNSCompatMaps,
+func (o *traceguardLinux71Objects) Close() error {
+	return _TraceguardLinux71Close(
+		&o.traceguardLinux71Programs,
+		&o.traceguardLinux71Maps,
 	)
 }
 
-// traceguardDNSCompatMaps contains all maps after they have been loaded into the kernel.
+// traceguardLinux71Maps contains all maps after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardDNSCompatMaps struct {
+// It can be passed to loadTraceguardLinux71Objects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardLinux71Maps struct {
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
@@ -292,8 +292,8 @@ type traceguardDNSCompatMaps struct {
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 }
 
-func (m *traceguardDNSCompatMaps) Close() error {
-	return _TraceguardDNSCompatClose(
+func (m *traceguardLinux71Maps) Close() error {
+	return _TraceguardLinux71Close(
 		m.AllowSuffixes,
 		m.Allowlist,
 		m.Blocklist,
@@ -314,16 +314,16 @@ func (m *traceguardDNSCompatMaps) Close() error {
 	)
 }
 
-// traceguardDNSCompatVariables contains all global variables after they have been loaded into the kernel.
+// traceguardLinux71Variables contains all global variables after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardDNSCompatVariables struct {
+// It can be passed to loadTraceguardLinux71Objects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardLinux71Variables struct {
 }
 
-// traceguardDNSCompatPrograms contains all programs after they have been loaded into the kernel.
+// traceguardLinux71Programs contains all programs after they have been loaded into the kernel.
 //
-// It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
-type traceguardDNSCompatPrograms struct {
+// It can be passed to loadTraceguardLinux71Objects or ebpf.CollectionSpec.LoadAndAssign.
+type traceguardLinux71Programs struct {
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
@@ -342,8 +342,8 @@ type traceguardDNSCompatPrograms struct {
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 }
 
-func (p *traceguardDNSCompatPrograms) Close() error {
-	return _TraceguardDNSCompatClose(
+func (p *traceguardLinux71Programs) Close() error {
+	return _TraceguardLinux71Close(
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectionIngress,
@@ -363,7 +363,7 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 	)
 }
 
-func _TraceguardDNSCompatClose(closers ...io.Closer) error {
+func _TraceguardLinux71Close(closers ...io.Closer) error {
 	for _, closer := range closers {
 		if err := closer.Close(); err != nil {
 			return err
@@ -374,5 +374,5 @@ func _TraceguardDNSCompatClose(closers ...io.Closer) error {
 
 // Do not access this directly.
 //
-//go:embed traceguarddnscompat_bpfeb.o
-var _TraceguardDNSCompatBytes []byte
+//go:embed traceguardlinux71_bpfeb.o
+var _TraceguardLinux71Bytes []byte

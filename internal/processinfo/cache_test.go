@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCacheLookupReadsProcMetadata(t *testing.T) {
@@ -108,7 +110,6 @@ func TestCacheLookupRefreshesAfterPIDReuse(t *testing.T) {
 
 	writeProcEntry(t, root, 100, "status", "Name:\tbash\nPPid:\t1\nUid:\t1001\t1001\t1001\t1001\n")
 	writeProcEntry(t, root, 100, "stat", statWithStartTime("bash", 2000))
-	cache.now = func() time.Time { return time.Now().Add(processIdentityRecheckInterval) }
 	second, hit := cache.Lookup(100, "fallback")
 	if hit {
 		t.Fatal("lookup after PID reuse unexpectedly hit cache")
@@ -137,7 +138,7 @@ func TestParseCgroup(t *testing.T) {
 	}
 }
 
-func TestCacheLookupSkipsImmediateIdentityRecheck(t *testing.T) {
+func TestCacheLookupRechecksIdentityOnEveryHitWithoutPidfd(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -154,13 +155,8 @@ func TestCacheLookupSkipsImmediateIdentityRecheck(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, "100", "stat")); err != nil {
 		t.Fatalf("remove stat: %v", err)
 	}
-	if _, hit := cache.Lookup(100, "fallback"); !hit {
-		t.Fatal("immediate second lookup did not hit cache")
-	}
-
-	now = now.Add(processIdentityRecheckInterval)
 	if _, hit := cache.Lookup(100, "fallback"); hit {
-		t.Fatal("lookup after recheck interval unexpectedly hit cache")
+		t.Fatal("lookup with missing process identity unexpectedly hit cache")
 	}
 }
 
@@ -192,6 +188,60 @@ func TestCacheLookupPrunesExpiredEntries(t *testing.T) {
 	}
 	if _, ok := cache.entries[200]; !ok {
 		t.Fatal("new PID 200 entry was not cached")
+	}
+}
+
+func TestCacheEvictsLeastRecentlyUsedEntryAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	cache := NewCache(t.TempDir(), time.Minute)
+	for i := 0; i < maxProcessCacheEntries; i++ {
+		pid := uint32(i + 1)
+		cache.entries[pid] = cacheEntry{pidfd: -1, lastUsed: uint64(i + 1)}
+	}
+	cache.evictLRULocked()
+	if len(cache.entries) != maxProcessCacheEntries-1 {
+		t.Fatalf("cache size = %d, want %d", len(cache.entries), maxProcessCacheEntries-1)
+	}
+	if _, ok := cache.entries[1]; ok {
+		t.Fatal("least recently used entry was not evicted")
+	}
+}
+
+func TestCacheUsesAndClosesPidfdForRealProc(t *testing.T) {
+	cache := NewCache("/proc", time.Minute)
+	pid := uint32(os.Getpid())
+	metadata, _ := cache.Lookup(pid, "test")
+	if metadata.Source != SourceProc {
+		t.Skip("process metadata unavailable in test environment")
+	}
+	entry := cache.entries[pid]
+	if entry.pidfd < 0 {
+		t.Skip("pidfd_open unavailable in test environment")
+	}
+	fd := entry.pidfd
+	if err := cache.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != unix.EBADF {
+		t.Fatalf("pidfd after Close error = %v, want EBADF", err)
+	}
+}
+
+func TestStoreEntryLockedClosesReplacedPidfd(t *testing.T) {
+	t.Parallel()
+
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	defer unix.Close(fds[1])
+
+	cache := NewCache(t.TempDir(), time.Minute)
+	cache.entries[100] = cacheEntry{pidfd: fds[0]}
+	cache.storeEntryLocked(100, cacheEntry{pidfd: -1})
+	if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0); err != unix.EBADF {
+		t.Fatalf("replaced pidfd error = %v, want EBADF", err)
 	}
 }
 

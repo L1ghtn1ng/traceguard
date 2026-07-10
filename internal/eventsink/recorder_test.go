@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -70,6 +71,40 @@ func TestRecorderWritesArchive(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("archive missing %q in %q", want, text)
 		}
+	}
+}
+
+func TestRecorderInfoAtUsesEventOccurrenceTimestamp(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	timestamp := time.Date(2026, time.July, 10, 12, 34, 56, 123, time.UTC)
+	recorder.InfoAt(timestamp, "dns", map[string]any{"domain": "example.com"})
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 1 || lines[0]["timestamp"] != timestamp.Format(time.RFC3339Nano) {
+		t.Fatalf("recorded timestamp = %#v, want %s", lines, timestamp.Format(time.RFC3339Nano))
+	}
+}
+
+func TestRecorderMarksHealthUnhealthyOnLocalSinkFailure(t *testing.T) {
+	t.Parallel()
+
+	logger, err := logging.NewLogger(io.Discard, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	metrics := telemetry.NewRegistry()
+	recorder, err := NewRecorder(t.Context(), logger, metrics, Config{ArchivePath: filepath.Join(t.TempDir(), "events.jsonl")})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+	if err := recorder.archive.writer.Close(); err != nil {
+		t.Fatalf("close archive writer: %v", err)
+	}
+	recorder.Info("dns", map[string]any{"domain": "example.com"})
+	if metrics.Healthy() {
+		t.Fatal("local archive failure did not mark health unhealthy")
 	}
 }
 
@@ -226,6 +261,31 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 	}
 }
 
+func TestDomainSinkBoundsRememberedDomains(t *testing.T) {
+	t.Parallel()
+
+	sink := &domainSink{
+		seen:      make(map[string]struct{}),
+		seenLimit: 2,
+	}
+	sink.rememberDomain("first.example")
+	sink.rememberDomain("second.example")
+	sink.rememberDomain("third.example")
+
+	if len(sink.seen) != 2 {
+		t.Fatalf("remembered domain count = %d, want 2", len(sink.seen))
+	}
+	if _, ok := sink.seen["first.example"]; ok {
+		t.Fatal("oldest remembered domain was not evicted")
+	}
+	if _, ok := sink.seen["second.example"]; !ok {
+		t.Fatal("second remembered domain was unexpectedly evicted")
+	}
+	if _, ok := sink.seen["third.example"]; !ok {
+		t.Fatal("newest remembered domain was unexpectedly evicted")
+	}
+}
+
 func TestRecorderErrorDedupSuppressesRepeatedErrors(t *testing.T) {
 	t.Parallel()
 
@@ -273,6 +333,47 @@ func TestRecorderErrorDedupEmitsDifferentErrors(t *testing.T) {
 	}
 }
 
+func TestRecorderPrunesExpiredDedupeStates(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.InfoDedup("first-info", map[string]any{"path": "/tmp/first"}, 5*time.Minute)
+	recorder.ErrorDedup("first-error", errors.New("first"), nil, 5*time.Minute)
+	if len(recorder.infoStates) != 1 || len(recorder.errorStates) != 1 {
+		t.Fatalf("initial dedupe state counts = info %d, error %d; want 1 each", len(recorder.infoStates), len(recorder.errorStates))
+	}
+
+	now = now.Add(6 * time.Minute)
+	recorder.InfoDedup("second-info", map[string]any{"path": "/tmp/second"}, 5*time.Minute)
+	if len(recorder.infoStates) != 1 {
+		t.Fatalf("info dedupe state count after expiry = %d, want 1", len(recorder.infoStates))
+	}
+	if len(recorder.errorStates) != 0 {
+		t.Fatalf("error dedupe state count after expiry = %d, want 0", len(recorder.errorStates))
+	}
+}
+
+func TestLimitDedupeStatesBoundsCardinality(t *testing.T) {
+	t.Parallel()
+
+	states := make(map[string]errorDedupeState, maxDedupeStates+1)
+	for idx := 0; idx <= maxDedupeStates; idx++ {
+		states[strconv.Itoa(idx)] = errorDedupeState{}
+	}
+	const preserve = "65536"
+	limitDedupeStates(states, preserve)
+
+	if len(states) != maxDedupeStates {
+		t.Fatalf("dedupe state count = %d, want %d", len(states), maxDedupeStates)
+	}
+	if _, ok := states[preserve]; !ok {
+		t.Fatalf("current dedupe state %q was evicted", preserve)
+	}
+}
+
 func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +407,25 @@ func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
 	}
 	if got := lines[1]["block_domains"]; got != float64(2) {
 		t.Fatalf("second block_domains = %#v, want 2", got)
+	}
+}
+
+func TestRecorderInfoIfChangedBoundsChangeStates(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	for idx := 0; idx < maxDedupeStates; idx++ {
+		recorder.changeStates[strconv.Itoa(idx)] = "existing"
+	}
+	const current = "current policy"
+	if !recorder.InfoIfChanged(current, map[string]any{"revision": 1}) {
+		t.Fatal("InfoIfChanged did not emit the current message")
+	}
+	if len(recorder.changeStates) != maxDedupeStates {
+		t.Fatalf("change state count = %d, want %d", len(recorder.changeStates), maxDedupeStates)
+	}
+	if _, ok := recorder.changeStates[current]; !ok {
+		t.Fatalf("current change state %q was evicted", current)
 	}
 }
 
@@ -586,6 +706,39 @@ func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	}
 }
 
+func TestExportRedirectsStayOnOriginalOrigin(t *testing.T) {
+	t.Parallel()
+
+	original, err := http.NewRequest(http.MethodPost, "https://collector.example.test/v1/events", nil)
+	if err != nil {
+		t.Fatalf("create original request: %v", err)
+	}
+	tests := []struct {
+		name    string
+		target  string
+		via     []*http.Request
+		wantErr bool
+	}{
+		{name: "same origin", target: "https://collector.example.test/v2/events", via: []*http.Request{original}},
+		{name: "different host", target: "https://other.example.test/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "different port", target: "https://collector.example.test:8443/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "downgrade", target: "http://collector.example.test/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "missing origin", target: "https://collector.example.test/v2/events", wantErr: true},
+		{name: "too many", target: "https://collector.example.test/v2/events", via: []*http.Request{original, original, original, original, original}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			redirect, err := http.NewRequest(http.MethodPost, test.target, nil)
+			if err != nil {
+				t.Fatalf("create redirect request: %v", err)
+			}
+			if err := checkHTTPSRedirect(redirect, test.via); (err != nil) != test.wantErr {
+				t.Fatalf("checkHTTPSRedirect() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestNewExportSinkLoadsClientCertificate(t *testing.T) {
 	t.Parallel()
 
@@ -862,6 +1015,38 @@ func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
 	}
 }
 
+func TestRecorderCloseDrainsQueuedSyslog(t *testing.T) {
+	t.Parallel()
+
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket returned error: %v", err)
+	}
+	defer packetConn.Close()
+	recorder, err := newSyslogTestRecorder(t, Config{
+		SyslogURL:      "syslog+udp://" + packetConn.LocalAddr().String(),
+		SyslogFacility: "local0",
+		SyslogTag:      "traceguard",
+		SyslogTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
+	}
+	recorder.Info("dns", map[string]any{"domain": "queued.example"})
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	buffer := make([]byte, 4096)
+	_ = packetConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := packetConn.ReadFrom(buffer)
+	if err != nil {
+		t.Fatalf("ReadFrom after Close: %v", err)
+	}
+	if !strings.Contains(string(buffer[:n]), `"domain":"queued.example"`) {
+		t.Fatalf("syslog payload = %q, want queued event", buffer[:n])
+	}
+}
+
 func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
 	t.Parallel()
 
@@ -987,6 +1172,28 @@ func mustMarshalRecord(t *testing.T, entry record) json.RawMessage {
 		t.Fatalf("marshalSingleRecord returned error: %v", err)
 	}
 	return payload
+}
+
+func TestMarshalSingleRecordProtectsReservedFields(t *testing.T) {
+	t.Parallel()
+
+	payload := mustMarshalRecord(t, record{
+		Timestamp: "2026-07-10T12:00:00Z",
+		Level:     "info",
+		Message:   "dns",
+		Fields: map[string]any{
+			"timestamp": "forged",
+			"level":     "forged",
+			"message":   "forged",
+		},
+	})
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if decoded["timestamp"] != "2026-07-10T12:00:00Z" || decoded["level"] != "info" || decoded["message"] != "dns" {
+		t.Fatalf("reserved fields were overwritten: %#v", decoded)
+	}
 }
 
 func writeClientCertificate(t *testing.T, dir string) (string, string) {

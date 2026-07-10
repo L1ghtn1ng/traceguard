@@ -25,6 +25,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -45,6 +47,28 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Run race tests
+        run: go test -race ./...
+
+      - name: Run eBPF kernel integration tests
+        run: |
+          integration_cache_root=$(sudo mktemp -d /tmp/traceguard-ebpf-integration.XXXXXX)
+          trap 'sudo rm -rf "$integration_cache_root"' EXIT
+          set +e
+          sudo env "GOMODCACHE=$integration_cache_root/gomod" "GOCACHE=$integration_cache_root/gocache" \
+            "$(command -v go)" test -tags ebpfintegration ./internal/ebpf 2>&1 | tee ebpf-integration.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if (( status != 0 )); then
+            while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              line=${line//$'\r'/'%0D'}
+              line=${line//$'\n'/'%0A'}
+              printf '::error title=eBPF integration::%s\n' "$line"
+            done < <(tail -n 15 ebpf-integration.log)
+            exit "$status"
+          fi
 
       - name: Build traceguard
         run: go build ./cmd/traceguard

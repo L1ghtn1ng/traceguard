@@ -21,6 +21,7 @@ func TestParseKernelRelease(t *testing.T) {
 		{release: "6.12.0-custom", major: 6, minor: 12, ok: true},
 		{release: "6.18.21", major: 6, minor: 18, ok: true},
 		{release: "7.0.0-rc6", major: 7, minor: 0, ok: true},
+		{release: "7.1.1-arch1-1", major: 7, minor: 1, ok: true},
 		{release: "garbage", ok: false},
 	}
 
@@ -40,6 +41,88 @@ func TestParseKernelRelease(t *testing.T) {
 	}
 }
 
+func TestPolicySlotValuePreservesActiveSlot(t *testing.T) {
+	t.Parallel()
+
+	if got, remove := policySlotValue(0b01, true, 1); got != 0b11 || remove {
+		t.Fatalf("add inactive slot = %02b, remove=%v; want 11,false", got, remove)
+	}
+	if got, remove := policySlotValue(0b11, false, 1); got != 0b01 || remove {
+		t.Fatalf("clear inactive slot = %02b, remove=%v; want 01,false", got, remove)
+	}
+	if got, remove := policySlotValue(0b10, false, 1); got != 0 || !remove {
+		t.Fatalf("clear only slot = %02b, remove=%v; want 00,true", got, remove)
+	}
+}
+
+func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
+	t.Parallel()
+
+	if got := binary.Size(runtimeSettings{}); got != 8 {
+		t.Fatalf("runtimeSettings size = %d, want 8", got)
+	}
+	if got := binary.Size(domainSuffixKey{}); got != 16 {
+		t.Fatalf("domainSuffixKey size = %d, want 16", got)
+	}
+}
+
+func TestPolicyLimitsMatchKernelMapCapacities(t *testing.T) {
+	t.Parallel()
+
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	if got := spec.Maps["blocklist"].MaxEntries; got != blocklistMaxEntries {
+		t.Fatalf("blocklist map capacity = %d, userspace limit = %d", got, blocklistMaxEntries)
+	}
+	if got := spec.Maps["endpoint4_rules"].MaxEntries; got != endpointMaxEntries {
+		t.Fatalf("endpoint map capacity = %d, userspace limit = %d", got, endpointMaxEntries)
+	}
+}
+
+func TestDomainSuffixPolicySlotsProduceDistinctKeys(t *testing.T) {
+	t.Parallel()
+
+	key, err := encodeDomainSuffixKey("example.com")
+	if err != nil {
+		t.Fatalf("encodeDomainSuffixKey returned error: %v", err)
+	}
+	other := key
+	other.Slot = 1
+	if key == other {
+		t.Fatal("policy slot did not change the suffix map key")
+	}
+}
+
+func TestIsKernelAtLeast(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		release string
+		want    bool
+	}{
+		{release: "7.1.0", want: true},
+		{release: "7.1.1-custom", want: true},
+		{release: "7.2.0", want: true},
+		{release: "8.0.0", want: true},
+		{release: "7.0.13", want: false},
+		{release: "6.18.36", want: false},
+		{release: "garbage", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.release, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isKernelAtLeast(tc.release, 7, 1); got != tc.want {
+				t.Fatalf("isKernelAtLeast(%q, 7, 1) = %v, want %v", tc.release, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsLinux612x(t *testing.T) {
 	t.Parallel()
 
@@ -48,6 +131,17 @@ func TestIsLinux612x(t *testing.T) {
 	}
 	if isLinux612x("6.18.21") {
 		t.Fatal("isLinux612x accepted non-6.12 kernel")
+	}
+}
+
+func TestValidateKernelReleaseEnforces612Floor(t *testing.T) {
+	t.Parallel()
+
+	if err := validateKernelRelease("6.12.0"); err != nil {
+		t.Fatalf("validateKernelRelease rejected 6.12: %v", err)
+	}
+	if err := validateKernelRelease("6.11.9"); !errors.Is(err, ErrUnsupportedKernel) {
+		t.Fatalf("validateKernelRelease error = %v, want ErrUnsupportedKernel", err)
 	}
 }
 
@@ -63,6 +157,19 @@ func TestIsDNSHelperVerifierError(t *testing.T) {
 	}
 }
 
+func TestShouldTryDNSRecvmsgCompatChecksEveryFailure(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16")
+	otherErr := errors.New("field TraceRecvmsg4: unrelated verifier failure")
+	if !shouldTryDNSRecvmsgCompat(otherErr, dnsErr) {
+		t.Fatal("shouldTryDNSRecvmsgCompat ignored DNS failure from recvmsg compat load")
+	}
+	if shouldTryDNSRecvmsgCompat(otherErr, nil) {
+		t.Fatal("shouldTryDNSRecvmsgCompat matched unrelated failures")
+	}
+}
+
 func TestIsRecvmsgContextVerifierError(t *testing.T) {
 	t.Parallel()
 
@@ -72,6 +179,87 @@ func TestIsRecvmsgContextVerifierError(t *testing.T) {
 	}
 	if isRecvmsgContextVerifierError(errors.New("some other verifier error")) {
 		t.Fatal("isRecvmsgContextVerifierError matched unrelated error")
+	}
+}
+
+func TestLoadLinux71MonitorObjectsWithSelectsCompatVariants(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16")
+	recvmsgErr := errors.New("field TraceRecvmsg4: program trace_recvmsg4: load program: permission denied: invalid bpf_context access off=40 size=4")
+	dnsRecvmsgErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16; field TraceRecvmsg4: program trace_recvmsg4: load program: permission denied: invalid bpf_context access off=40 size=4")
+
+	tests := []struct {
+		name       string
+		loaders    monitorVariantLoaders
+		wantObject string
+	}{
+		{
+			name:       "default",
+			loaders:    fakeLinux71Loaders(nil, errors.New("unused"), errors.New("unused"), errors.New("unused")),
+			wantObject: "traceguardLinux71",
+		},
+		{
+			name:       "dns compat",
+			loaders:    fakeLinux71Loaders(dnsErr, nil, errors.New("unused"), errors.New("unused")),
+			wantObject: "traceguardLinux71DNSCompat",
+		},
+		{
+			name:       "recvmsg compat",
+			loaders:    fakeLinux71Loaders(recvmsgErr, errors.New("unused"), nil, errors.New("unused")),
+			wantObject: "traceguardLinux71RecvmsgCompat",
+		},
+		{
+			name:       "combined compat",
+			loaders:    fakeLinux71Loaders(dnsErr, recvmsgErr, errors.New("unused"), nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+		{
+			name:       "recvmsg then dns compat",
+			loaders:    fakeLinux71Loaders(recvmsgErr, errors.New("unused"), dnsErr, nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+		{
+			name:       "combined direct default error",
+			loaders:    fakeLinux71Loaders(dnsRecvmsgErr, errors.New("unused"), errors.New("unused"), nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, features, err := loadLinux71MonitorObjectsWith(nil, KernelFeatures{KernelAtLeast71: true}, tc.loaders)
+			if err != nil {
+				t.Fatalf("loadLinux71MonitorObjectsWith returned error: %v", err)
+			}
+			if !features.EnhancedTelemetry {
+				t.Fatal("EnhancedTelemetry = false, want true")
+			}
+			if features.SelectedFeatureSet != kernelFeatureSetLinux71 {
+				t.Fatalf("SelectedFeatureSet = %q, want %q", features.SelectedFeatureSet, kernelFeatureSetLinux71)
+			}
+			if features.SelectedObject != tc.wantObject {
+				t.Fatalf("SelectedObject = %q, want %q", features.SelectedObject, tc.wantObject)
+			}
+		})
+	}
+}
+
+func fakeLinux71Loaders(defaultErr, dnsErr, recvmsgErr, dnsRecvmsgErr error) monitorVariantLoaders {
+	return monitorVariantLoaders{
+		defaultVariant:   fakeVariantLoader(defaultErr),
+		dnsCompat:        fakeVariantLoader(dnsErr),
+		recvmsgCompat:    fakeVariantLoader(recvmsgErr),
+		dnsRecvmsgCompat: fakeVariantLoader(dnsRecvmsgErr),
+	}
+}
+
+func fakeVariantLoader(err error) func(*ebpf.CollectionOptions) (monitorObjects, error) {
+	return func(*ebpf.CollectionOptions) (monitorObjects, error) {
+		return monitorObjects{}, err
 	}
 }
 
@@ -93,6 +281,10 @@ func TestCIDRKeySizesMatchCollectionSpecs(t *testing.T) {
 		name     string
 		loadSpec func() (*ebpf.CollectionSpec, error)
 	}{
+		{name: "linux71", loadSpec: loadTraceguardLinux71},
+		{name: "linux71-dns-compat", loadSpec: loadTraceguardLinux71DNSCompat},
+		{name: "linux71-recvmsg-compat", loadSpec: loadTraceguardLinux71RecvmsgCompat},
+		{name: "linux71-dns-recvmsg-compat", loadSpec: loadTraceguardLinux71DNSRecvmsgCompat},
 		{name: "default", loadSpec: loadTraceguard},
 		{name: "dns-compat", loadSpec: loadTraceguardDNSCompat},
 		{name: "recvmsg-compat", loadSpec: loadTraceguardRecvmsgCompat},

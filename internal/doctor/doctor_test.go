@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
+	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 )
 
 func TestRunReportsReadyEnvironment(t *testing.T) {
@@ -28,6 +29,19 @@ func TestRunReportsReadyEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "PASS summary: environment looks ready for TraceGuard") {
 		t.Fatalf("output missing success summary:\n%s", out.String())
+	}
+	for _, want := range []string{
+		"PASS kernel-release: 7.1.1-test",
+		"PASS kernel-at-least-6.12: enabled",
+		"PASS kernel-at-least-7.1: enabled",
+		"PASS kernel-btf: enabled",
+		"PASS kernel-bpf-lsm: enabled",
+		"PASS kernel-bpf-object: traceguardLinux71",
+		"PASS kernel-enhanced-telemetry: enabled",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -100,9 +114,24 @@ func TestSummary(t *testing.T) {
 	}
 }
 
+func TestRunReturnsWriterErrors(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	err := runWithChecks(readyConfig(root), failingWriter{}, passingChecks(t, root))
+	if err == nil || !strings.Contains(err.Error(), "write doctor output") {
+		t.Fatalf("runWithChecks error = %v, want writer error", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
 func readyConfig(root string) config.Config {
 	return config.Config{
 		CgroupPath:          filepath.Join(root, "cgroup"),
+		CachePath:           filepath.Join(root, "cache", "blocklist.txt"),
 		LogPath:             filepath.Join(root, "logs", "traceguard.log"),
 		LogFormat:           "json",
 		MetricsAddr:         "127.0.0.1:0",
@@ -167,5 +196,17 @@ func passingChecks(t *testing.T, root string) environmentChecks {
 			return nil
 		},
 		checkTracepointPerfAccess: func() error { return nil },
+		detectKernelFeatures: func() ebpfmonitor.KernelFeatures {
+			return ebpfmonitor.KernelFeatures{
+				Release:            "7.1.1-test",
+				KernelAtLeast612:   true,
+				KernelAtLeast71:    true,
+				BTFAvailable:       true,
+				BPFLSMAvailable:    true,
+				EnhancedTelemetry:  true,
+				SelectedFeatureSet: "linux71",
+				SelectedObject:     "traceguardLinux71",
+			}
+		},
 	}
 }

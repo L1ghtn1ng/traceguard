@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
+	"github.com/L1ghtn1ng/traceguard/internal/safefile"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -32,6 +34,10 @@ const (
 	exportBatchSize      = 50
 	exportFlushEvery     = 5 * time.Second
 	syslogQueueSize      = 1024
+	syslogShutdownFlush  = 10 * time.Second
+	dedupePruneInterval  = time.Minute
+	maxDedupeStates      = 65536
+	maxRememberedDomains = 65536
 	maxSpoolFiles        = 10000
 	maxSpoolBytes        = 256 * 1024 * 1024
 	maxSpoolPayloadBytes = 1024 * 1024
@@ -57,6 +63,8 @@ type Config struct {
 }
 
 type Recorder struct {
+	mu       sync.RWMutex
+	closed   bool
 	logger   *logging.Logger
 	archive  *archiveSink
 	blocked  *blockedSink
@@ -64,11 +72,13 @@ type Recorder struct {
 	exporter *exportSink
 	syslog   *syslogSink
 	now      func() time.Time
+	metrics  *telemetry.Registry
 
 	dedupeMu     sync.Mutex
 	errorStates  map[string]errorDedupeState
 	infoStates   map[string]errorDedupeState
 	changeStates map[string]string
+	nextPruneAt  time.Time
 }
 
 type record struct {
@@ -80,12 +90,14 @@ type record struct {
 
 type errorDedupeState struct {
 	lastEmitted     time.Time
+	expiresAt       time.Time
 	suppressedCount uint64
 }
 
 func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry.Registry, cfg Config) (*Recorder, error) {
 	recorder := &Recorder{
 		logger:       logger,
+		metrics:      metrics,
 		now:          time.Now,
 		errorStates:  make(map[string]errorDedupeState),
 		infoStates:   make(map[string]errorDedupeState),
@@ -134,6 +146,12 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 }
 
 func (r *Recorder) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	var errs []error
 	if r.archive != nil {
 		errs = append(errs, r.archive.Close())
@@ -157,17 +175,25 @@ func (r *Recorder) Info(msg string, fields map[string]any) {
 	r.emit("info", msg, fields)
 }
 
+func (r *Recorder) InfoAt(timestamp time.Time, msg string, fields map[string]any) {
+	r.emitAt("info", msg, fields, timestamp.UTC())
+}
+
 func (r *Recorder) InfoDedup(msg string, fields map[string]any, ttl time.Duration) {
-	r.infoDedupWithKey(msg, fields, ttl, fingerprintRecord("info", msg, fields))
+	r.infoDedupWithKey(msg, fields, ttl, fingerprintRecord("info", msg, fields), r.now().UTC())
 }
 
 func (r *Recorder) InfoDedupFileAudit(msg string, fields map[string]any, ttl time.Duration) {
-	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields))
+	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields), r.now().UTC())
 }
 
-func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key string) {
+func (r *Recorder) InfoDedupFileAuditAt(timestamp time.Time, msg string, fields map[string]any, ttl time.Duration) {
+	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields), timestamp.UTC())
+}
+
+func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key string, timestamp time.Time) {
 	if ttl <= 0 {
-		r.emit("info", msg, fields)
+		r.emitAt("info", msg, fields, timestamp)
 		return
 	}
 
@@ -175,23 +201,27 @@ func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.
 
 	r.dedupeMu.Lock()
 	state := r.infoStates[key]
+	r.pruneDedupeStatesLocked(now)
 	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
 		state.suppressedCount++
+		state.expiresAt = state.lastEmitted.Add(ttl)
 		r.infoStates[key] = state
+		limitDedupeStates(r.infoStates, key)
 		r.dedupeMu.Unlock()
 		return
 	}
 	suppressedCount := state.suppressedCount
-	r.infoStates[key] = errorDedupeState{lastEmitted: now}
+	r.infoStates[key] = errorDedupeState{lastEmitted: now, expiresAt: now.Add(ttl)}
+	limitDedupeStates(r.infoStates, key)
 	r.dedupeMu.Unlock()
 
 	if suppressedCount > 0 {
 		merged := cloneFields(fields)
 		merged["suppressed_count"] = suppressedCount
-		r.emitAt("info", msg, merged, now)
+		r.emitAt("info", msg, merged, timestamp)
 		return
 	}
-	r.emitAt("info", msg, fields, now)
+	r.emitAt("info", msg, fields, timestamp)
 }
 
 func (r *Recorder) Error(msg string, err error, fields map[string]any) {
@@ -217,20 +247,65 @@ func (r *Recorder) ErrorDedup(msg string, err error, fields map[string]any, ttl 
 
 	r.dedupeMu.Lock()
 	state := r.errorStates[key]
+	r.pruneDedupeStatesLocked(now)
 	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
 		state.suppressedCount++
+		state.expiresAt = state.lastEmitted.Add(ttl)
 		r.errorStates[key] = state
+		limitDedupeStates(r.errorStates, key)
 		r.dedupeMu.Unlock()
 		return
 	}
 	suppressedCount := state.suppressedCount
-	r.errorStates[key] = errorDedupeState{lastEmitted: now}
+	r.errorStates[key] = errorDedupeState{lastEmitted: now, expiresAt: now.Add(ttl)}
+	limitDedupeStates(r.errorStates, key)
 	r.dedupeMu.Unlock()
 
 	if suppressedCount > 0 {
 		merged["suppressed_count"] = suppressedCount
 	}
 	r.emitAt("error", msg, merged, now)
+}
+
+func (r *Recorder) pruneDedupeStatesLocked(now time.Time) {
+	if !r.nextPruneAt.IsZero() && now.Before(r.nextPruneAt) {
+		return
+	}
+	pruneExpiredDedupeStates(r.infoStates, now)
+	pruneExpiredDedupeStates(r.errorStates, now)
+	r.nextPruneAt = now.Add(dedupePruneInterval)
+}
+
+func pruneExpiredDedupeStates(states map[string]errorDedupeState, now time.Time) {
+	for key, state := range states {
+		if !state.expiresAt.After(now) {
+			delete(states, key)
+		}
+	}
+}
+
+func limitDedupeStates(states map[string]errorDedupeState, preserve string) {
+	for len(states) > maxDedupeStates {
+		for key := range states {
+			if key == preserve {
+				continue
+			}
+			delete(states, key)
+			break
+		}
+	}
+}
+
+func limitChangeStates(states map[string]string, preserve string) {
+	for len(states) > maxDedupeStates {
+		for key := range states {
+			if key == preserve {
+				continue
+			}
+			delete(states, key)
+			break
+		}
+	}
 }
 
 func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
@@ -242,6 +317,7 @@ func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
 		return false
 	}
 	r.changeStates[msg] = fingerprint
+	limitChangeStates(r.changeStates, msg)
 	r.dedupeMu.Unlock()
 
 	r.emit("info", msg, fields)
@@ -253,10 +329,19 @@ func (r *Recorder) emit(level, msg string, fields map[string]any) {
 }
 
 func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp time.Time) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed {
+		return
+	}
 	if fields == nil {
 		fields = map[string]any{}
 	}
-	r.logger.Log(level, msg, fields)
+	if err := r.logger.LogAt(timestamp, level, msg, fields); err != nil {
+		r.metrics.SetEventSinkHealthy("primary", false)
+	} else {
+		r.metrics.SetEventSinkHealthy("primary", true)
+	}
 
 	entry := record{
 		Timestamp: timestamp.Format(time.RFC3339Nano),
@@ -265,13 +350,25 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 		Fields:    cloneFields(fields),
 	}
 	if r.archive != nil {
-		r.archive.Write(entry)
+		if err := r.archive.Write(entry); err != nil {
+			r.metrics.SetEventSinkHealthy("archive", false)
+		} else {
+			r.metrics.SetEventSinkHealthy("archive", true)
+		}
 	}
 	if r.blocked != nil && isBlockedRecord(entry) {
-		r.blocked.Write(entry)
+		if err := r.blocked.Write(entry); err != nil {
+			r.metrics.SetEventSinkHealthy("blocked", false)
+		} else {
+			r.metrics.SetEventSinkHealthy("blocked", true)
+		}
 	}
 	if r.domains != nil {
-		r.domains.Write(entry)
+		if err := r.domains.Write(entry); err != nil {
+			r.metrics.SetEventSinkHealthy("domains", false)
+		} else {
+			r.metrics.SetEventSinkHealthy("domains", true)
+		}
 	}
 	if r.exporter != nil {
 		r.exporter.Enqueue(entry)
@@ -381,20 +478,21 @@ func newArchiveSink(path string, metrics *telemetry.Registry) (*archiveSink, err
 	return &archiveSink{writer: writer, metrics: metrics}, nil
 }
 
-func (a *archiveSink) Write(entry record) {
+func (a *archiveSink) Write(entry record) error {
 	payload, err := marshalSingleRecord(entry)
 	if err != nil {
 		a.metrics.IncEventArchive("error")
-		return
+		return err
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, err := a.writer.Write(append(payload, '\n')); err != nil {
 		a.metrics.IncEventArchive("error")
-		return
+		return err
 	}
 	a.metrics.IncEventArchive("success")
+	return nil
 }
 
 func (a *archiveSink) Close() error {
@@ -419,15 +517,16 @@ func newBlockedSink(path string) (*blockedSink, error) {
 	return &blockedSink{writer: writer}, nil
 }
 
-func (b *blockedSink) Write(entry record) {
+func (b *blockedSink) Write(entry record) error {
 	payload, err := marshalSingleRecord(entry)
 	if err != nil {
-		return
+		return err
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, _ = b.writer.Write(append(payload, '\n'))
+	_, err = b.writer.Write(append(payload, '\n'))
+	return err
 }
 
 func (b *blockedSink) Close() error {
@@ -439,9 +538,12 @@ func isBlockedRecord(entry record) bool {
 }
 
 type domainSink struct {
-	writer *logging.RotatingFile
-	mu     sync.Mutex
-	seen   map[string]struct{}
+	writer    *logging.RotatingFile
+	mu        sync.Mutex
+	seen      map[string]struct{}
+	seenOrder []string
+	seenNext  int
+	seenLimit int
 }
 
 func newDomainSink(path string) (*domainSink, error) {
@@ -456,8 +558,9 @@ func newDomainSink(path string) (*domainSink, error) {
 	}
 
 	sink := &domainSink{
-		writer: writer,
-		seen:   make(map[string]struct{}),
+		writer:    writer,
+		seen:      make(map[string]struct{}),
+		seenLimit: maxRememberedDomains,
 	}
 	if err := sink.loadSeen(path, 5); err != nil {
 		_ = writer.Close()
@@ -466,24 +569,45 @@ func newDomainSink(path string) (*domainSink, error) {
 	return sink, nil
 }
 
-func (d *domainSink) Write(entry record) {
+func (d *domainSink) Write(entry record) error {
 	value, ok := entry.Fields["domain"].(string)
 	if !ok {
-		return
+		return nil
 	}
 	domain := normalizeDomainLogValue(value)
 	if domain == "" {
-		return
+		return nil
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if _, ok := d.seen[domain]; ok {
-		return
+		return nil
 	}
 	if _, err := d.writer.Write([]byte(entry.Timestamp + "\t" + domain + "\n")); err != nil {
+		return err
+	}
+	d.rememberDomain(domain)
+	return nil
+}
+
+func (d *domainSink) rememberDomain(domain string) {
+	if d.seenLimit <= 0 {
 		return
 	}
+	if _, ok := d.seen[domain]; ok {
+		return
+	}
+	if len(d.seenOrder) < d.seenLimit {
+		d.seenOrder = append(d.seenOrder, domain)
+		d.seen[domain] = struct{}{}
+		return
+	}
+
+	evicted := d.seenOrder[d.seenNext]
+	delete(d.seen, evicted)
+	d.seenOrder[d.seenNext] = domain
+	d.seenNext = (d.seenNext + 1) % d.seenLimit
 	d.seen[domain] = struct{}{}
 }
 
@@ -528,7 +652,7 @@ func (d *domainSink) loadSeenFile(path string) error {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		if domain := domainFromLogLine(scanner.Text()); domain != "" {
-			d.seen[domain] = struct{}{}
+			d.rememberDomain(domain)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -628,17 +752,9 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 
 	sink := &exportSink{
 		client: &http.Client{
-			Timeout:   20 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				if req.URL == nil || req.URL.Scheme != "https" {
-					return errors.New("redirect target must use https")
-				}
-				return nil
-			},
+			Timeout:       20 * time.Second,
+			Transport:     transport,
+			CheckRedirect: checkHTTPSRedirect,
 		},
 		target:        parsed.String(),
 		authorization: strings.TrimSpace(cfg.ExportAuthorization),
@@ -799,6 +915,8 @@ func (e *exportSink) sendPayload(ctx context.Context, payload []byte) error {
 }
 
 type syslogSink struct {
+	mu         sync.Mutex
+	closed     bool
 	network    string
 	address    string
 	serverName string
@@ -865,7 +983,7 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "-"
 	}
-	sinkCtx, cancel := context.WithCancel(ctx)
+	sinkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sink := &syslogSink{
 		network:    network,
 		address:    net.JoinHostPort(host, port),
@@ -893,6 +1011,12 @@ func (s *syslogSink) Enqueue(entry record) {
 		s.metrics.IncEventSyslog("error")
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		s.metrics.IncEventSyslog("dropped")
+		return
+	}
 	select {
 	case s.queue <- payload:
 		s.metrics.IncEventSyslog("queued")
@@ -906,7 +1030,10 @@ func (s *syslogSink) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case payload := <-s.queue:
+		case payload, ok := <-s.queue:
+			if !ok {
+				return
+			}
 			if err := s.send(payload); err != nil {
 				s.metrics.IncEventSyslog("error")
 				continue
@@ -954,8 +1081,25 @@ func (s *syslogSink) message(entry record) ([]byte, error) {
 }
 
 func (s *syslogSink) Close() error {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.queue)
+	}
+	s.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(syslogShutdownFlush):
+		s.cancel()
+		<-done
+	}
 	s.cancel()
-	s.wg.Wait()
 	return nil
 }
 
@@ -1080,14 +1224,30 @@ func newExportTransport(cfg Config) (*http.Transport, error) {
 	}, nil
 }
 
+func checkHTTPSRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if req.URL == nil || req.URL.Scheme != "https" {
+		return errors.New("redirect target must use https")
+	}
+	if len(via) == 0 || via[0].URL == nil || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return errors.New("redirect target must use the original origin")
+	}
+	return nil
+}
+
 func (e *exportSink) Close() error {
 	e.cancel()
 	e.wg.Wait()
+	if e.spool != nil {
+		return e.spool.Close()
+	}
 	return nil
 }
 
 type spoolStore struct {
-	dir string
+	dir *os.File
 	mu  sync.Mutex
 }
 
@@ -1096,21 +1256,20 @@ func newSpoolStore(path string) (*spoolStore, error) {
 	if err := os.MkdirAll(cleaned, 0o750); err != nil {
 		return nil, fmt.Errorf("create export spool directory: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(cleaned)
+	dir, err := safefile.OpenAbsolute(cleaned, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return nil, fmt.Errorf("resolve export spool directory: %w", err)
+		return nil, fmt.Errorf("export spool directory %q must not traverse symlinks: %w", cleaned, err)
 	}
-	if filepath.Clean(resolved) != cleaned {
-		return nil, fmt.Errorf("export spool directory %q must not traverse symlinks", cleaned)
-	}
-	info, err := os.Stat(cleaned)
+	info, err := dir.Stat()
 	if err != nil {
+		_ = dir.Close()
 		return nil, fmt.Errorf("stat export spool directory: %w", err)
 	}
 	if !info.IsDir() {
+		_ = dir.Close()
 		return nil, fmt.Errorf("export spool directory %q is not a directory", cleaned)
 	}
-	return &spoolStore{dir: cleaned}, nil
+	return &spoolStore{dir: dir}, nil
 }
 
 func (s *spoolStore) Write(batch []json.RawMessage) error {
@@ -1144,28 +1303,47 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	tempPath := filepath.Join(s.dir, name+".tmp")
-	finalPath := filepath.Join(s.dir, name+".json")
-	if err := os.WriteFile(tempPath, payload, 0o600); err != nil {
+	tempName := name + ".tmp"
+	finalName := name + ".json"
+	temp, err := safefile.OpenBeneath(int(s.dir.Fd()), tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o600)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, finalPath); err != nil {
-		_ = os.Remove(tempPath)
+	if _, err := temp.Write(payload); err != nil {
+		_ = temp.Close()
+		_ = unix.Unlinkat(int(s.dir.Fd()), tempName, 0)
 		return err
 	}
-	return nil
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		_ = unix.Unlinkat(int(s.dir.Fd()), tempName, 0)
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		_ = unix.Unlinkat(int(s.dir.Fd()), tempName, 0)
+		return err
+	}
+	if err := unix.Renameat(int(s.dir.Fd()), tempName, int(s.dir.Fd()), finalName); err != nil {
+		_ = unix.Unlinkat(int(s.dir.Fd()), tempName, 0)
+		return err
+	}
+	return unix.Fsync(int(s.dir.Fd()))
 }
 
 func (s *spoolStore) usage(files []string) (int64, error) {
 	var total int64
 	for _, file := range files {
-		path := filepath.Join(s.dir, file)
-		if err := rejectSymlink(path); err != nil {
-			return 0, err
-		}
-		info, err := os.Stat(path)
+		entry, err := safefile.OpenBeneath(int(s.dir.Fd()), file, unix.O_RDONLY, 0)
 		if err != nil {
 			return 0, err
+		}
+		info, err := entry.Stat()
+		_ = entry.Close()
+		if err != nil {
+			return 0, err
+		}
+		if !info.Mode().IsRegular() {
+			return 0, fmt.Errorf("spool entry %q is not a regular file", file)
 		}
 		total += info.Size()
 		if total > maxSpoolBytes {
@@ -1184,19 +1362,14 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 		return err
 	}
 	for _, file := range files {
-		path := filepath.Join(s.dir, file)
-		if err := rejectSymlink(path); err != nil {
-			return err
-		}
-		// #nosec G304 -- file is from this spool directory listing, filtered to local .json names, and symlinks are rejected.
-		payload, err := os.ReadFile(path)
+		payload, err := safefile.ReadFileBeneath(int(s.dir.Fd()), file, maxSpoolPayloadBytes)
 		if err != nil {
 			return err
 		}
 		if err := send(payload); err != nil {
 			return err
 		}
-		if err := os.Remove(filepath.Join(s.dir, file)); err != nil {
+		if err := unix.Unlinkat(int(s.dir.Fd()), file, 0); err != nil {
 			return err
 		}
 	}
@@ -1204,7 +1377,12 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 }
 
 func (s *spoolStore) files() ([]string, error) {
-	entries, err := os.ReadDir(s.dir)
+	dir, err := safefile.OpenBeneath(int(s.dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -1219,12 +1397,26 @@ func (s *spoolStore) files() ([]string, error) {
 	return out, nil
 }
 
+func (s *spoolStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dir == nil {
+		return nil
+	}
+	err := s.dir.Close()
+	s.dir = nil
+	return err
+}
+
 func marshalSingleRecord(entry record) (json.RawMessage, error) {
 	payload := make(map[string]any, len(entry.Fields)+3)
 	payload["timestamp"] = entry.Timestamp
 	payload["level"] = entry.Level
 	payload["message"] = entry.Message
 	for key, value := range entry.Fields {
+		if key == "timestamp" || key == "level" || key == "message" {
+			continue
+		}
 		payload[key] = value
 	}
 	return json.Marshal(payload)
@@ -1247,15 +1439,4 @@ func spoolFilename() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%d-%s", time.Now().UTC().UnixNano(), hex.EncodeToString(randBytes[:])), nil
-}
-
-func rejectSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("path %q must not be a symlink", path)
-	}
-	return nil
 }

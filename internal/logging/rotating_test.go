@@ -2,6 +2,7 @@ package logging
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,5 +90,53 @@ func TestRotatingFileRejectsSymlinkedDirectory(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("NewRotatingFile accepted symlinked log directory")
+	}
+}
+
+func TestRotatingFileDoesNotReopenAfterClose(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "traceguard.log")
+	writer, err := NewRotatingFile(path, Options{MaxSizeBytes: 32, MaxBackups: 1})
+	if err != nil {
+		t.Fatalf("NewRotatingFile returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if _, err := writer.Write([]byte("after-close\n")); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Write after Close error = %v, want os.ErrClosed", err)
+	}
+}
+
+func TestRotatingFileKeepsStableDirectoryDuringRotation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "logs")
+	path := filepath.Join(dir, "traceguard.log")
+	writer, err := NewRotatingFile(path, Options{MaxSizeBytes: 8, MaxBackups: 1})
+	if err != nil {
+		t.Fatalf("NewRotatingFile returned error: %v", err)
+	}
+	defer writer.Close()
+	if _, err := writer.Write([]byte("first\n")); err != nil {
+		t.Fatalf("first Write returned error: %v", err)
+	}
+	moved := filepath.Join(root, "logs-original")
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatalf("rename log directory: %v", err)
+	}
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatalf("replace log directory: %v", err)
+	}
+	if _, err := writer.Write([]byte("second\n")); err != nil {
+		t.Fatalf("second Write returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "traceguard.log.1")); err != nil {
+		t.Fatalf("rotation did not stay in original directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "traceguard.log")); !os.IsNotExist(err) {
+		t.Fatalf("replacement directory was used during rotation: %v", err)
 	}
 }

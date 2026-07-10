@@ -96,6 +96,9 @@ type ownerReference struct {
 }
 
 func New(ctx context.Context, cfg Config, metrics *telemetry.Registry, onError func(error)) (*Enricher, error) {
+	if cfg.PollEvery <= 0 {
+		return nil, errors.New("kubernetes poll interval must be positive")
+	}
 	transport, err := newTransport(cfg.CAPath)
 	if err != nil {
 		return nil, err
@@ -104,17 +107,9 @@ func New(ctx context.Context, cfg Config, metrics *telemetry.Registry, onError f
 	sinkCtx, cancel := context.WithCancel(ctx)
 	enricher := &Enricher{
 		client: &http.Client{
-			Timeout:   20 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				if req.URL == nil || req.URL.Scheme != "https" {
-					return errors.New("redirect target must use https")
-				}
-				return nil
-			},
+			Timeout:       20 * time.Second,
+			Transport:     transport,
+			CheckRedirect: checkHTTPSRedirect,
 		},
 		apiURL:    strings.TrimRight(cfg.APIURL, "/"),
 		tokenPath: cfg.TokenPath,
@@ -318,6 +313,19 @@ func newTransport(caPath string) (*http.Transport, error) {
 			RootCAs:    rootCAs,
 		},
 	}, nil
+}
+
+func checkHTTPSRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if req.URL == nil || req.URL.Scheme != "https" {
+		return errors.New("redirect target must use https")
+	}
+	if len(via) == 0 || via[0].URL == nil || via[0].URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return errors.New("redirect target must use the original origin")
+	}
+	return nil
 }
 
 func readToken(path string) (string, error) {

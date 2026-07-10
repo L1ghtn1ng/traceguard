@@ -29,6 +29,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 	metrics.SetPolicyMode(policyMode(cfg))
 	processCache := processinfo.NewCache("/proc", cfg.ProcessCacheTTL)
+	defer processCache.Close()
 	var kubeEnricher *kubeinfo.Enricher
 	if cfg.KubernetesEnrich {
 		enricher, err := kubeinfo.New(ctx, kubeinfo.Config{
@@ -56,8 +57,30 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 	defer monitor.Close()
 	metrics.SetEBPFAttachedPrograms(monitor.AttachedPrograms())
+	kernelFeatures := monitor.KernelFeatures()
+	metrics.SetKernelFeatures(kernelFeatures.FeatureGates())
+	featureFields := map[string]any{
+		"kernel_release":       kernelFeatures.Release,
+		"kernel_at_least_6_12": kernelFeatures.KernelAtLeast612,
+		"kernel_at_least_7_1":  kernelFeatures.KernelAtLeast71,
+		"kernel_btf":           kernelFeatures.BTFAvailable,
+		"kernel_bpf_lsm":       kernelFeatures.BPFLSMAvailable,
+		"enhanced_telemetry":   kernelFeatures.EnhancedTelemetry,
+		"kernel_feature_set":   kernelFeatures.SelectedFeatureSet,
+		"selected_bpf_object":  kernelFeatures.SelectedObject,
+	}
+	if kernelFeatures.EnhancedLoadFailure != "" {
+		featureFields["enhanced_load_failure"] = kernelFeatures.EnhancedLoadFailure
+	}
+	recorder.Info("kernel features selected", featureFields)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
+	reportErr := func(err error) {
+		select {
+		case errCh <- err:
+		case <-ctx.Done():
+		}
+	}
 	var endpointIndex atomic.Pointer[map[string]string]
 	var runtimePolicy atomic.Pointer[blocklist.Policy]
 	var policyMu sync.Mutex
@@ -113,16 +136,19 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		}
 		policy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
 
-		// Build the full next policy before changing kernel maps. Enabling block mode
-		// is last so a failed refresh cannot publish a partially applied policy.
-		if err := monitor.ReplaceDomainPolicy(rules.BlockDomains, rules.AllowDomains, rules.AllowSuffixes); err != nil {
-			return err
-		}
-		if err := monitor.ReplaceResolverPolicy(blockMonitorEndpoints, allowMonitorEndpoints, blockMonitorCIDRs, allowMonitorCIDRs); err != nil {
-			return err
-		}
-		if err := monitor.SetPolicyMode(cfg.Block && !cfg.DryRun, rules.BlockAllDomains, rules.BlockAllResolvers, len(rules.AllowSuffixes) > 0); err != nil {
-			return fmt.Errorf("configure block mode: %w", err)
+		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{
+			BlockEnabled:      cfg.Block && !cfg.DryRun,
+			BlockAllDomains:   rules.BlockAllDomains,
+			BlockAllResolvers: rules.BlockAllResolvers,
+			BlockedDomains:    rules.BlockDomains,
+			AllowedDomains:    rules.AllowDomains,
+			AllowedSuffixes:   rules.AllowSuffixes,
+			BlockedEndpoints:  blockMonitorEndpoints,
+			AllowedEndpoints:  allowMonitorEndpoints,
+			BlockedCIDRs:      blockMonitorCIDRs,
+			AllowedCIDRs:      allowMonitorCIDRs,
+		}); err != nil {
+			return fmt.Errorf("commit kernel policy: %w", err)
 		}
 		endpointIndex.Store(&index)
 		runtimePolicy.Store(policy)
@@ -160,6 +186,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 		rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
 		metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
+		if loadMetadata.CachePersistError != "" {
+			recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
+		}
 		if err != nil {
 			metrics.IncBlocklistRefresh(false)
 			return fmt.Errorf("load blocklist: %w", err)
@@ -173,6 +202,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			go func() {
 				err := manager.WatchWithMetadata(ctx, func(rules blocklist.Rules, loadMetadata blocklist.LoadMetadata, loadErr error) error {
 					metrics.IncBlocklistLoad(string(loadMetadata.Source), loadErr == nil)
+					if loadMetadata.CachePersistError != "" {
+						recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
+					}
 					if loadErr != nil {
 						return loadErr
 					}
@@ -181,7 +213,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				if err != nil {
 					metrics.IncBlocklistRefresh(false)
 				}
-				errCh <- err
+				reportErr(err)
 			}()
 		}
 	}
@@ -195,14 +227,17 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				case <-reloadCh:
 					rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
 					metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
+					if loadMetadata.CachePersistError != "" {
+						recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
+					}
 					if err != nil {
 						metrics.IncPolicyReload("sighup", false)
-						errCh <- fmt.Errorf("reload policy: %w", err)
+						reportErr(fmt.Errorf("reload policy: %w", err))
 						return
 					}
 					if err := applyRules(rules); err != nil {
 						metrics.IncPolicyReload("sighup", false)
-						errCh <- fmt.Errorf("apply reloaded policy: %w", err)
+						reportErr(fmt.Errorf("apply reloaded policy: %w", err))
 						return
 					}
 					metrics.IncPolicyReload("sighup", true)
@@ -215,7 +250,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 
 	go func() {
-		errCh <- monitor.Run(ctx, func(event ebpf.Event) {
+		reportErr(monitor.Run(ctx, func(event ebpf.Event) {
 			if event.Kind == ebpf.EventExec {
 				processCache.Invalidate(event.PID)
 			}
@@ -274,6 +309,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			if process.AppArmorMode != "" {
 				fields["apparmor_mode"] = process.AppArmorMode
 			}
+			appendKernelFeatureFields(fields, event)
 			if kubeEnricher != nil && process.PodUID != "" {
 				if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
 					metrics.IncKubernetesEnrichment(true)
@@ -324,14 +360,14 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				metrics.IncPolicyDecision(string(decision))
 				if cfg.DryRun && decision == blocklist.DecisionBlock {
 					fields["mode"] = "dry-run"
-					recorder.Info("would-block", fields)
+					recorder.InfoAt(event.Timestamp, "would-block", fields)
 					return
 				}
-				recorder.Info("dns", fields)
+				recorder.InfoAt(event.Timestamp, "dns", fields)
 			case ebpf.EventBlocked:
 				fields["domain"] = event.Domain
 				fields["policy"] = string(blocklist.DecisionBlock)
-				recorder.Info("blocked", fields)
+				recorder.InfoAt(event.Timestamp, "blocked", fields)
 			case ebpf.EventResolver:
 				fields["endpoint"] = resolverHost(&endpointIndex, event)
 				fields["address"] = event.Address
@@ -343,37 +379,37 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				metrics.IncPolicyDecision(string(decision))
 				if cfg.DryRun && decision == blocklist.DecisionBlock {
 					fields["mode"] = "dry-run"
-					recorder.Info("would-block-"+event.Transport, fields)
+					recorder.InfoAt(event.Timestamp, "would-block-"+event.Transport, fields)
 					return
 				}
-				recorder.Info(event.Transport, fields)
+				recorder.InfoAt(event.Timestamp, event.Transport, fields)
 			case ebpf.EventResolverBlocked:
 				fields["endpoint"] = resolverHost(&endpointIndex, event)
 				fields["address"] = event.Address
 				fields["port"] = event.Port
 				fields["policy"] = string(blocklist.DecisionBlock)
-				recorder.Info("blocked-"+event.Transport, fields)
+				recorder.InfoAt(event.Timestamp, "blocked-"+event.Transport, fields)
 			case ebpf.EventExec:
 				fields["filename"] = event.Filename
-				recorder.Info("exec", fields)
+				recorder.InfoAt(event.Timestamp, "exec", fields)
 			case ebpf.EventConnection:
 				fields["direction"] = event.Direction
 				fields["peer_address"] = event.Address
 				fields["peer_port"] = event.Port
 				fields["local_address"] = event.LocalAddress
 				fields["local_port"] = event.LocalPort
-				recorder.Info("connection", fields)
+				recorder.InfoAt(event.Timestamp, "connection", fields)
 			case ebpf.EventFileAccess:
 				fields["path"] = event.Filename
 				fields["file_flags"] = event.FileFlags
 				fields["file_mode"] = event.FileMode
 				fields["file_access"] = fileAccessName(event.FileFlags)
-				recorder.InfoDedupFileAudit(eventName, fields, fileAccessDedupeTTL)
+				recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
 			default:
 				fields["kind"] = event.Kind
-				recorder.Info("event", fields)
+				recorder.InfoAt(event.Timestamp, "event", fields)
 			}
-		}, metrics)
+		}, metrics))
 	}()
 
 	select {
@@ -450,6 +486,25 @@ func appendSocketFields(fields map[string]any, event ebpf.Event, process process
 	}
 	if event.SocketProtocol != "" {
 		fields["socket_protocol"] = event.SocketProtocol
+	}
+}
+
+func appendKernelFeatureFields(fields map[string]any, event ebpf.Event) {
+	if event.KernelFeatureSet != "" {
+		fields["kernel_feature_set"] = event.KernelFeatureSet
+	}
+	if event.EventSource != "" {
+		fields["event_source"] = event.EventSource
+	}
+	if event.UIDSource != "" {
+		fields["uid_source"] = event.UIDSource
+		fields["kernel_uid"] = event.KernelUID
+	}
+	if event.CgroupID != 0 {
+		fields["cgroup_id"] = event.CgroupID
+	}
+	if event.SocketCookie != 0 {
+		fields["socket_cookie"] = event.SocketCookie
 	}
 }
 

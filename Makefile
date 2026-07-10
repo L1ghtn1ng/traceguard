@@ -14,6 +14,7 @@ generate:
 
 test:
 	$(GO) test ./...
+	$(GO) test -race ./...
 
 test-ebpf:
 	$(GO) test -tags ebpfintegration ./internal/ebpf

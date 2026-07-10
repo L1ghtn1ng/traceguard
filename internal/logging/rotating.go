@@ -3,11 +3,11 @@ package logging
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/L1ghtn1ng/traceguard/internal/safefile"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,6 +27,9 @@ type RotatingFile struct {
 	fileMode os.FileMode
 	dirMode  os.FileMode
 	file     *os.File
+	dirFile  *os.File
+	base     string
+	closed   bool
 }
 
 func NewRotatingFile(path string, opts Options) (*RotatingFile, error) {
@@ -56,6 +59,7 @@ func NewRotatingFile(path string, opts Options) (*RotatingFile, error) {
 		backups:  opts.MaxBackups,
 		fileMode: opts.FileMode,
 		dirMode:  opts.DirMode,
+		base:     filepath.Base(filepath.Clean(path)),
 	}
 
 	if err := r.ensureReady(); err != nil {
@@ -67,6 +71,9 @@ func NewRotatingFile(path string, opts Options) (*RotatingFile, error) {
 func (r *RotatingFile) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return 0, os.ErrClosed
+	}
 
 	if err := r.ensureReady(); err != nil {
 		return 0, err
@@ -93,26 +100,34 @@ func (r *RotatingFile) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.file == nil {
+	if r.closed {
 		return nil
 	}
-	err := r.file.Close()
-	r.file = nil
-	return err
+	r.closed = true
+	var errs []error
+	if r.file != nil {
+		errs = append(errs, r.file.Close())
+		r.file = nil
+	}
+	if r.dirFile != nil {
+		errs = append(errs, r.dirFile.Close())
+		r.dirFile = nil
+	}
+	return errors.Join(errs...)
 }
 
 func (r *RotatingFile) ensureReady() error {
-	if err := r.ensureDirectory(); err != nil {
-		return err
+	if r.closed {
+		return os.ErrClosed
 	}
-	if err := rejectSymlink(r.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := r.ensureDirectory(); err != nil {
 		return err
 	}
 	if r.file != nil {
 		return nil
 	}
 
-	file, err := openFileNoFollow(r.path, r.fileMode)
+	file, err := openFileNoFollowAt(int(r.dirFile.Fd()), r.base, r.path, r.fileMode)
 	if err != nil {
 		return err
 	}
@@ -121,25 +136,26 @@ func (r *RotatingFile) ensureReady() error {
 }
 
 func (r *RotatingFile) ensureDirectory() error {
+	if r.dirFile != nil {
+		return nil
+	}
 	if err := os.MkdirAll(r.dir, r.dirMode); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
-
-	resolved, err := filepath.EvalSymlinks(r.dir)
+	dir, err := safefile.OpenAbsolute(r.dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
-		return fmt.Errorf("resolve log directory: %w", err)
+		return fmt.Errorf("log directory %q must not traverse symlinks: %w", r.dir, err)
 	}
-	if filepath.Clean(resolved) != r.dir {
-		return fmt.Errorf("log directory %q must not traverse symlinks", r.dir)
-	}
-
-	info, err := os.Stat(r.dir)
+	info, err := dir.Stat()
 	if err != nil {
+		_ = dir.Close()
 		return fmt.Errorf("stat log directory: %w", err)
 	}
 	if !info.IsDir() {
+		_ = dir.Close()
 		return fmt.Errorf("log directory %q is not a directory", r.dir)
 	}
+	r.dirFile = dir
 	return nil
 }
 
@@ -151,24 +167,24 @@ func (r *RotatingFile) rotateLocked() error {
 		r.file = nil
 	}
 
-	oldest := rotatedPath(r.path, r.backups)
-	if err := removeIfExists(oldest); err != nil {
+	oldest := rotatedName(r.base, r.backups)
+	if err := removeIfExistsAt(int(r.dirFile.Fd()), oldest); err != nil {
 		return err
 	}
 
 	for idx := r.backups - 1; idx >= 1; idx-- {
-		src := rotatedPath(r.path, idx)
-		dst := rotatedPath(r.path, idx+1)
-		if err := renameIfExists(src, dst); err != nil {
+		src := rotatedName(r.base, idx)
+		dst := rotatedName(r.base, idx+1)
+		if err := renameIfExistsAt(int(r.dirFile.Fd()), src, dst); err != nil {
 			return err
 		}
 	}
 
-	if err := renameIfExists(r.path, rotatedPath(r.path, 1)); err != nil {
+	if err := renameIfExistsAt(int(r.dirFile.Fd()), r.base, rotatedName(r.base, 1)); err != nil {
 		return err
 	}
 
-	file, err := openFileNoFollow(r.path, r.fileMode)
+	file, err := openFileNoFollowAt(int(r.dirFile.Fd()), r.base, r.path, r.fileMode)
 	if err != nil {
 		return err
 	}
@@ -180,68 +196,67 @@ func rotatedPath(path string, idx int) string {
 	return fmt.Sprintf("%s.%d", path, idx)
 }
 
-func openFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_APPEND|unix.O_CLOEXEC|unix.O_CREAT|unix.O_WRONLY|unix.O_NOFOLLOW, uint32(mode.Perm()))
-	if err != nil {
-		return nil, fmt.Errorf("open log file %q: %w", path, err)
-	}
+func rotatedName(base string, idx int) string {
+	return fmt.Sprintf("%s.%d", base, idx)
+}
 
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("wrap log file %q: %w", path, io.ErrUnexpectedEOF)
+func openFileNoFollowAt(dirfd int, name, displayPath string, mode os.FileMode) (*os.File, error) {
+	file, err := safefile.OpenBeneath(dirfd, name, unix.O_APPEND|unix.O_CREAT|unix.O_WRONLY, mode)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %q: %w", displayPath, err)
 	}
 
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return nil, fmt.Errorf("stat log file %q: %w", path, errors.Join(err, file.Close()))
+	if err := unix.Fstat(int(file.Fd()), &st); err != nil {
+		return nil, fmt.Errorf("stat log file %q: %w", displayPath, errors.Join(err, file.Close()))
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		if err := file.Close(); err != nil {
-			return nil, fmt.Errorf("close non-regular log file %q: %w", path, err)
+			return nil, fmt.Errorf("close non-regular log file %q: %w", displayPath, err)
 		}
-		return nil, fmt.Errorf("log file %q is not a regular file", path)
+		return nil, fmt.Errorf("log file %q is not a regular file", displayPath)
 	}
 
 	return file, nil
 }
 
-func rejectSymlink(path string) error {
-	info, err := os.Lstat(path)
+func rejectSymlinkAt(dirfd int, name string) error {
+	var stat unix.Stat_t
+	err := unix.Fstatat(dirfd, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("path %q must not be a symlink", path)
+	if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return fmt.Errorf("path %q must not be a symlink", name)
 	}
 	return nil
 }
 
-func removeIfExists(path string) error {
-	if err := rejectSymlink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+func removeIfExistsAt(dirfd int, name string) error {
+	if err := rejectSymlinkAt(dirfd, name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	err := os.Remove(path)
+	err := unix.Unlinkat(dirfd, name, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("remove rotated log %q: %w", path, err)
+		return fmt.Errorf("remove rotated log %q: %w", name, err)
 	}
 	return nil
 }
 
-func renameIfExists(src, dst string) error {
-	if err := rejectSymlink(src); err != nil {
+func renameIfExistsAt(dirfd int, src, dst string) error {
+	if err := rejectSymlinkAt(dirfd, src); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	if err := rejectSymlink(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := rejectSymlinkAt(dirfd, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(src, dst); err != nil {
+	if err := unix.Renameat(dirfd, src, dirfd, dst); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}

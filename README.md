@@ -53,7 +53,7 @@ The user-space service:
 
 ## Requirements
 
-- Linux with cgroup v2 mounted at `/sys/fs/cgroup`
+- Linux 6.12 or newer with cgroup v2 mounted at `/sys/fs/cgroup`
 - eBPF support for cgroup egress and tracepoints
 - privileges equivalent to `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_PERFMON`, `CAP_SYS_ADMIN` and `CAP_SYS_RESOURCE`
 - tracepoint perf-event access for syscall probes, which may require lowering `kernel.perf_event_paranoid` when `CAP_PERFMON` is unavailable
@@ -76,17 +76,21 @@ Notes:
 - logs are written to `/var/log/traceguard/traceguard.log` by default, rotate at 1 GiB, and retain the last 5 rotated files
 - enforced blocked events are also written as JSON to `blocked.log` in the same log directory, with the same rotation policy
 - first-seen DNS query domains are written once to `domains.log` in the same log directory as timestamped domain lines, with the same rotation policy
-- process metadata is cached from `/proc` for 2 minutes by default in packaged deployments to reduce lookup overhead while limiting stale attribution
+- process metadata is cached from `/proc` with pidfd identity tracking and a bounded 4,096-entry LRU cache
 - SELinux/AppArmor labels are read from `/proc/<pid>/attr/current` and `/proc/<pid>/attr/apparmor/current` when available
 - file access auditing is enabled by default in packaged deployments; disable it with `TRACEGUARD_FILE_AUDIT=false` if open-style syscall volume is too high for the host
 - Kubernetes enrichment is optional, API-driven, and keyed by the observed pod UID
 - common IPv6 extension headers are parsed before DNS inspection
-- in block mode, segmented TCP DNS queries, fragmented IPv6 DNS packets, and unparseable IPv4 UDP DNS payloads are denied instead of allowed
+- in block mode, segmented TCP DNS queries, fragmented IPv6 DNS packets, and unparseable IPv4 or IPv6 UDP DNS payloads are denied instead of allowed
+- kernel policy refreshes are published atomically, so packet and connection hooks see either the previous complete policy or the next complete policy
+- event timestamps represent kernel event occurrence time and are converted from `CLOCK_BOOTTIME` to UTC wall time in userspace
+- `/health` returns HTTP 503 after a critical local event sink write failure and recovers after that sink writes successfully; enforcement continues while unhealthy
 - exact domain policies and suffix allow policies are enforceable in kernel block mode; suffix block policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
 - in enforced block mode with `*`, exact domain rules, suffix allow domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions
 - enforced suffix allow matching checks up to 16 DNS label boundaries and 64 wire-format bytes per suffix candidate to stay within kernel verifier limits; exact allow rules are unaffected
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and durable retry spooling
+- on Linux 7.1 or newer, TraceGuard automatically tries an enhanced telemetry eBPF object that adds event source and kernel feature-set fields; if the kernel or verifier rejects that object, TraceGuard falls back to the standard object without user configuration
 
 ## Build
 

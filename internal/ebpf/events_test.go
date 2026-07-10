@@ -3,8 +3,104 @@ package ebpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"math"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestEventTimestampAtConvertsBootClockToWallTime(t *testing.T) {
+	t.Parallel()
+
+	wallNow := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
+	got, err := eventTimestampAt(uint64((2*time.Hour - time.Second).Nanoseconds()), wallNow, (2 * time.Hour).Nanoseconds())
+	if err != nil {
+		t.Fatalf("eventTimestampAt returned error: %v", err)
+	}
+	if want := wallNow.Add(-time.Second); !got.Equal(want) {
+		t.Fatalf("timestamp = %s, want %s", got, want)
+	}
+}
+
+func TestTimestampOffsetCacheReusesAndRefreshesOffset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
+	bootNowNS := (2 * time.Hour).Nanoseconds()
+	clockReads := 0
+	cache := timestampOffsetCache{
+		now: func() time.Time { return now },
+		bootNowNS: func() (int64, error) {
+			clockReads++
+			return bootNowNS, nil
+		},
+	}
+
+	first, err := cache.offset()
+	if err != nil {
+		t.Fatalf("first offset returned error: %v", err)
+	}
+	now = now.Add(500 * time.Millisecond)
+	bootNowNS = (24 * time.Hour).Nanoseconds()
+	second, err := cache.offset()
+	if err != nil {
+		t.Fatalf("cached offset returned error: %v", err)
+	}
+	if second != first || clockReads != 1 {
+		t.Fatalf("cached offset = %d with %d clock reads, want %d with 1 read", second, clockReads, first)
+	}
+
+	now = now.Add(500 * time.Millisecond)
+	bootNowNS = (2*time.Hour + time.Second).Nanoseconds()
+	refreshed, err := cache.offset()
+	if err != nil {
+		t.Fatalf("refreshed offset returned error: %v", err)
+	}
+	if refreshed != first || clockReads != 2 {
+		t.Fatalf("refreshed offset = %d with %d clock reads, want %d with 2 reads", refreshed, clockReads, first)
+	}
+}
+
+func TestTimestampOffsetCacheReturnsClockError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("clock unavailable")
+	clockReads := 0
+	cache := timestampOffsetCache{
+		now: func() time.Time { return time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC) },
+		bootNowNS: func() (int64, error) {
+			clockReads++
+			if clockReads == 1 {
+				return 0, wantErr
+			}
+			return (2 * time.Hour).Nanoseconds(), nil
+		},
+	}
+	if _, err := cache.offset(); !errors.Is(err, wantErr) {
+		t.Fatalf("offset error = %v, want %v", err, wantErr)
+	}
+	if _, err := cache.offset(); err != nil {
+		t.Fatalf("offset did not retry after initialization error: %v", err)
+	}
+	if clockReads != 2 {
+		t.Fatalf("clock reads = %d, want 2", clockReads)
+	}
+}
+
+func TestEventTimestampRejectsInvalidOffsetAndRange(t *testing.T) {
+	t.Parallel()
+
+	if _, err := eventTimestampWithOffset(0, -1); err == nil {
+		t.Fatal("eventTimestampWithOffset accepted a negative offset")
+	}
+	if _, err := eventTimestampWithOffset(math.MaxInt64, 1); err == nil {
+		t.Fatal("eventTimestampWithOffset accepted an overflowing timestamp")
+	}
+	if _, err := eventTimestampAt(0, time.Unix(0, 0), 1); err == nil {
+		t.Fatal("eventTimestampAt accepted wall time before CLOCK_BOOTTIME")
+	}
+}
 
 func TestEncodeAndDecodeDomainKey(t *testing.T) {
 	t.Parallel()
@@ -43,6 +139,24 @@ func TestEncodeDomainKeyRejectsInvalidDomains(t *testing.T) {
 				t.Fatalf("encodeDomainKey(%q) returned nil error", tt.domain)
 			}
 		})
+	}
+}
+
+func TestEncodeDomainKeyEnforcesDNSWireLength(t *testing.T) {
+	t.Parallel()
+
+	legal := strings.Join([]string{
+		strings.Repeat("a", 63),
+		strings.Repeat("b", 63),
+		strings.Repeat("c", 63),
+		strings.Repeat("d", 61),
+	}, ".")
+	if _, err := encodeDomainKey(legal); err != nil {
+		t.Fatalf("encodeDomainKey rejected 255-byte wire name: %v", err)
+	}
+	illegal := legal + "e"
+	if _, err := encodeDomainKey(illegal); err == nil {
+		t.Fatal("encodeDomainKey accepted 256-byte wire name")
 	}
 }
 
@@ -121,6 +235,15 @@ func TestDecodeAddressAndEnumNamesHandleUnknownValues(t *testing.T) {
 	}
 	if got := socketHookName(99); got != "" {
 		t.Fatalf("socketHookName unknown = %q, want empty", got)
+	}
+	if got := eventSourceName(99); got != "" {
+		t.Fatalf("eventSourceName unknown = %q, want empty", got)
+	}
+	if got := kernelFeatureSetName(99); got != "" {
+		t.Fatalf("kernelFeatureSetName unknown = %q, want empty", got)
+	}
+	if got := uidSourceName(99); got != "" {
+		t.Fatalf("uidSourceName unknown = %q, want empty", got)
 	}
 }
 
@@ -211,23 +334,20 @@ func TestDecodeConnectionEvent(t *testing.T) {
 func TestDecodeFileAccessEvent(t *testing.T) {
 	t.Parallel()
 
-	record := make([]byte, binary.Size(rawEvent{}))
-	writeLE := func(offset int, value any) {
-		t.Helper()
-		buf := bytes.NewBuffer(record[offset:offset])
-		if err := binary.Write(buf, binary.LittleEndian, value); err != nil {
-			t.Fatalf("binary.Write returned error: %v", err)
-		}
+	var raw rawEvent
+	raw.Kind = EventFileAccess
+	raw.PID = 123
+	raw.FileFlags = 0x40
+	raw.FileMode = 0o600
+	copy(raw.Comm[:], "cat")
+	copy(raw.Filename[:], "/etc/passwd")
+
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
 	}
 
-	writeLE(8, uint32(EventFileAccess))
-	writeLE(12, uint32(123))
-	copy(record[16:32], "cat")
-	copy(record[288:544], "/etc/passwd")
-	writeLE(556, uint16(0x40))
-	writeLE(560, uint32(0o600))
-
-	event, err := decodeEvent(record)
+	event, err := decodeEvent(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decodeEvent returned error: %v", err)
 	}
@@ -245,10 +365,45 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	}
 }
 
+func TestDecodeKernelFeatureMetadata(t *testing.T) {
+	t.Parallel()
+
+	var raw rawEvent
+	raw.Kind = EventDNS
+	raw.FeatureSet = 2
+	raw.EventSource = 2
+	raw.UIDSource = 1
+	raw.KernelUID = 1000
+	raw.CgroupID = 12345
+	raw.SocketCookie = 67890
+
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
+	}
+
+	event, err := decodeEvent(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decodeEvent returned error: %v", err)
+	}
+	if event.KernelFeatureSet != "linux71" {
+		t.Fatalf("KernelFeatureSet = %q, want linux71", event.KernelFeatureSet)
+	}
+	if event.EventSource != "cgroup-skb" {
+		t.Fatalf("EventSource = %q, want cgroup-skb", event.EventSource)
+	}
+	if event.UIDSource != "kernel" {
+		t.Fatalf("UIDSource = %q, want kernel", event.UIDSource)
+	}
+	if event.KernelUID != 1000 || event.CgroupID != 12345 || event.SocketCookie != 67890 {
+		t.Fatalf("kernel metadata = uid:%d cgroup:%d cookie:%d", event.KernelUID, event.CgroupID, event.SocketCookie)
+	}
+}
+
 func TestRawEventSizeMatchesBPFEvent(t *testing.T) {
 	t.Parallel()
 
-	if got, want := binary.Size(rawEvent{}), 600; got != want {
+	if got, want := binary.Size(rawEvent{}), 632; got != want {
 		t.Fatalf("rawEvent size = %d, want BPF struct event size %d", got, want)
 	}
 }

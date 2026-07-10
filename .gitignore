@@ -4,3 +4,4 @@
 /traceguard
 .codex
 *.o
+*.log

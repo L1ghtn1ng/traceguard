@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
@@ -18,11 +19,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var ErrInsufficientPrivileges = errors.New("insufficient privileges to attach eBPF programs; run as root or grant CAP_BPF,CAP_NET_ADMIN,CAP_PERFMON,CAP_SYS_RESOURCE")
+var (
+	ErrInsufficientPrivileges = errors.New("insufficient privileges to attach eBPF programs; run as root or grant CAP_BPF,CAP_NET_ADMIN,CAP_PERFMON,CAP_SYS_RESOURCE")
+	ErrUnsupportedKernel      = errors.New("unsupported kernel: TraceGuard requires Linux 6.12 or newer")
+)
 
 const (
-	blocklistMaxEntries = 8192
-	endpointMaxEntries  = 8192
+	blocklistMaxEntries = 16384
+	endpointMaxEntries  = 16384
 )
 
 type domainKey struct {
@@ -32,7 +36,8 @@ type domainKey struct {
 type domainSuffixKey struct {
 	Hash   uint64
 	Length uint16
-	_      [6]byte
+	Slot   uint8
+	_      [5]byte
 }
 
 type runtimeSettings struct {
@@ -40,7 +45,8 @@ type runtimeSettings struct {
 	BlockAllDomains      uint8
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
-	_                    [4]byte
+	ActivePolicySlot     uint8
+	_                    [3]byte
 }
 
 type endpoint4Key struct {
@@ -81,10 +87,26 @@ type ResolverCIDR struct {
 	Port      uint16
 }
 
+type PolicyConfig struct {
+	BlockEnabled      bool
+	BlockAllDomains   bool
+	BlockAllResolvers bool
+	BlockedDomains    []string
+	AllowedDomains    []string
+	AllowedSuffixes   []string
+	BlockedEndpoints  []ResolverEndpoint
+	AllowedEndpoints  []ResolverEndpoint
+	BlockedCIDRs      []ResolverCIDR
+	AllowedCIDRs      []ResolverCIDR
+}
+
 type Monitor struct {
-	objects monitorObjects
-	links   []link.Link
-	reader  *ringbuf.Reader
+	objects          monitorObjects
+	links            []link.Link
+	reader           *ringbuf.Reader
+	features         KernelFeatures
+	policyMu         sync.Mutex
+	activePolicySlot uint8
 }
 
 type RuntimeMetrics interface {
@@ -116,6 +138,7 @@ type monitorObjects struct {
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
+	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -150,6 +173,7 @@ func (o *monitorObjects) Close() error {
 		o.Allowlist,
 		o.AllowSuffixes,
 		o.Blocklist,
+		o.DnsScratch,
 		o.Endpoint4AllowRules,
 		o.Endpoint4CidrAllowRules,
 		o.Endpoint4CidrRules,
@@ -169,12 +193,19 @@ func (o *monitorObjects) Close() error {
 }
 
 func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
+	release, err := kernelRelease()
+	if err != nil {
+		return nil, fmt.Errorf("detect kernel release: %w", err)
+	}
+	if err := validateKernelRelease(release); err != nil {
+		return nil, err
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("raise memlock rlimit: %w", err)
 	}
 
 	loadOptions := newCollectionOptions()
-	objects, err := loadMonitorObjects(loadOptions)
+	objects, features, err := loadMonitorObjects(loadOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +284,10 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 			if isPermissionDenied(err) {
 				return false, fmt.Errorf("%w: attach %s tracepoint requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %v", ErrInsufficientPrivileges, name, err)
 			}
-			return false, nil
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+				return false, nil
+			}
+			return false, fmt.Errorf("attach optional %s tracepoint: %w", name, err)
 		}
 		links = append(links, lnk)
 		return true, nil
@@ -294,7 +328,14 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		}
 	}
 
-	return &Monitor{objects: objects, links: links, reader: reader}, nil
+	return &Monitor{objects: objects, links: links, reader: reader, features: features}, nil
+}
+
+func validateKernelRelease(release string) error {
+	if !isKernelAtLeast(release, 6, 12) {
+		return fmt.Errorf("%w (running %s)", ErrUnsupportedKernel, release)
+	}
+	return nil
 }
 
 func newCollectionOptions() *ebpf.CollectionOptions {
@@ -313,62 +354,162 @@ func newCollectionOptions() *ebpf.CollectionOptions {
 	return opts
 }
 
-func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, error) {
-	release, _ := kernelRelease()
+func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, KernelFeatures, error) {
+	features := DetectKernelFeatures()
+	release := features.Release
+	if features.KernelAtLeast71 {
+		objects, nextFeatures, err := loadLinux71MonitorObjects(loadOptions, features)
+		if err == nil {
+			return objects, nextFeatures, nil
+		}
+		features = nextFeatures
+		features.EnhancedLoadFailure = ""
+	}
+
 	if isLinux612x(release) {
 		objects, err := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
 		if err == nil {
-			return objects, nil
+			features.SelectedObject = "traceguardDNSCompat"
+			return objects, features, nil
 		}
 		if isRecvmsgContextVerifierError(err) {
 			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if compatErr != nil {
-				return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
+				return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
 			}
-			return compatObjects, nil
+			features.SelectedObject = "traceguardDNSRecvmsgCompat"
+			return compatObjects, features, nil
 		}
 		if isDNSHelperVerifierError(err) {
 			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if compatErr == nil {
-				return compatObjects, nil
+				features.SelectedObject = "traceguardDNSRecvmsgCompat"
+				return compatObjects, features, nil
 			}
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
 	}
 
 	objects, err := loadMonitorVariant(loadTraceguard, loadOptions)
 	if err == nil {
-		return objects, nil
+		features.SelectedObject = "traceguard"
+		return objects, features, nil
 	}
 	if isRecvmsgContextVerifierError(err) {
 		compatObjects, compatErr := loadMonitorVariant(loadTraceguardRecvmsgCompat, loadOptions)
 		if compatErr == nil {
-			return compatObjects, nil
+			features.SelectedObject = "traceguardRecvmsgCompat"
+			return compatObjects, features, nil
 		}
-		if isDNSHelperVerifierError(err) {
+		if shouldTryDNSRecvmsgCompat(err, compatErr) {
 			combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if combinedErr == nil {
-				return combinedObjects, nil
+				features.SelectedObject = "traceguardDNSRecvmsgCompat"
+				return combinedObjects, features, nil
 			}
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; recvmsg compat retry failed: %w", err, compatErr)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: default load failed: %v; recvmsg compat retry failed: %w", err, compatErr)
 	}
 	if !isDNSHelperVerifierError(err) {
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: %w", err)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: %w", err)
 	}
 
 	compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
 	if compatErr == nil {
-		return compatObjects, nil
+		features.SelectedObject = "traceguardDNSCompat"
+		return compatObjects, features, nil
 	}
 	if isRecvmsgContextVerifierError(compatErr) {
 		combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 		if combinedErr == nil {
-			return combinedObjects, nil
+			features.SelectedObject = "traceguardDNSRecvmsgCompat"
+			return combinedObjects, features, nil
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", compatErr, combinedErr)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", compatErr, combinedErr)
 	}
-	return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+	return monitorObjects{}, features, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+}
+
+type monitorVariantLoaders struct {
+	defaultVariant   func(*ebpf.CollectionOptions) (monitorObjects, error)
+	dnsCompat        func(*ebpf.CollectionOptions) (monitorObjects, error)
+	recvmsgCompat    func(*ebpf.CollectionOptions) (monitorObjects, error)
+	dnsRecvmsgCompat func(*ebpf.CollectionOptions) (monitorObjects, error)
+}
+
+func loadLinux71MonitorObjects(loadOptions *ebpf.CollectionOptions, features KernelFeatures) (monitorObjects, KernelFeatures, error) {
+	return loadLinux71MonitorObjectsWith(loadOptions, features, monitorVariantLoaders{
+		defaultVariant: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71, opts)
+		},
+		dnsCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71DNSCompat, opts)
+		},
+		recvmsgCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71RecvmsgCompat, opts)
+		},
+		dnsRecvmsgCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71DNSRecvmsgCompat, opts)
+		},
+	})
+}
+
+func loadLinux71MonitorObjectsWith(loadOptions *ebpf.CollectionOptions, features KernelFeatures, loaders monitorVariantLoaders) (monitorObjects, KernelFeatures, error) {
+	markSelected := func(objects monitorObjects, name string) (monitorObjects, KernelFeatures, error) {
+		features.EnhancedTelemetry = true
+		features.SelectedFeatureSet = kernelFeatureSetLinux71
+		features.SelectedObject = name
+		features.EnhancedLoadFailure = ""
+		return objects, features, nil
+	}
+
+	objects, err := loaders.defaultVariant(loadOptions)
+	if err == nil {
+		return markSelected(objects, "traceguardLinux71")
+	}
+	features.EnhancedLoadFailure = err.Error()
+
+	if isRecvmsgContextVerifierError(err) {
+		compatObjects, compatErr := loaders.recvmsgCompat(loadOptions)
+		if compatErr == nil {
+			return markSelected(compatObjects, "traceguardLinux71RecvmsgCompat")
+		}
+		if shouldTryDNSRecvmsgCompat(err, compatErr) {
+			combinedObjects, combinedErr := loaders.dnsRecvmsgCompat(loadOptions)
+			if combinedErr == nil {
+				return markSelected(combinedObjects, "traceguardLinux71DNSRecvmsgCompat")
+			}
+		}
+		features.EnhancedLoadFailure = fmt.Sprintf("default load failed: %v; recvmsg compat retry failed: %v", err, compatErr)
+		return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+	}
+	if !isDNSHelperVerifierError(err) {
+		return monitorObjects{}, features, err
+	}
+
+	compatObjects, compatErr := loaders.dnsCompat(loadOptions)
+	if compatErr == nil {
+		return markSelected(compatObjects, "traceguardLinux71DNSCompat")
+	}
+	if isRecvmsgContextVerifierError(compatErr) {
+		combinedObjects, combinedErr := loaders.dnsRecvmsgCompat(loadOptions)
+		if combinedErr == nil {
+			return markSelected(combinedObjects, "traceguardLinux71DNSRecvmsgCompat")
+		}
+		features.EnhancedLoadFailure = fmt.Sprintf("dns compat retry failed: %v; dns+recvmsg compat retry failed: %v", compatErr, combinedErr)
+		return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+	}
+	features.EnhancedLoadFailure = fmt.Sprintf("default load failed: %v; dns compat retry failed: %v", err, compatErr)
+	return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+}
+
+func shouldTryDNSRecvmsgCompat(errs ...error) bool {
+	for _, err := range errs {
+		if isDNSHelperVerifierError(err) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRecvmsgContextVerifierError(err error) bool {
@@ -457,43 +598,29 @@ func (m *Monitor) AttachedPrograms() int {
 	return len(m.links)
 }
 
-func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers, allowSuffixesEnabled bool) error {
-	value := runtimeSettings{}
-	if enabled {
-		value.BlockEnabled = 1
-	}
-	if blockAllDomains {
-		value.BlockAllDomains = 1
-	}
-	if blockAllResolvers {
-		value.BlockAllResolvers = 1
-	}
-	if allowSuffixesEnabled {
-		value.AllowSuffixesEnabled = 1
-	}
-	key := uint32(0)
-	return m.objects.Settings.Put(key, value)
+func (m *Monitor) KernelFeatures() KernelFeatures {
+	return m.features
 }
 
-func (m *Monitor) ReplaceDomainPolicy(blocked, allowed, allowedSuffixes []string) error {
-	nextBlock := make(map[domainKey]struct{}, len(blocked))
-	for _, domain := range blocked {
+func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
+	nextBlock := make(map[domainKey]struct{}, len(policy.BlockedDomains))
+	for _, domain := range policy.BlockedDomains {
 		key, err := encodeDomainKey(domain)
 		if err != nil {
 			return fmt.Errorf("encode blocklist entry %q: %w", domain, err)
 		}
 		nextBlock[key] = struct{}{}
 	}
-	nextAllow := make(map[domainKey]struct{}, len(allowed))
-	for _, domain := range allowed {
+	nextAllow := make(map[domainKey]struct{}, len(policy.AllowedDomains))
+	for _, domain := range policy.AllowedDomains {
 		key, err := encodeDomainKey(domain)
 		if err != nil {
 			return fmt.Errorf("encode allowlist entry %q: %w", domain, err)
 		}
 		nextAllow[key] = struct{}{}
 	}
-	nextAllowSuffixes := make(map[domainSuffixKey]struct{}, len(allowedSuffixes))
-	for _, suffix := range allowedSuffixes {
+	nextAllowSuffixes := make(map[domainSuffixKey]struct{}, len(policy.AllowedSuffixes))
+	for _, suffix := range policy.AllowedSuffixes {
 		key, err := encodeDomainSuffixKey(suffix)
 		if err != nil {
 			return fmt.Errorf("encode allow suffix entry %q: %w", suffix, err)
@@ -509,19 +636,6 @@ func (m *Monitor) ReplaceDomainPolicy(blocked, allowed, allowedSuffixes []string
 	if len(nextAllowSuffixes) > blocklistMaxEntries {
 		return fmt.Errorf("allow suffix list contains %d entries, exceeds map capacity %d", len(nextAllowSuffixes), blocklistMaxEntries)
 	}
-	if err := syncMap(m.objects.Blocklist, nextBlock); err != nil {
-		return fmt.Errorf("sync blocklist: %w", err)
-	}
-	if err := syncMap(m.objects.Allowlist, nextAllow); err != nil {
-		return fmt.Errorf("sync allowlist: %w", err)
-	}
-	if err := syncMap(m.objects.AllowSuffixes, nextAllowSuffixes); err != nil {
-		return fmt.Errorf("sync allow suffix list: %w", err)
-	}
-	return nil
-}
-
-func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blockedCIDRs, allowedCIDRs []ResolverCIDR) error {
 	nextBlock4 := make(map[endpoint4Key]struct{})
 	nextBlock6 := make(map[endpoint6Key]struct{})
 	nextAllow4 := make(map[endpoint4Key]struct{})
@@ -604,16 +718,16 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blo
 		}
 		return nil
 	}
-	if err := load(blocked, nextBlock4, nextBlock6); err != nil {
+	if err := load(policy.BlockedEndpoints, nextBlock4, nextBlock6); err != nil {
 		return err
 	}
-	if err := load(allowed, nextAllow4, nextAllow6); err != nil {
+	if err := load(policy.AllowedEndpoints, nextAllow4, nextAllow6); err != nil {
 		return err
 	}
-	if err := loadCIDRs(blockedCIDRs, nextBlockCIDR4, nextBlockCIDR6); err != nil {
+	if err := loadCIDRs(policy.BlockedCIDRs, nextBlockCIDR4, nextBlockCIDR6); err != nil {
 		return err
 	}
-	if err := loadCIDRs(allowedCIDRs, nextAllowCIDR4, nextAllowCIDR6); err != nil {
+	if err := loadCIDRs(policy.AllowedCIDRs, nextAllowCIDR4, nextAllowCIDR6); err != nil {
 		return err
 	}
 
@@ -630,30 +744,50 @@ func (m *Monitor) ReplaceResolverPolicy(blocked, allowed []ResolverEndpoint, blo
 		return fmt.Errorf("ipv6 resolver cidrs exceed map capacity %d", endpointMaxEntries)
 	}
 
-	if err := syncMap(m.objects.Endpoint4Rules, nextBlock4); err != nil {
-		return fmt.Errorf("sync endpoint4 block rules: %w", err)
+	m.policyMu.Lock()
+	defer m.policyMu.Unlock()
+	inactiveSlot := uint8(1)
+	if m.activePolicySlot == 1 {
+		inactiveSlot = 0
 	}
-	if err := syncMap(m.objects.Endpoint6Rules, nextBlock6); err != nil {
-		return fmt.Errorf("sync endpoint6 block rules: %w", err)
+	for _, update := range []struct {
+		name string
+		fn   func() error
+	}{
+		{name: "blocklist", fn: func() error { return syncMapSlot(m.objects.Blocklist, nextBlock, inactiveSlot) }},
+		{name: "allowlist", fn: func() error { return syncMapSlot(m.objects.Allowlist, nextAllow, inactiveSlot) }},
+		{name: "allow suffix list", fn: func() error { return syncSuffixMapSlot(m.objects.AllowSuffixes, nextAllowSuffixes, inactiveSlot) }},
+		{name: "endpoint4 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4Rules, nextBlock4, inactiveSlot) }},
+		{name: "endpoint6 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6Rules, nextBlock6, inactiveSlot) }},
+		{name: "endpoint4 allow rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4AllowRules, nextAllow4, inactiveSlot) }},
+		{name: "endpoint6 allow rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6AllowRules, nextAllow6, inactiveSlot) }},
+		{name: "endpoint4 block cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4CidrRules, nextBlockCIDR4, inactiveSlot) }},
+		{name: "endpoint6 block cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6CidrRules, nextBlockCIDR6, inactiveSlot) }},
+		{name: "endpoint4 allow cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4CidrAllowRules, nextAllowCIDR4, inactiveSlot) }},
+		{name: "endpoint6 allow cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6CidrAllowRules, nextAllowCIDR6, inactiveSlot) }},
+	} {
+		if err := update.fn(); err != nil {
+			return fmt.Errorf("prepare inactive %s: %w", update.name, err)
+		}
 	}
-	if err := syncMap(m.objects.Endpoint4AllowRules, nextAllow4); err != nil {
-		return fmt.Errorf("sync endpoint4 allow rules: %w", err)
+
+	settings := runtimeSettings{ActivePolicySlot: inactiveSlot}
+	if policy.BlockEnabled {
+		settings.BlockEnabled = 1
 	}
-	if err := syncMap(m.objects.Endpoint6AllowRules, nextAllow6); err != nil {
-		return fmt.Errorf("sync endpoint6 allow rules: %w", err)
+	if policy.BlockAllDomains {
+		settings.BlockAllDomains = 1
 	}
-	if err := syncMap(m.objects.Endpoint4CidrRules, nextBlockCIDR4); err != nil {
-		return fmt.Errorf("sync endpoint4 block cidr rules: %w", err)
+	if policy.BlockAllResolvers {
+		settings.BlockAllResolvers = 1
 	}
-	if err := syncMap(m.objects.Endpoint6CidrRules, nextBlockCIDR6); err != nil {
-		return fmt.Errorf("sync endpoint6 block cidr rules: %w", err)
+	if len(policy.AllowedSuffixes) > 0 {
+		settings.AllowSuffixesEnabled = 1
 	}
-	if err := syncMap(m.objects.Endpoint4CidrAllowRules, nextAllowCIDR4); err != nil {
-		return fmt.Errorf("sync endpoint4 allow cidr rules: %w", err)
+	if err := m.objects.Settings.Put(uint32(0), settings); err != nil {
+		return fmt.Errorf("commit policy settings: %w", err)
 	}
-	if err := syncMap(m.objects.Endpoint6CidrAllowRules, nextAllowCIDR6); err != nil {
-		return fmt.Errorf("sync endpoint6 allow cidr rules: %w", err)
-	}
+	m.activePolicySlot = inactiveSlot
 	return nil
 }
 
@@ -701,7 +835,7 @@ func encodeDomainKey(domain string) (domainKey, error) {
 		if labelLen > 63 {
 			return key, fmt.Errorf("label %q exceeds 63 bytes", label)
 		}
-		if offset+1+labelLen+1 > len(key.Domain) {
+		if offset+1+labelLen+1 > maxDNSWireNameBytes {
 			return key, errors.New("domain exceeds DNS wire-format limit")
 		}
 
@@ -743,10 +877,56 @@ func encodeResolverTransport(transport string) (uint8, bool) {
 	}
 }
 
-func syncMap[K comparable](m *ebpf.Map, next map[K]struct{}) error {
-	current := make(map[K]struct{})
+func syncMapSlot[K comparable](m *ebpf.Map, next map[K]struct{}, slot uint8) error {
+	if slot > 1 {
+		return fmt.Errorf("invalid policy slot %d", slot)
+	}
+	current := make(map[K]uint8)
 	iter := m.Iterate()
 	var key K
+	var value uint8
+	for iter.Next(&key, &value) {
+		current[key] = value
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+
+	for key := range next {
+		value, _ := policySlotValue(current[key], true, slot)
+		if err := m.Put(key, value); err != nil {
+			return err
+		}
+	}
+
+	for key, value := range current {
+		if _, keep := next[key]; keep {
+			continue
+		}
+		newValue, remove := policySlotValue(value, false, slot)
+		if newValue == value {
+			continue
+		}
+		if !remove {
+			if err := m.Put(key, newValue); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncSuffixMapSlot(m *ebpf.Map, next map[domainSuffixKey]struct{}, slot uint8) error {
+	if slot > 1 {
+		return fmt.Errorf("invalid policy slot %d", slot)
+	}
+	current := make(map[domainSuffixKey]struct{})
+	iter := m.Iterate()
+	var key domainSuffixKey
 	var value uint8
 	for iter.Next(&key, &value) {
 		current[key] = struct{}{}
@@ -756,18 +936,35 @@ func syncMap[K comparable](m *ebpf.Map, next map[K]struct{}) error {
 	}
 
 	for key := range next {
+		key.Slot = slot
+		if _, exists := current[key]; exists {
+			continue
+		}
 		if err := m.Put(key, uint8(1)); err != nil {
 			return err
 		}
 	}
-
 	for key := range current {
+		if key.Slot != slot {
+			continue
+		}
+		stored := key
+		key.Slot = 0
 		if _, keep := next[key]; keep {
 			continue
 		}
-		if err := m.Delete(key); err != nil {
+		if err := m.Delete(stored); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			return err
 		}
 	}
 	return nil
+}
+
+func policySlotValue(current uint8, desired bool, slot uint8) (value uint8, remove bool) {
+	mask := uint8(1 << slot)
+	if desired {
+		return current | mask, false
+	}
+	value = current &^ mask
+	return value, value == 0
 }
