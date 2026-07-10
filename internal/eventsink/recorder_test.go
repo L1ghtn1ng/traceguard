@@ -410,6 +410,25 @@ func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
 	}
 }
 
+func TestRecorderInfoIfChangedBoundsChangeStates(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	for idx := 0; idx < maxDedupeStates; idx++ {
+		recorder.changeStates[strconv.Itoa(idx)] = "existing"
+	}
+	const current = "current policy"
+	if !recorder.InfoIfChanged(current, map[string]any{"revision": 1}) {
+		t.Fatal("InfoIfChanged did not emit the current message")
+	}
+	if len(recorder.changeStates) != maxDedupeStates {
+		t.Fatalf("change state count = %d, want %d", len(recorder.changeStates), maxDedupeStates)
+	}
+	if _, ok := recorder.changeStates[current]; !ok {
+		t.Fatalf("current change state %q was evicted", current)
+	}
+}
+
 func TestRecorderInfoDedupSuppressesRepeatedPayload(t *testing.T) {
 	t.Parallel()
 

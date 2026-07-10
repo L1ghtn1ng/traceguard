@@ -3,6 +3,8 @@ package ebpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,85 @@ func TestEventTimestampAtConvertsBootClockToWallTime(t *testing.T) {
 	}
 	if want := wallNow.Add(-time.Second); !got.Equal(want) {
 		t.Fatalf("timestamp = %s, want %s", got, want)
+	}
+}
+
+func TestTimestampOffsetCacheReusesAndRefreshesOffset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
+	bootNowNS := (2 * time.Hour).Nanoseconds()
+	clockReads := 0
+	cache := timestampOffsetCache{
+		now: func() time.Time { return now },
+		bootNowNS: func() (int64, error) {
+			clockReads++
+			return bootNowNS, nil
+		},
+	}
+
+	first, err := cache.offset()
+	if err != nil {
+		t.Fatalf("first offset returned error: %v", err)
+	}
+	now = now.Add(500 * time.Millisecond)
+	bootNowNS = (24 * time.Hour).Nanoseconds()
+	second, err := cache.offset()
+	if err != nil {
+		t.Fatalf("cached offset returned error: %v", err)
+	}
+	if second != first || clockReads != 1 {
+		t.Fatalf("cached offset = %d with %d clock reads, want %d with 1 read", second, clockReads, first)
+	}
+
+	now = now.Add(500 * time.Millisecond)
+	bootNowNS = (2*time.Hour + time.Second).Nanoseconds()
+	refreshed, err := cache.offset()
+	if err != nil {
+		t.Fatalf("refreshed offset returned error: %v", err)
+	}
+	if refreshed != first || clockReads != 2 {
+		t.Fatalf("refreshed offset = %d with %d clock reads, want %d with 2 reads", refreshed, clockReads, first)
+	}
+}
+
+func TestTimestampOffsetCacheReturnsClockError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("clock unavailable")
+	clockReads := 0
+	cache := timestampOffsetCache{
+		now: func() time.Time { return time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC) },
+		bootNowNS: func() (int64, error) {
+			clockReads++
+			if clockReads == 1 {
+				return 0, wantErr
+			}
+			return (2 * time.Hour).Nanoseconds(), nil
+		},
+	}
+	if _, err := cache.offset(); !errors.Is(err, wantErr) {
+		t.Fatalf("offset error = %v, want %v", err, wantErr)
+	}
+	if _, err := cache.offset(); err != nil {
+		t.Fatalf("offset did not retry after initialization error: %v", err)
+	}
+	if clockReads != 2 {
+		t.Fatalf("clock reads = %d, want 2", clockReads)
+	}
+}
+
+func TestEventTimestampRejectsInvalidOffsetAndRange(t *testing.T) {
+	t.Parallel()
+
+	if _, err := eventTimestampWithOffset(0, -1); err == nil {
+		t.Fatal("eventTimestampWithOffset accepted a negative offset")
+	}
+	if _, err := eventTimestampWithOffset(math.MaxInt64, 1); err == nil {
+		t.Fatal("eventTimestampWithOffset accepted an overflowing timestamp")
+	}
+	if _, err := eventTimestampAt(0, time.Unix(0, 0), 1); err == nil {
+		t.Fatal("eventTimestampAt accepted wall time before CLOCK_BOOTTIME")
 	}
 }
 

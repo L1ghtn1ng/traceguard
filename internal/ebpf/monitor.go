@@ -363,6 +363,7 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 			return objects, nextFeatures, nil
 		}
 		features = nextFeatures
+		features.EnhancedLoadFailure = ""
 	}
 
 	if isLinux612x(release) {
@@ -400,7 +401,7 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 			features.SelectedObject = "traceguardRecvmsgCompat"
 			return compatObjects, features, nil
 		}
-		if isDNSHelperVerifierError(err) {
+		if shouldTryDNSRecvmsgCompat(err, compatErr) {
 			combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if combinedErr == nil {
 				features.SelectedObject = "traceguardDNSRecvmsgCompat"
@@ -473,7 +474,7 @@ func loadLinux71MonitorObjectsWith(loadOptions *ebpf.CollectionOptions, features
 		if compatErr == nil {
 			return markSelected(compatObjects, "traceguardLinux71RecvmsgCompat")
 		}
-		if isDNSHelperVerifierError(err) || isDNSHelperVerifierError(compatErr) {
+		if shouldTryDNSRecvmsgCompat(err, compatErr) {
 			combinedObjects, combinedErr := loaders.dnsRecvmsgCompat(loadOptions)
 			if combinedErr == nil {
 				return markSelected(combinedObjects, "traceguardLinux71DNSRecvmsgCompat")
@@ -500,6 +501,15 @@ func loadLinux71MonitorObjectsWith(loadOptions *ebpf.CollectionOptions, features
 	}
 	features.EnhancedLoadFailure = fmt.Sprintf("default load failed: %v; dns compat retry failed: %v", err, compatErr)
 	return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+}
+
+func shouldTryDNSRecvmsgCompat(errs ...error) bool {
+	for _, err := range errs {
+		if isDNSHelperVerifierError(err) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRecvmsgContextVerifierError(err error) bool {

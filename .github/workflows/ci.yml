@@ -53,8 +53,10 @@ jobs:
 
       - name: Run eBPF kernel integration tests
         run: |
+          integration_cache_root=$(sudo mktemp -d /tmp/traceguard-ebpf-integration.XXXXXX)
+          trap 'sudo rm -rf "$integration_cache_root"' EXIT
           set +e
-          sudo env "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+          sudo env "GOMODCACHE=$integration_cache_root/gomod" "GOCACHE=$integration_cache_root/gocache" \
             "$(command -v go)" test -tags ebpfintegration ./internal/ebpf 2>&1 | tee ebpf-integration.log
           status=${PIPESTATUS[0]}
           set -e

@@ -296,6 +296,18 @@ func limitDedupeStates(states map[string]errorDedupeState, preserve string) {
 	}
 }
 
+func limitChangeStates(states map[string]string, preserve string) {
+	for len(states) > maxDedupeStates {
+		for key := range states {
+			if key == preserve {
+				continue
+			}
+			delete(states, key)
+			break
+		}
+	}
+}
+
 func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
 	fingerprint := fingerprintRecord("info", msg, fields)
 
@@ -305,6 +317,7 @@ func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
 		return false
 	}
 	r.changeStates[msg] = fingerprint
+	limitChangeStates(r.changeStates, msg)
 	r.dedupeMu.Unlock()
 
 	r.emit("info", msg, fields)

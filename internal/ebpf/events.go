@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -17,7 +18,22 @@ const (
 	domainSize          = 256
 	maxDNSWireNameBytes = 255
 	filenameSize        = 256
+	timestampOffsetTTL  = time.Second
 )
+
+type timestampOffsetCache struct {
+	mu          sync.Mutex
+	offsetNS    int64
+	refreshedAt time.Time
+	initialized bool
+	now         func() time.Time
+	bootNowNS   func() (int64, error)
+}
+
+var eventTimestampOffsets = timestampOffsetCache{
+	now:       func() time.Time { return time.Now().UTC() },
+	bootNowNS: readBootTimeNS,
+}
 
 const (
 	EventDNS uint32 = iota + 1
@@ -127,21 +143,78 @@ func decodeEvent(record []byte) (Event, error) {
 }
 
 func eventTimestamp(timestampNS uint64) (time.Time, error) {
+	offsetNS, err := eventTimestampOffsets.offset()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return eventTimestampWithOffset(timestampNS, offsetNS)
+}
+
+func (c *timestampOffsetCache) offset() (int64, error) {
+	checkedAt := c.now().UTC()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.initialized && !checkedAt.Before(c.refreshedAt) && checkedAt.Sub(c.refreshedAt) < timestampOffsetTTL {
+		return c.offsetNS, nil
+	}
+
+	bootNowNS, err := c.bootNowNS()
+	if err != nil {
+		return 0, err
+	}
+	refreshedAt := c.now().UTC()
+	offsetNS, err := timestampOffsetAt(refreshedAt, bootNowNS)
+	if err != nil {
+		return 0, err
+	}
+	c.offsetNS = offsetNS
+	c.refreshedAt = refreshedAt
+	c.initialized = true
+	return offsetNS, nil
+}
+
+func readBootTimeNS() (int64, error) {
 	var boot unix.Timespec
 	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &boot); err != nil {
-		return time.Time{}, fmt.Errorf("read CLOCK_BOOTTIME: %w", err)
+		return 0, fmt.Errorf("read CLOCK_BOOTTIME: %w", err)
 	}
-	return eventTimestampAt(timestampNS, time.Now().UTC(), unix.TimespecToNsec(boot))
+	return unix.TimespecToNsec(boot), nil
 }
 
 func eventTimestampAt(timestampNS uint64, wallNow time.Time, bootNowNS int64) (time.Time, error) {
 	if timestampNS > math.MaxInt64 {
 		return time.Time{}, fmt.Errorf("event timestamp %d exceeds int64 nanosecond range", timestampNS)
 	}
-	if bootNowNS < 0 {
-		return time.Time{}, fmt.Errorf("CLOCK_BOOTTIME returned negative value %d", bootNowNS)
+	offsetNS, err := timestampOffsetAt(wallNow, bootNowNS)
+	if err != nil {
+		return time.Time{}, err
 	}
-	return wallNow.Add(time.Duration(int64(timestampNS) - bootNowNS)).UTC(), nil
+	return eventTimestampWithOffset(timestampNS, offsetNS)
+}
+
+func timestampOffsetAt(wallNow time.Time, bootNowNS int64) (int64, error) {
+	if bootNowNS < 0 {
+		return 0, fmt.Errorf("CLOCK_BOOTTIME returned negative value %d", bootNowNS)
+	}
+	wallNowNS := wallNow.UnixNano()
+	if wallNowNS < bootNowNS {
+		return 0, fmt.Errorf("invalid wall-clock-to-BOOTTIME offset: wall clock %d precedes boot time %d", wallNowNS, bootNowNS)
+	}
+	return wallNowNS - bootNowNS, nil
+}
+
+func eventTimestampWithOffset(timestampNS uint64, offsetNS int64) (time.Time, error) {
+	if timestampNS > math.MaxInt64 {
+		return time.Time{}, fmt.Errorf("event timestamp %d exceeds int64 nanosecond range", timestampNS)
+	}
+	if offsetNS < 0 {
+		return time.Time{}, fmt.Errorf("invalid wall-clock-to-BOOTTIME offset %d", offsetNS)
+	}
+	if int64(timestampNS) > math.MaxInt64-offsetNS {
+		return time.Time{}, fmt.Errorf("event timestamp %d with offset %d exceeds int64 nanosecond range", timestampNS, offsetNS)
+	}
+	return time.Unix(0, int64(timestampNS)+offsetNS).UTC(), nil
 }
 
 func zeroTerminated(data []byte) string {

@@ -142,6 +142,19 @@ func TestIsDNSHelperVerifierError(t *testing.T) {
 	}
 }
 
+func TestShouldTryDNSRecvmsgCompatChecksEveryFailure(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16")
+	otherErr := errors.New("field TraceRecvmsg4: unrelated verifier failure")
+	if !shouldTryDNSRecvmsgCompat(otherErr, dnsErr) {
+		t.Fatal("shouldTryDNSRecvmsgCompat ignored DNS failure from recvmsg compat load")
+	}
+	if shouldTryDNSRecvmsgCompat(otherErr, nil) {
+		t.Fatal("shouldTryDNSRecvmsgCompat matched unrelated failures")
+	}
+}
+
 func TestIsRecvmsgContextVerifierError(t *testing.T) {
 	t.Parallel()
 
