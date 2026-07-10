@@ -94,7 +94,8 @@ type traceguardLinux71Settings struct {
 	BlockAllDomains      uint8
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
-	Pad                  [4]uint8
+	ActivePolicySlot     uint8
+	Pad                  [3]uint8
 }
 
 type traceguardLinux71SocketInfoKey struct {

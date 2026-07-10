@@ -4,7 +4,21 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 )
+
+func TestEventTimestampAtConvertsBootClockToWallTime(t *testing.T) {
+	t.Parallel()
+
+	wallNow := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
+	got, err := eventTimestampAt(uint64((2*time.Hour - time.Second).Nanoseconds()), wallNow, (2 * time.Hour).Nanoseconds())
+	if err != nil {
+		t.Fatalf("eventTimestampAt returned error: %v", err)
+	}
+	if want := wallNow.Add(-time.Second); !got.Equal(want) {
+		t.Fatalf("timestamp = %s, want %s", got, want)
+	}
+}
 
 func TestEncodeAndDecodeDomainKey(t *testing.T) {
 	t.Parallel()

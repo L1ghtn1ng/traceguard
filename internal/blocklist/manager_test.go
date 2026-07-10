@@ -3,6 +3,7 @@ package blocklist
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -418,6 +419,51 @@ func TestManagerWatchWithMetadataReportsFailedRefresh(t *testing.T) {
 	}
 }
 
+func TestManagerUsesFreshRulesWhenCachePersistFails(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "blocked.example\n")
+	}))
+	defer server.Close()
+	manager := NewManager(Config{
+		URL:           server.URL,
+		CachePath:     "/proc/traceguard-blocklist-test/cache.txt",
+		RefreshPeriod: time.Hour,
+	})
+	manager.client = server.Client()
+	rules, metadata, err := manager.LoadWithMetadata(t.Context())
+	if err != nil {
+		t.Fatalf("LoadWithMetadata returned error: %v", err)
+	}
+	if metadata.Source != LoadSourceRemote || metadata.CachePersistError == "" {
+		t.Fatalf("metadata = %#v, want remote source with cache persistence error", metadata)
+	}
+	if len(rules.BlockDomains) != 1 || rules.BlockDomains[0] != "blocked.example" {
+		t.Fatalf("rules = %#v, want freshly fetched domain", rules)
+	}
+}
+
+func TestBlocklistRedirectsStayOnOriginalOrigin(t *testing.T) {
+	t.Parallel()
+
+	original, _ := http.NewRequest(http.MethodGet, "https://example.test/blocklist", nil)
+	for _, test := range []struct {
+		target  string
+		wantErr bool
+	}{
+		{target: "https://example.test/next"},
+		{target: "https://attacker.test/next", wantErr: true},
+		{target: "http://example.test/next", wantErr: true},
+	} {
+		redirect, _ := http.NewRequest(http.MethodGet, test.target, nil)
+		err := NewManager(Config{}).client.CheckRedirect(redirect, []*http.Request{original})
+		if (err != nil) != test.wantErr {
+			t.Fatalf("redirect to %s error = %v, wantErr %v", test.target, err, test.wantErr)
+		}
+	}
+}
+
 func TestPolicyDenyAllUsesAllowOverrides(t *testing.T) {
 	t.Parallel()
 
@@ -465,6 +511,9 @@ allow:2606:4700:4700::/48
 	}
 	if got := policy.EndpointDecision("dot", "9.9.9.10", 853); got != DecisionBlock {
 		t.Fatalf("EndpointDecision(9.9.9.10/853) = %q, want %q", got, DecisionBlock)
+	}
+	if got := policy.EndpointDecision("dot", "::ffff:9.9.9.10", 853); got != DecisionBlock {
+		t.Fatalf("EndpointDecision(::ffff:9.9.9.10/853) = %q, want %q", got, DecisionBlock)
 	}
 	if got := policy.EndpointDecision("doh", "2606:4700:4700::1111", 443); got != DecisionAllow {
 		t.Fatalf("EndpointDecision(2606:4700:4700::1111/443) = %q, want %q", got, DecisionAllow)

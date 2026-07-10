@@ -48,5 +48,11 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Run race tests
+        run: go test -race ./...
+
+      - name: Run eBPF kernel integration tests
+        run: sudo env "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" "$(command -v go)" test -tags ebpfintegration ./internal/ebpf
+
       - name: Build traceguard
         run: go build ./cmd/traceguard

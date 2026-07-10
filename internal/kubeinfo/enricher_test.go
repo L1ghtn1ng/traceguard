@@ -45,6 +45,15 @@ func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
 	}
 }
 
+func TestNewRejectsNonPositivePollInterval(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(t.Context(), Config{PollEvery: 0}, telemetry.NewRegistry(), nil)
+	if err == nil || !strings.Contains(err.Error(), "poll interval must be positive") {
+		t.Fatalf("New error = %v, want poll interval validation", err)
+	}
+}
+
 func TestEnricherIndexesPodsByUID(t *testing.T) {
 	t.Parallel()
 

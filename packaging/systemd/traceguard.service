@@ -14,6 +14,7 @@ WorkingDirectory=/var/lib/traceguard
 User=root
 Group=root
 UMask=0027
+LimitNOFILE=16384
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
 NoNewPrivileges=true

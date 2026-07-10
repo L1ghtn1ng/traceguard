@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -77,6 +79,36 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+}
+
+func TestEventSinkHealthRecovers(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	if !registry.Healthy() {
+		t.Fatal("new registry is unhealthy")
+	}
+	registry.SetEventSinkHealthy("archive", false)
+	if registry.Healthy() {
+		t.Fatal("registry stayed healthy after sink failure")
+	}
+	registry.SetEventSinkHealthy("archive", true)
+	if !registry.Healthy() {
+		t.Fatal("registry did not recover after sink success")
+	}
+}
+
+func TestHealthEndpointReportsSinkFailure(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry()
+	registry.SetEventSinkHealthy("archive", false)
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	response := httptest.NewRecorder()
+	registry.httpHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "unhealthy\n" {
+		t.Fatalf("health response = %d %q, want 503 unhealthy", response.Code, response.Body.String())
 	}
 }
 

@@ -94,7 +94,8 @@ type traceguardLinux71DNSCompatSettings struct {
 	BlockAllDomains      uint8
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
-	Pad                  [4]uint8
+	ActivePolicySlot     uint8
+	Pad                  [3]uint8
 }
 
 type traceguardLinux71DNSCompatSocketInfoKey struct {

@@ -96,6 +96,9 @@ type ownerReference struct {
 }
 
 func New(ctx context.Context, cfg Config, metrics *telemetry.Registry, onError func(error)) (*Enricher, error) {
+	if cfg.PollEvery <= 0 {
+		return nil, errors.New("kubernetes poll interval must be positive")
+	}
 	transport, err := newTransport(cfg.CAPath)
 	if err != nil {
 		return nil, err

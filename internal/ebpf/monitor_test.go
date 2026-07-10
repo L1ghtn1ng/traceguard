@@ -41,6 +41,28 @@ func TestParseKernelRelease(t *testing.T) {
 	}
 }
 
+func TestPolicySlotValuePreservesActiveSlot(t *testing.T) {
+	t.Parallel()
+
+	if got, remove := policySlotValue(0b01, true, 1); got != 0b11 || remove {
+		t.Fatalf("add inactive slot = %02b, remove=%v; want 11,false", got, remove)
+	}
+	if got, remove := policySlotValue(0b11, false, 1); got != 0b01 || remove {
+		t.Fatalf("clear inactive slot = %02b, remove=%v; want 01,false", got, remove)
+	}
+	if got, remove := policySlotValue(0b10, false, 1); got != 0 || !remove {
+		t.Fatalf("clear only slot = %02b, remove=%v; want 00,true", got, remove)
+	}
+}
+
+func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
+	t.Parallel()
+
+	if got := binary.Size(runtimeSettings{}); got != 8 {
+		t.Fatalf("runtimeSettings size = %d, want 8", got)
+	}
+}
+
 func TestIsKernelAtLeast(t *testing.T) {
 	t.Parallel()
 
@@ -77,6 +99,17 @@ func TestIsLinux612x(t *testing.T) {
 	}
 	if isLinux612x("6.18.21") {
 		t.Fatal("isLinux612x accepted non-6.12 kernel")
+	}
+}
+
+func TestValidateKernelReleaseEnforces612Floor(t *testing.T) {
+	t.Parallel()
+
+	if err := validateKernelRelease("6.12.0"); err != nil {
+		t.Fatalf("validateKernelRelease rejected 6.12: %v", err)
+	}
+	if err := validateKernelRelease("6.11.9"); !errors.Is(err, ErrUnsupportedKernel) {
+		t.Fatalf("validateKernelRelease error = %v, want ErrUnsupportedKernel", err)
 	}
 }
 

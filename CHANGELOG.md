@@ -7,9 +7,19 @@ All notable changes to TraceGuard are documented in this file.
 ### Added
 
 - Added transparent Linux 7.1 eBPF object probing with DNS and `recvmsg` compatibility variants, automatic legacy fallback, and startup, metrics, and doctor diagnostics for the selected object and enhanced-load failures.
+- Added a Linux 6.12 minimum-kernel check at startup and in doctor output.
+- Added event-sink health gauges and `/health` degradation when a critical local audit sink cannot be written, while keeping eBPF enforcement active.
 
 ### Fixed
 
+- Made policy reloads atomic for kernel readers by preparing a complete inactive rule slot and publishing all domain, resolver, CIDR, and mode changes with one settings-map update.
+- Failed closed on malformed or unparseable IPv6 UDP DNS traffic in enforced block mode, matching the IPv4 path.
+- Enforced IPv4 endpoint and CIDR policy for IPv4-mapped IPv6 connections in both userspace decisions and the `connect6` eBPF hook.
+- Converted boot-clock eBPF timestamps to wall-clock event occurrence times instead of interpreting monotonic nanoseconds as Unix epoch values.
+- Hardened blocklist cache and export-spool access with bounded reads and `openat2` no-symlink resolution, and kept freshly fetched rules active when cache persistence fails.
+- Added pidfd-backed process identity tracking, per-read start-time validation, and a 4,096-entry LRU cap to prevent PID-reuse misattribution and descriptor growth.
+- Serialized recorder shutdown against in-flight writes, prevented rotating files from reopening after close, drained queued syslog records during bounded shutdown, and restored default signal handling so a second termination signal can force exit.
+- Reported unexpected optional tracepoint attach failures, protected reserved structured-log fields, propagated doctor writer errors, validated cache paths and Kubernetes poll intervals, and bounded worker error reporting during shutdown.
 - Bounded file-audit and error deduplication state with TTL-based pruning and hard entry limits, preventing event cardinality from causing unbounded memory growth.
 - Bounded the in-memory DNS domain inventory deduplication set so unique-domain traffic cannot grow daemon memory indefinitely.
 - Restricted HTTPS export and Kubernetes API redirects to the original HTTPS origin, preventing credentials and client certificates from being forwarded across origins.

@@ -14,17 +14,19 @@ import (
 )
 
 type Registry struct {
-	mu       sync.RWMutex
-	started  time.Time
-	counters map[string]int64
-	gauges   map[string]int64
+	mu        sync.RWMutex
+	started   time.Time
+	counters  map[string]int64
+	gauges    map[string]int64
+	unhealthy map[string]struct{}
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
-		started:  time.Now().UTC(),
-		counters: make(map[string]int64),
-		gauges:   make(map[string]int64),
+		started:   time.Now().UTC(),
+		counters:  make(map[string]int64),
+		gauges:    make(map[string]int64),
+		unhealthy: make(map[string]struct{}),
 	}
 }
 
@@ -199,20 +201,30 @@ func (r *Registry) IncEBPFReadError() {
 	r.incCounter("traceguard_ebpf_read_errors_total")
 }
 
+func (r *Registry) SetEventSinkHealthy(sink string, healthy bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if healthy {
+		delete(r.unhealthy, sink)
+		r.gauges[metricKey1("traceguard_event_sink_healthy", "sink", sink)] = 1
+		return
+	}
+	r.unhealthy[sink] = struct{}{}
+	r.gauges[metricKey1("traceguard_event_sink_healthy", "sink", sink)] = 0
+}
+
+func (r *Registry) Healthy() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.unhealthy) == 0
+}
+
 func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging.Logger) error {
 	if strings.TrimSpace(addr) == "" {
 		return nil
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("ok\n"))
-	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = w.Write([]byte(r.Render()))
-	})
+	mux := r.httpHandler()
 
 	server := &http.Server{
 		Addr:              addr,
@@ -243,6 +255,24 @@ func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging
 	}()
 
 	return nil
+}
+
+func (r *Registry) httpHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !r.Healthy() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("unhealthy\n"))
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = w.Write([]byte(r.Render()))
+	})
+	return mux
 }
 
 func (r *Registry) Render() string {

@@ -12,10 +12,12 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/L1ghtn1ng/traceguard/internal/safefile"
+	"golang.org/x/sys/unix"
 )
 
 const userAgent = "traceguard/1"
@@ -72,7 +74,8 @@ const (
 )
 
 type LoadMetadata struct {
-	Source LoadSource
+	Source            LoadSource
+	CachePersistError string
 }
 
 type ResolvedEndpoint struct {
@@ -113,8 +116,8 @@ func NewManager(cfg Config) *Manager {
 				if len(via) >= 5 {
 					return errors.New("too many redirects")
 				}
-				if req.URL == nil || req.URL.Scheme != "https" {
-					return errors.New("redirect target must use https")
+				if req.URL == nil || req.URL.Scheme != "https" || len(via) == 0 || !sameOrigin(req.URL, via[0].URL) {
+					return errors.New("redirect target must keep the original HTTPS origin")
 				}
 				return nil
 			},
@@ -220,6 +223,7 @@ func (m *Manager) LoadWithMetadata(ctx context.Context) (Rules, LoadMetadata, er
 	}
 
 	var remote Rules
+	metadata := LoadMetadata{Source: LoadSourceRemote}
 	source := LoadSourceRemote
 	switch {
 	case cacheFresh:
@@ -229,7 +233,8 @@ func (m *Manager) LoadWithMetadata(ctx context.Context) (Rules, LoadMetadata, er
 			return Rules{}, LoadMetadata{Source: source}, err
 		}
 	default:
-		remote, err = m.fetchAndCache(ctx)
+		var body []byte
+		remote, body, err = m.fetch(ctx)
 		if err != nil {
 			stale, staleErr := m.readCache()
 			if staleErr != nil {
@@ -237,65 +242,54 @@ func (m *Manager) LoadWithMetadata(ctx context.Context) (Rules, LoadMetadata, er
 			}
 			remote = stale
 			source = LoadSourceStaleCache
+		} else if cacheErr := writeCache(m.cfg.CachePath, body); cacheErr != nil {
+			metadata.CachePersistError = cacheErr.Error()
 		}
 	}
 
-	return mergeRules(manual, remote), LoadMetadata{Source: source}, nil
+	metadata.Source = source
+	return mergeRules(manual, remote), metadata, nil
 }
 
-func (m *Manager) fetchAndCache(ctx context.Context) (Rules, error) {
+func (m *Manager) fetch(ctx context.Context) (Rules, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cfg.URL, nil)
 	if err != nil {
-		return Rules{}, fmt.Errorf("build blocklist request: %w", err)
+		return Rules{}, nil, fmt.Errorf("build blocklist request: %w", err)
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/plain")
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return Rules{}, fmt.Errorf("fetch remote blocklist: %w", err)
+		return Rules{}, nil, fmt.Errorf("fetch remote blocklist: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return Rules{}, fmt.Errorf("fetch remote blocklist: unexpected HTTP status %s", resp.Status)
+		return Rules{}, nil, fmt.Errorf("fetch remote blocklist: unexpected HTTP status %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteBlocklistBytes+1))
 	if err != nil {
-		return Rules{}, fmt.Errorf("read remote blocklist: %w", err)
+		return Rules{}, nil, fmt.Errorf("read remote blocklist: %w", err)
 	}
 	if len(body) > maxRemoteBlocklistBytes {
-		return Rules{}, fmt.Errorf("read remote blocklist: response exceeds %d bytes", maxRemoteBlocklistBytes)
+		return Rules{}, nil, fmt.Errorf("read remote blocklist: response exceeds %d bytes", maxRemoteBlocklistBytes)
 	}
 
 	rules, err := ParseRules(strings.NewReader(string(body)))
 	if err != nil {
-		return Rules{}, fmt.Errorf("parse remote blocklist: %w", err)
+		return Rules{}, nil, fmt.Errorf("parse remote blocklist: %w", err)
 	}
-
-	if err := writeCache(m.cfg.CachePath, body); err != nil {
-		return Rules{}, err
-	}
-
-	return rules, nil
+	return rules, body, nil
 }
 
 func (m *Manager) readCache() (Rules, error) {
-	if err := rejectSymlink(m.cfg.CachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Rules{}, fmt.Errorf("read cache %q: %w", m.cfg.CachePath, err)
-	}
-
-	file, err := os.Open(m.cfg.CachePath)
+	payload, err := safefile.ReadFile(m.cfg.CachePath, maxRemoteBlocklistBytes)
 	if err != nil {
 		return Rules{}, fmt.Errorf("read cache %q: %w", m.cfg.CachePath, err)
 	}
-	defer file.Close()
-	if err := requireRegularFile(file, m.cfg.CachePath); err != nil {
-		return Rules{}, err
-	}
-
-	rules, err := ParseRules(file)
+	rules, err := ParseRules(strings.NewReader(string(payload)))
 	if err != nil {
 		return Rules{}, fmt.Errorf("parse cache %q: %w", m.cfg.CachePath, err)
 	}
@@ -771,98 +765,36 @@ func writeCache(path string, content []byte) error {
 	if path == "" {
 		return errors.New("cache path is empty")
 	}
-	if err := rejectSymlink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("persist cache %q: %w", path, err)
-	}
-	cacheDir, err := ensureCacheDirectory(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-
-	temp, err := os.CreateTemp(cacheDir, "traceguard-blocklist-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create cache temp file: %w", err)
-	}
-	defer os.Remove(temp.Name())
-
-	if _, err := temp.Write(content); err != nil {
-		return fmt.Errorf("write cache temp file: %w", errors.Join(err, temp.Close()))
-	}
-	if err := temp.Chmod(0o640); err != nil {
-		return fmt.Errorf("chmod cache temp file: %w", errors.Join(err, temp.Close()))
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close cache temp file: %w", err)
-	}
-
-	if err := os.Rename(temp.Name(), path); err != nil {
-		return fmt.Errorf("persist cache: %w", err)
-	}
-	return nil
-}
-
-func ensureCacheDirectory(path string) (string, error) {
-	cleaned := filepath.Clean(path)
-	if err := os.MkdirAll(cleaned, 0o750); err != nil {
-		return "", fmt.Errorf("create cache directory: %w", err)
-	}
-	resolved, err := filepath.EvalSymlinks(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("resolve cache directory: %w", err)
-	}
-	if filepath.Clean(resolved) != cleaned {
-		return "", fmt.Errorf("cache directory %q must not traverse symlinks", cleaned)
-	}
-	info, err := os.Stat(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("stat cache directory: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("cache directory %q is not a directory", cleaned)
-	}
-	return cleaned, nil
-}
-
-func rejectSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("path %q must not be a symlink", path)
-	}
-	return nil
-}
-
-func requireRegularFile(file *os.File, path string) error {
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat cache %q: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("cache %q is not a regular file", path)
+	if err := safefile.WriteFileAtomic(path, content, 0o640); err != nil {
+		return fmt.Errorf("persist cache %q; path must not traverse symlinks: %w", path, err)
 	}
 	return nil
 }
 
 func isCacheFresh(path string, ttl time.Duration) (bool, error) {
-	if err := rejectSymlink(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("stat cache %q: %w", path, err)
-	}
-	info, err := os.Stat(path)
-	if err == nil {
-		if !info.Mode().IsRegular() {
-			return false, fmt.Errorf("stat cache %q: not a regular file", path)
-		}
-		return time.Since(info.ModTime()) < ttl, nil
-	}
+	file, err := safefile.OpenAbsolute(path, unix.O_RDONLY, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	return false, fmt.Errorf("stat cache %q: %w", path, err)
+	if err != nil {
+		return false, fmt.Errorf("stat cache %q: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat cache %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("stat cache %q: not a regular file", path)
+	}
+	return time.Since(info.ModTime()) < ttl, nil
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
 func normalizeEndpoint(raw string) (EndpointRule, bool) {

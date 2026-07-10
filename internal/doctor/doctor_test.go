@@ -32,6 +32,7 @@ func TestRunReportsReadyEnvironment(t *testing.T) {
 	}
 	for _, want := range []string{
 		"PASS kernel-release: 7.1.1-test",
+		"PASS kernel-at-least-6.12: enabled",
 		"PASS kernel-at-least-7.1: enabled",
 		"PASS kernel-btf: enabled",
 		"PASS kernel-bpf-lsm: enabled",
@@ -113,9 +114,24 @@ func TestSummary(t *testing.T) {
 	}
 }
 
+func TestRunReturnsWriterErrors(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	err := runWithChecks(readyConfig(root), failingWriter{}, passingChecks(t, root))
+	if err == nil || !strings.Contains(err.Error(), "write doctor output") {
+		t.Fatalf("runWithChecks error = %v, want writer error", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
 func readyConfig(root string) config.Config {
 	return config.Config{
 		CgroupPath:          filepath.Join(root, "cgroup"),
+		CachePath:           filepath.Join(root, "cache", "blocklist.txt"),
 		LogPath:             filepath.Join(root, "logs", "traceguard.log"),
 		LogFormat:           "json",
 		MetricsAddr:         "127.0.0.1:0",
@@ -183,6 +199,7 @@ func passingChecks(t *testing.T, root string) environmentChecks {
 		detectKernelFeatures: func() ebpfmonitor.KernelFeatures {
 			return ebpfmonitor.KernelFeatures{
 				Release:            "7.1.1-test",
+				KernelAtLeast612:   true,
 				KernelAtLeast71:    true,
 				BTFAvailable:       true,
 				BPFLSMAvailable:    true,

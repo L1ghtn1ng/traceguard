@@ -47,6 +47,7 @@ func Run(cfg config.Config, w io.Writer) error {
 
 func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error {
 	var failures int
+	var writeErr error
 
 	check := func(ok bool, name, detail string) {
 		state := "PASS"
@@ -54,7 +55,9 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 			state = "FAIL"
 			failures++
 		}
-		_, _ = fmt.Fprintf(w, "%s %s: %s\n", state, name, detail)
+		if _, err := fmt.Fprintf(w, "%s %s: %s\n", state, name, detail); err != nil {
+			writeErr = errors.Join(writeErr, err)
+		}
 	}
 
 	check(runtime.GOOS == "linux", "os", fmt.Sprintf("runtime=%s", runtime.GOOS))
@@ -84,6 +87,7 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	} else {
 		check(false, "log-path", err.Error())
 	}
+	check(strings.TrimSpace(cfg.CachePath) != "" && filepath.IsAbs(cfg.CachePath), "cache-path", emptyDetail(cfg.CachePath, "must be a non-empty absolute path"))
 
 	if cfg.BlocklistURL != "" {
 		parsed, err := url.Parse(cfg.BlocklistURL)
@@ -159,6 +163,7 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	}
 	features := env.detectKernelFeatures()
 	check(true, "kernel-release", emptyDetail(features.Release, "unknown"))
+	check(features.KernelAtLeast612, "kernel-at-least-6.12", enabledDetail(features.KernelAtLeast612))
 	check(true, "kernel-at-least-7.1", enabledDetail(features.KernelAtLeast71))
 	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
 	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
@@ -193,10 +198,15 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 		check(true, "kubernetes-enrich", "disabled")
 	}
 
+	if writeErr != nil {
+		return fmt.Errorf("write doctor output: %w", writeErr)
+	}
 	if failures > 0 {
 		return fmt.Errorf("doctor found %d failing checks", failures)
 	}
-	_, _ = io.WriteString(w, "PASS summary: environment looks ready for TraceGuard\n")
+	if _, err := io.WriteString(w, "PASS summary: environment looks ready for TraceGuard\n"); err != nil {
+		return fmt.Errorf("write doctor summary: %w", err)
+	}
 	return nil
 }
 

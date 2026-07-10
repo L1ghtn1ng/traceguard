@@ -74,6 +74,40 @@ func TestRecorderWritesArchive(t *testing.T) {
 	}
 }
 
+func TestRecorderInfoAtUsesEventOccurrenceTimestamp(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	timestamp := time.Date(2026, time.July, 10, 12, 34, 56, 123, time.UTC)
+	recorder.InfoAt(timestamp, "dns", map[string]any{"domain": "example.com"})
+	lines := decodeLogLines(t, buffer)
+	if len(lines) != 1 || lines[0]["timestamp"] != timestamp.Format(time.RFC3339Nano) {
+		t.Fatalf("recorded timestamp = %#v, want %s", lines, timestamp.Format(time.RFC3339Nano))
+	}
+}
+
+func TestRecorderMarksHealthUnhealthyOnLocalSinkFailure(t *testing.T) {
+	t.Parallel()
+
+	logger, err := logging.NewLogger(io.Discard, "json")
+	if err != nil {
+		t.Fatalf("NewLogger returned error: %v", err)
+	}
+	metrics := telemetry.NewRegistry()
+	recorder, err := NewRecorder(t.Context(), logger, metrics, Config{ArchivePath: filepath.Join(t.TempDir(), "events.jsonl")})
+	if err != nil {
+		t.Fatalf("NewRecorder returned error: %v", err)
+	}
+	defer recorder.Close()
+	if err := recorder.archive.writer.Close(); err != nil {
+		t.Fatalf("close archive writer: %v", err)
+	}
+	recorder.Info("dns", map[string]any{"domain": "example.com"})
+	if metrics.Healthy() {
+		t.Fatal("local archive failure did not mark health unhealthy")
+	}
+}
+
 func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -962,6 +996,38 @@ func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
 	}
 }
 
+func TestRecorderCloseDrainsQueuedSyslog(t *testing.T) {
+	t.Parallel()
+
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket returned error: %v", err)
+	}
+	defer packetConn.Close()
+	recorder, err := newSyslogTestRecorder(t, Config{
+		SyslogURL:      "syslog+udp://" + packetConn.LocalAddr().String(),
+		SyslogFacility: "local0",
+		SyslogTag:      "traceguard",
+		SyslogTimeout:  time.Second,
+	})
+	if err != nil {
+		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
+	}
+	recorder.Info("dns", map[string]any{"domain": "queued.example"})
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	buffer := make([]byte, 4096)
+	_ = packetConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := packetConn.ReadFrom(buffer)
+	if err != nil {
+		t.Fatalf("ReadFrom after Close: %v", err)
+	}
+	if !strings.Contains(string(buffer[:n]), `"domain":"queued.example"`) {
+		t.Fatalf("syslog payload = %q, want queued event", buffer[:n])
+	}
+}
+
 func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
 	t.Parallel()
 
@@ -1087,6 +1153,28 @@ func mustMarshalRecord(t *testing.T, entry record) json.RawMessage {
 		t.Fatalf("marshalSingleRecord returned error: %v", err)
 	}
 	return payload
+}
+
+func TestMarshalSingleRecordProtectsReservedFields(t *testing.T) {
+	t.Parallel()
+
+	payload := mustMarshalRecord(t, record{
+		Timestamp: "2026-07-10T12:00:00Z",
+		Level:     "info",
+		Message:   "dns",
+		Fields: map[string]any{
+			"timestamp": "forged",
+			"level":     "forged",
+			"message":   "forged",
+		},
+	})
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+	if decoded["timestamp"] != "2026-07-10T12:00:00Z" || decoded["level"] != "info" || decoded["message"] != "dns" {
+		t.Fatalf("reserved fields were overwritten: %#v", decoded)
+	}
 }
 
 func writeClientCertificate(t *testing.T, dir string) (string, string) {

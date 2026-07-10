@@ -14,6 +14,7 @@ const (
 
 type KernelFeatures struct {
 	Release             string
+	KernelAtLeast612    bool
 	KernelAtLeast71     bool
 	BTFAvailable        bool
 	BPFLSMAvailable     bool
@@ -27,6 +28,7 @@ func DetectKernelFeatures() KernelFeatures {
 	release, _ := kernelRelease()
 	features := KernelFeatures{
 		Release:            release,
+		KernelAtLeast612:   isKernelAtLeast(release, 6, 12),
 		KernelAtLeast71:    isKernelAtLeast(release, 7, 1),
 		SelectedFeatureSet: kernelFeatureSetLegacy,
 		SelectedObject:     "none",
@@ -39,6 +41,11 @@ func DetectKernelFeatures() KernelFeatures {
 }
 
 func ProbeKernelFeatures() KernelFeatures {
+	detected := DetectKernelFeatures()
+	if !detected.KernelAtLeast612 {
+		detected.EnhancedLoadFailure = ErrUnsupportedKernel.Error()
+		return detected
+	}
 	loadOptions := newCollectionOptions()
 	objects, features, err := loadMonitorObjects(loadOptions)
 	if err != nil {
@@ -77,9 +84,10 @@ func isKernelAtLeast(release string, wantMajor, wantMinor int) bool {
 
 func (f KernelFeatures) FeatureGates() map[string]bool {
 	return map[string]bool{
-		"kernel_at_least_7_1": f.KernelAtLeast71,
-		"btf":                 f.BTFAvailable,
-		"bpf_lsm":             f.BPFLSMAvailable,
-		"enhanced_telemetry":  f.EnhancedTelemetry,
+		"kernel_at_least_6_12": f.KernelAtLeast612,
+		"kernel_at_least_7_1":  f.KernelAtLeast71,
+		"btf":                  f.BTFAvailable,
+		"bpf_lsm":              f.BPFLSMAvailable,
+		"enhanced_telemetry":   f.EnhancedTelemetry,
 	}
 }

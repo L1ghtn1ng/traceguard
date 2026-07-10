@@ -134,7 +134,21 @@ struct settings {
 	__u8 block_all_domains;
 	__u8 block_all_resolvers;
 	__u8 allow_suffixes_enabled;
-	__u8 _pad[4];
+	__u8 active_policy_slot;
+	__u8 _pad[3];
+};
+
+struct policy_snapshot {
+	__u8 block_enabled;
+	__u8 block_all_domains;
+	__u8 block_all_resolvers;
+	__u8 allow_suffix_rules_enabled;
+	__u8 policy_mask;
+};
+
+struct dns_parse_result {
+	struct domain_key key;
+	__u8 allow_suffix_match;
 };
 
 struct socket_info_key {
@@ -263,21 +277,21 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct domain_key);
 	__type(value, __u8);
 } blocklist SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct domain_key);
 	__type(value, __u8);
 } allowlist SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct domain_suffix_key);
 	__type(value, __u8);
 } allow_suffixes SEC(".maps");
@@ -312,14 +326,14 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint4_key);
 	__type(value, __u8);
 } endpoint4_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint4_key);
 	__type(value, __u8);
 } endpoint4_allow_rules SEC(".maps");
@@ -327,7 +341,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint4_cidr_key);
 	__type(value, __u8);
 } endpoint4_cidr_rules SEC(".maps");
@@ -335,21 +349,21 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint4_cidr_key);
 	__type(value, __u8);
 } endpoint4_cidr_allow_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint6_key);
 	__type(value, __u8);
 } endpoint6_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint6_key);
 	__type(value, __u8);
 } endpoint6_allow_rules SEC(".maps");
@@ -357,7 +371,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint6_cidr_key);
 	__type(value, __u8);
 } endpoint6_cidr_rules SEC(".maps");
@@ -365,7 +379,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 8192);
+	__uint(max_entries, 16384);
 	__type(key, struct endpoint6_cidr_key);
 	__type(value, __u8);
 } endpoint6_cidr_allow_rules SEC(".maps");
@@ -381,7 +395,7 @@ static __always_inline __u32 active_kernel_feature_set(void)
 
 static __always_inline void init_event_base(struct event *event, __u32 kind, __u8 transport, __u32 source)
 {
-	event->timestamp_ns = bpf_ktime_get_ns();
+	event->timestamp_ns = bpf_ktime_get_boot_ns();
 	event->kind = kind;
 	event->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 	event->transport = transport;
@@ -640,28 +654,12 @@ static __always_inline __u8 socket_protocol_from_ipproto(__u32 protocol)
 	return 0;
 }
 
-static __always_inline int is_block_enabled(void)
+static __always_inline int policy_rule_active(const __u8 *value, __u8 policy_mask)
 {
-	__u32 zero = 0;
-	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
-
-	return cfg && cfg->block_enabled;
-}
-
-static __always_inline int block_all_domains_enabled(void)
-{
-	__u32 zero = 0;
-	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
-
-	return cfg && cfg->block_all_domains;
-}
-
-static __always_inline int allow_suffixes_enabled(void)
-{
-	__u32 zero = 0;
-	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
-
-	return cfg && cfg->allow_suffixes_enabled;
+	if (!value) {
+		return 0;
+	}
+	return (*value & policy_mask) != 0;
 }
 
 static __always_inline void init_endpoint4_cidr_key(struct endpoint4_cidr_key *key, __u32 addr, __u16 port, __u8 transport)
@@ -687,36 +685,40 @@ static __always_inline void init_endpoint6_cidr_key(struct endpoint6_cidr_key *k
 	__builtin_memcpy(&key->data[3], addr, 16);
 }
 
-static __always_inline __u8 *lookup_endpoint4_cidr_rule(__u32 addr, __u16 port, __u8 transport)
+static __always_inline __u8 *lookup_endpoint4_cidr_rule(__u32 addr, __u16 port, __u8 transport, __u8 policy_mask)
 {
 	struct endpoint4_cidr_key key = {0};
 
 	init_endpoint4_cidr_key(&key, addr, port, transport);
-	return bpf_map_lookup_elem(&endpoint4_cidr_rules, &key);
+	__u8 *value = bpf_map_lookup_elem(&endpoint4_cidr_rules, &key);
+	return policy_rule_active(value, policy_mask) ? value : 0;
 }
 
-static __always_inline __u8 *lookup_endpoint4_cidr_allow_rule(__u32 addr, __u16 port, __u8 transport)
+static __always_inline __u8 *lookup_endpoint4_cidr_allow_rule(__u32 addr, __u16 port, __u8 transport, __u8 policy_mask)
 {
 	struct endpoint4_cidr_key key = {0};
 
 	init_endpoint4_cidr_key(&key, addr, port, transport);
-	return bpf_map_lookup_elem(&endpoint4_cidr_allow_rules, &key);
+	__u8 *value = bpf_map_lookup_elem(&endpoint4_cidr_allow_rules, &key);
+	return policy_rule_active(value, policy_mask) ? value : 0;
 }
 
-static __always_inline __u8 *lookup_endpoint6_cidr_rule(const __u8 addr[16], __u16 port, __u8 transport)
+static __always_inline __u8 *lookup_endpoint6_cidr_rule(const __u8 addr[16], __u16 port, __u8 transport, __u8 policy_mask)
 {
 	struct endpoint6_cidr_key key = {0};
 
 	init_endpoint6_cidr_key(&key, addr, port, transport);
-	return bpf_map_lookup_elem(&endpoint6_cidr_rules, &key);
+	__u8 *value = bpf_map_lookup_elem(&endpoint6_cidr_rules, &key);
+	return policy_rule_active(value, policy_mask) ? value : 0;
 }
 
-static __always_inline __u8 *lookup_endpoint6_cidr_allow_rule(const __u8 addr[16], __u16 port, __u8 transport)
+static __always_inline __u8 *lookup_endpoint6_cidr_allow_rule(const __u8 addr[16], __u16 port, __u8 transport, __u8 policy_mask)
 {
 	struct endpoint6_cidr_key key = {0};
 
 	init_endpoint6_cidr_key(&key, addr, port, transport);
-	return bpf_map_lookup_elem(&endpoint6_cidr_allow_rules, &key);
+	__u8 *value = bpf_map_lookup_elem(&endpoint6_cidr_allow_rules, &key);
+	return policy_rule_active(value, policy_mask) ? value : 0;
 }
 
 static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __u32 packet_len, struct domain_key *key)
@@ -793,28 +795,28 @@ static __always_inline int emit_dns6_event(struct __sk_buff *skb, const struct d
 	return kind == EVENT_BLOCKED ? 0 : 1;
 }
 
-static __always_inline __u32 dns_event_kind(const struct domain_key *key, __u8 allow_suffix_match)
+static __always_inline __u32 dns_event_kind(const struct dns_parse_result *parsed, const struct policy_snapshot *policy)
 {
 	__u8 *present;
 
-	present = bpf_map_lookup_elem(&allowlist, key);
-	if (present) {
+	present = bpf_map_lookup_elem(&allowlist, &parsed->key);
+	if (policy_rule_active(present, policy->policy_mask)) {
 		return EVENT_DNS;
 	}
-	if (allow_suffix_match) {
+	if (parsed->allow_suffix_match) {
 		return EVENT_DNS;
 	}
-	if (is_block_enabled() && block_all_domains_enabled()) {
+	if (policy->block_enabled && policy->block_all_domains) {
 		return EVENT_BLOCKED;
 	}
-	present = bpf_map_lookup_elem(&blocklist, key);
-	if (present && is_block_enabled()) {
+	present = bpf_map_lookup_elem(&blocklist, &parsed->key);
+	if (policy_rule_active(present, policy->policy_mask) && policy->block_enabled) {
 		return EVENT_BLOCKED;
 	}
 	return EVENT_DNS;
 }
 
-static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __u32 qname_offset, __u32 packet_len)
+static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __u32 qname_offset, __u32 packet_len, __u8 policy_mask)
 {
 	__u32 offset = qname_offset;
 
@@ -861,7 +863,7 @@ static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __
 			}
 		}
 		present = bpf_map_lookup_elem(&allow_suffixes, &suffix);
-		if (present) {
+		if (policy_rule_active(present, policy_mask)) {
 			return 1;
 		}
 		offset += 1 + (__u32)label_len;
@@ -870,13 +872,13 @@ static __always_inline __u8 qname_matches_allow_suffix(struct __sk_buff *skb, __
 	return 0;
 }
 
-static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key, __u8 *allow_suffix_match)
+static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct dns_parse_result *parsed, const struct policy_snapshot *policy)
 {
 	struct dns_header dns = {0};
 	__u32 qname_offset;
 	__u16 flags;
 	__u16 qdcount;
-	int parsed;
+	int parse_status;
 
 	if (payload_offset + sizeof(dns) > packet_len) {
 		return -1;
@@ -892,18 +894,18 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 	}
 
 	qname_offset = payload_offset + sizeof(dns);
-	parsed = load_qname_key(skb, qname_offset, packet_len, key);
-	if (parsed < 0) {
+	parse_status = load_qname_key(skb, qname_offset, packet_len, &parsed->key);
+	if (parse_status < 0) {
 		return -1;
 	}
-	if (allow_suffixes_enabled()) {
-		*allow_suffix_match = qname_matches_allow_suffix(skb, qname_offset, packet_len);
+	if (policy->allow_suffix_rules_enabled) {
+		parsed->allow_suffix_match = qname_matches_allow_suffix(skb, qname_offset, packet_len, policy->policy_mask);
 	}
 
 	return 0;
 }
 
-static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct domain_key *key, __u8 *allow_suffix_match)
+static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct dns_parse_result *parsed, const struct policy_snapshot *policy)
 {
 	__be16 dns_len_be;
 	__u16 dns_len;
@@ -914,24 +916,24 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 		return DNS_PARSE_PASS;
 	}
 	if (payload_offset + sizeof(dns_len_be) > packet_len) {
-		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+		return policy->block_enabled ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 	if (bpf_skb_load_bytes(skb, payload_offset, &dns_len_be, sizeof(dns_len_be)) < 0) {
-		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+		return policy->block_enabled ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
 	dns_len = bpf_ntohs(dns_len_be);
 	if (dns_len < sizeof(struct dns_header)) {
-		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+		return policy->block_enabled ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
 	dns_offset = payload_offset + sizeof(dns_len_be);
 	dns_end = dns_offset + (__u32)dns_len;
 	if (dns_end < dns_offset || dns_end > packet_len) {
-		return is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+		return policy->block_enabled ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 	}
 
-	return parse_dns_payload(skb, dns_offset, dns_end, key, allow_suffix_match) == 0 ? DNS_PARSE_OK : is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
+	return parse_dns_payload(skb, dns_offset, dns_end, parsed, policy) == 0 ? DNS_PARSE_OK : policy->block_enabled ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 }
 
 static __always_inline int emit_resolver_event(struct bpf_sock_addr *ctx, __u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
@@ -1026,9 +1028,9 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 	return -1;
 }
 
-static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u32 transport_offset, __u32 packet_len, __u8 nexthdr)
+static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u32 transport_offset, __u32 packet_len, __u8 nexthdr, __u8 block_enabled)
 {
-	if (!is_block_enabled()) {
+	if (!block_enabled) {
 		return 1;
 	}
 	if (transport_offset >= packet_len) {
@@ -1069,7 +1071,7 @@ static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u3
 	return 1;
 }
 
-static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block_all, __u8 *transport_out, __u8 *matched_rule)
+static __always_inline int classify_endpoint4(__u32 addr, __u16 port, const struct policy_snapshot *policy, __u8 *transport_out, __u8 *matched_rule)
 {
 	struct endpoint4_key key = {
 		.addr = addr,
@@ -1082,21 +1084,21 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block
 	if (port == DOT_PORT) {
 		key.transport = TRANSPORT_DOT;
 		present = bpf_map_lookup_elem(&endpoint4_allow_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
-		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOT);
+		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOT, policy->policy_mask);
 		if (present) {
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
 		present = bpf_map_lookup_elem(&endpoint4_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*matched_rule = 1;
 		}
-		present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOT);
-		if (present || block_all) {
+		present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOT, policy->policy_mask);
+		if (present || policy->block_all_resolvers) {
 			*matched_rule = 1;
 		}
 		*transport_out = TRANSPORT_DOT;
@@ -1104,21 +1106,21 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block
 	}
 	if (port == HTTPS_PORT) {
 		present = bpf_map_lookup_elem(&endpoint4_allow_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
-		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOH);
+		present = lookup_endpoint4_cidr_allow_rule(addr, port, TRANSPORT_DOH, policy->policy_mask);
 		if (present) {
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
 		present = bpf_map_lookup_elem(&endpoint4_rules, &key);
-		if (!present) {
-			present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOH);
+		if (!policy_rule_active(present, policy->policy_mask)) {
+			present = lookup_endpoint4_cidr_rule(addr, port, TRANSPORT_DOH, policy->policy_mask);
 		}
 		/* DoH remains endpoint-based on 443; wildcard resolver mode must not classify arbitrary HTTPS traffic. */
-		if (!present) {
+		if (!policy_rule_active(present, policy->policy_mask)) {
 			return 0;
 		}
 		*matched_rule = 1;
@@ -1128,7 +1130,7 @@ static __always_inline int classify_endpoint4(__u32 addr, __u16 port, __u8 block
 	return 0;
 }
 
-static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, __u8 block_all, __u8 *transport_out, __u8 *matched_rule)
+static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, const struct policy_snapshot *policy, __u8 *transport_out, __u8 *matched_rule)
 {
 	struct endpoint6_key key = {0};
 	__u8 *present;
@@ -1139,21 +1141,21 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, _
 	if (port == DOT_PORT) {
 		key.transport = TRANSPORT_DOT;
 		present = bpf_map_lookup_elem(&endpoint6_allow_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
-		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOT);
+		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOT, policy->policy_mask);
 		if (present) {
 			*transport_out = TRANSPORT_DOT;
 			return 1;
 		}
 		present = bpf_map_lookup_elem(&endpoint6_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*matched_rule = 1;
 		}
-		present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOT);
-		if (present || block_all) {
+		present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOT, policy->policy_mask);
+		if (present || policy->block_all_resolvers) {
 			*matched_rule = 1;
 		}
 		*transport_out = TRANSPORT_DOT;
@@ -1162,21 +1164,21 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, _
 	if (port == HTTPS_PORT) {
 		key.transport = TRANSPORT_DOH;
 		present = bpf_map_lookup_elem(&endpoint6_allow_rules, &key);
-		if (present) {
+		if (policy_rule_active(present, policy->policy_mask)) {
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
-		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOH);
+		present = lookup_endpoint6_cidr_allow_rule(addr, port, TRANSPORT_DOH, policy->policy_mask);
 		if (present) {
 			*transport_out = TRANSPORT_DOH;
 			return 1;
 		}
 		present = bpf_map_lookup_elem(&endpoint6_rules, &key);
-		if (!present) {
-			present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOH);
+		if (!policy_rule_active(present, policy->policy_mask)) {
+			present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOH, policy->policy_mask);
 		}
 		/* DoH remains endpoint-based on 443; wildcard resolver mode must not classify arbitrary HTTPS traffic. */
-		if (!present) {
+		if (!policy_rule_active(present, policy->policy_mask)) {
 			return 0;
 		}
 		*matched_rule = 1;
@@ -1186,10 +1188,29 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, _
 	return 0;
 }
 
+static __always_inline int ipv6_mapped_ipv4(const __u8 addr[16], __u32 *ipv4)
+{
+	if (addr[0] || addr[1] || addr[2] || addr[3] || addr[4] || addr[5] ||
+	    addr[6] || addr[7] || addr[8] || addr[9] || addr[10] != 0xff || addr[11] != 0xff) {
+		return 0;
+	}
+	__builtin_memcpy(ipv4, &addr[12], sizeof(*ipv4));
+	return 1;
+}
+
 SEC("cgroup_skb/egress")
 int trace_dns(struct __sk_buff *skb)
 {
 	__u32 packet_len = skb->len;
+	__u32 zero = 0;
+	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+	struct policy_snapshot policy = {
+		.block_enabled = cfg && cfg->block_enabled,
+		.block_all_domains = cfg && cfg->block_all_domains,
+		.block_all_resolvers = cfg && cfg->block_all_resolvers,
+		.allow_suffix_rules_enabled = cfg && cfg->allow_suffixes_enabled,
+		.policy_mask = cfg && cfg->active_policy_slot ? 2 : 1,
+	};
 	__u8 version_ihl;
 	__u8 version;
 
@@ -1205,9 +1226,8 @@ int trace_dns(struct __sk_buff *skb)
 		struct iphdr iph = {0};
 		__u32 header_len;
 		__u32 transport_offset;
-		struct domain_key key = {0};
+		struct dns_parse_result parsed = {0};
 		__u32 kind;
-		__u8 allow_suffix_match = 0;
 
 		if (packet_len < sizeof(iph)) {
 			return 1;
@@ -1236,14 +1256,14 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match) < 0) {
+			if (parse_dns_payload(skb, payload_offset, packet_len, &parsed, &policy) < 0) {
 				/* Fragmented or malformed UDP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
-				return is_block_enabled() ? 0 : 1;
+				return policy.block_enabled ? 0 : 1;
 			}
-			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns4_event(skb, &key, kind, TRANSPORT_UDP, iph.daddr);
+			kind = dns_event_kind(&parsed, &policy);
+			return emit_dns4_event(skb, &parsed.key, kind, TRANSPORT_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1266,15 +1286,15 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &parsed, &policy);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns4_event(skb, &key, kind, TRANSPORT_TCP, iph.daddr);
+			kind = dns_event_kind(&parsed, &policy);
+			return emit_dns4_event(skb, &parsed.key, kind, TRANSPORT_TCP, iph.daddr);
 		}
 		return 1;
 	}
@@ -1284,9 +1304,8 @@ int trace_dns(struct __sk_buff *skb)
 		__u32 transport_offset = sizeof(ip6h);
 		__u8 nexthdr;
 		__u8 fragmented;
-		struct domain_key key = {0};
+		struct dns_parse_result parsed = {0};
 		__u32 kind;
-		__u8 allow_suffix_match = 0;
 
 		if (packet_len < sizeof(ip6h)) {
 			return 1;
@@ -1299,7 +1318,7 @@ int trace_dns(struct __sk_buff *skb)
 			return 1;
 		}
 		if (fragmented) {
-			return block_fragmented_ipv6_dns(skb, transport_offset, packet_len, nexthdr);
+			return block_fragmented_ipv6_dns(skb, transport_offset, packet_len, nexthdr, policy.block_enabled);
 		}
 
 		if (nexthdr == IPPROTO_UDP) {
@@ -1316,11 +1335,14 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			payload_offset = transport_offset + sizeof(udph);
-			if (parse_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match) < 0) {
-				return 1;
+			if (parse_dns_payload(skb, payload_offset, packet_len, &parsed, &policy) < 0) {
+				/* Fragmented or malformed UDP DNS cannot be matched against the
+				 * policy map. Block mode fails closed; observe mode passes it.
+				 */
+				return policy.block_enabled ? 0 : 1;
 			}
-			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns6_event(skb, &key, kind, TRANSPORT_UDP, ip6h.daddr.s6_addr);
+			kind = dns_event_kind(&parsed, &policy);
+			return emit_dns6_event(skb, &parsed.key, kind, TRANSPORT_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1343,15 +1365,15 @@ int trace_dns(struct __sk_buff *skb)
 			if (tcp_len < sizeof(tcph) || payload_offset > packet_len) {
 				return 1;
 			}
-			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &key, &allow_suffix_match);
+			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, &parsed, &policy);
 			if (dns_parse != DNS_PARSE_OK) {
 				/* Segmented or malformed TCP DNS cannot be matched against the
 				 * policy map. Block mode fails closed; observe mode passes it.
 				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
-			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns6_event(skb, &key, kind, TRANSPORT_TCP, ip6h.daddr.s6_addr);
+			kind = dns_event_kind(&parsed, &policy);
+			return emit_dns6_event(skb, &parsed.key, kind, TRANSPORT_TCP, ip6h.daddr.s6_addr);
 		}
 	}
 
@@ -1588,7 +1610,11 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	__u16 local_port = 0;
 	__u8 transport;
 	__u8 matched_rule;
-	__u8 block_all = cfg && cfg->block_all_resolvers;
+	struct policy_snapshot policy = {
+		.block_enabled = cfg && cfg->block_enabled,
+		.block_all_resolvers = cfg && cfg->block_all_resolvers,
+		.policy_mask = cfg && cfg->active_policy_slot ? 2 : 1,
+	};
 	int have_local;
 
 	protocol = ctx->protocol;
@@ -1620,11 +1646,11 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV4, SOCKET_PROTOCOL_TCP, port, &user_ip4, SOCKET_HOOK_CGROUP_CONNECT4);
 	}
-	if (!classify_endpoint4(user_ip4, port, block_all, &transport, &matched_rule)) {
+	if (!classify_endpoint4(user_ip4, port, &policy, &transport, &matched_rule)) {
 		return 1;
 	}
 
-	if (cfg && cfg->block_enabled && matched_rule) {
+	if (policy.block_enabled && matched_rule) {
 		return emit_resolver_event(ctx, EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &user_ip4, sizeof(user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
 	}
 
@@ -1650,7 +1676,12 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	__u8 matched_rule;
 	__u8 addr[16];
 	__u8 local_addr[16] = {0};
-	__u8 block_all = cfg && cfg->block_all_resolvers;
+	__u32 mapped_ipv4 = 0;
+	struct policy_snapshot policy = {
+		.block_enabled = cfg && cfg->block_enabled,
+		.block_all_resolvers = cfg && cfg->block_all_resolvers,
+		.policy_mask = cfg && cfg->active_policy_slot ? 2 : 1,
+	};
 	__u16 local_port = 0;
 	int have_local;
 
@@ -1690,11 +1721,21 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV6, SOCKET_PROTOCOL_TCP, port, addr, SOCKET_HOOK_CGROUP_CONNECT6);
 	}
-	if (!classify_endpoint6(addr, port, block_all, &transport, &matched_rule)) {
+	if (ipv6_mapped_ipv4(addr, &mapped_ipv4)) {
+		if (!classify_endpoint4(mapped_ipv4, port, &policy, &transport, &matched_rule)) {
+			return 1;
+		}
+		if (policy.block_enabled && matched_rule) {
+			return emit_resolver_event(ctx, EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &mapped_ipv4, sizeof(mapped_ipv4), SOCKET_HOOK_CGROUP_CONNECT6);
+		}
+		emit_resolver_event(ctx, EVENT_RESOLVER, transport, FAMILY_IPV4, port, &mapped_ipv4, sizeof(mapped_ipv4), SOCKET_HOOK_CGROUP_CONNECT6);
+		return 1;
+	}
+	if (!classify_endpoint6(addr, port, &policy, &transport, &matched_rule)) {
 		return 1;
 	}
 
-	if (cfg && cfg->block_enabled && matched_rule) {
+	if (policy.block_enabled && matched_rule) {
 		return emit_resolver_event(ctx, EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
 	}
 

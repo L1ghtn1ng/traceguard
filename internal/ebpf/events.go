@@ -8,6 +8,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -90,9 +92,13 @@ func decodeEvent(record []byte) (Event, error) {
 	if raw.TimestampNS > math.MaxInt64 {
 		return Event{}, fmt.Errorf("event timestamp %d exceeds int64 nanosecond range", raw.TimestampNS)
 	}
+	timestamp, err := eventTimestamp(raw.TimestampNS)
+	if err != nil {
+		return Event{}, err
+	}
 
 	return Event{
-		Timestamp:        time.Unix(0, int64(raw.TimestampNS)).UTC(),
+		Timestamp:        timestamp,
 		Kind:             raw.Kind,
 		PID:              raw.PID,
 		Comm:             zeroTerminated(raw.Comm[:]),
@@ -117,6 +123,24 @@ func decodeEvent(record []byte) (Event, error) {
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
 	}, nil
+}
+
+func eventTimestamp(timestampNS uint64) (time.Time, error) {
+	var boot unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &boot); err != nil {
+		return time.Time{}, fmt.Errorf("read CLOCK_BOOTTIME: %w", err)
+	}
+	return eventTimestampAt(timestampNS, time.Now().UTC(), unix.TimespecToNsec(boot))
+}
+
+func eventTimestampAt(timestampNS uint64, wallNow time.Time, bootNowNS int64) (time.Time, error) {
+	if timestampNS > math.MaxInt64 {
+		return time.Time{}, fmt.Errorf("event timestamp %d exceeds int64 nanosecond range", timestampNS)
+	}
+	if bootNowNS < 0 {
+		return time.Time{}, fmt.Errorf("CLOCK_BOOTTIME returned negative value %d", bootNowNS)
+	}
+	return wallNow.Add(time.Duration(int64(timestampNS) - bootNowNS)).UTC(), nil
 }
 
 func zeroTerminated(data []byte) string {

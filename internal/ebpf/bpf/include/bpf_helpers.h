@@ -20,6 +20,7 @@ static __u64 (*const bpf_get_current_uid_gid)(void) = (void *)BPF_FUNC_get_curre
 static __u64 (*const bpf_get_current_cgroup_id)(void) = (void *)BPF_FUNC_get_current_cgroup_id;
 static __u64 (*const bpf_get_socket_cookie)(void *ctx) = (void *)BPF_FUNC_get_socket_cookie;
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
+static __u64 (*const bpf_ktime_get_boot_ns)(void) = (void *)BPF_FUNC_ktime_get_boot_ns;
 static void *(*const bpf_ringbuf_reserve)(void *ringbuf, __u64 size, __u64 flags) = (void *)BPF_FUNC_ringbuf_reserve;
 static void (*const bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_FUNC_ringbuf_submit;
 static long (*const bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user;

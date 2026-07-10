@@ -63,6 +63,12 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		// Restore default signal handling as soon as graceful shutdown starts so a
+		// second SIGINT or SIGTERM can terminate a stuck shutdown.
+		stop()
+	}()
 	reloadSignalCh := make(chan os.Signal, 1)
 	reloadCh := make(chan struct{}, 1)
 	signal.Notify(reloadSignalCh, syscall.SIGHUP)

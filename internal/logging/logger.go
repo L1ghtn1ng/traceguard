@@ -41,23 +41,27 @@ func NewLogger(writer io.Writer, format string) (*Logger, error) {
 	}, nil
 }
 
-func (l *Logger) Info(msg string, fields map[string]any) {
-	l.emit("info", msg, fields)
+func (l *Logger) Info(msg string, fields map[string]any) error {
+	return l.emitAt(time.Now().UTC(), "info", msg, fields)
 }
 
-func (l *Logger) Log(level, msg string, fields map[string]any) {
-	l.emit(level, msg, fields)
+func (l *Logger) Log(level, msg string, fields map[string]any) error {
+	return l.emitAt(time.Now().UTC(), level, msg, fields)
 }
 
-func (l *Logger) Error(msg string, err error, fields map[string]any) {
+func (l *Logger) LogAt(timestamp time.Time, level, msg string, fields map[string]any) error {
+	return l.emitAt(timestamp.UTC(), level, msg, fields)
+}
+
+func (l *Logger) Error(msg string, err error, fields map[string]any) error {
 	merged := cloneFields(fields)
 	if err != nil {
 		merged["error"] = err.Error()
 	}
-	l.emit("error", msg, merged)
+	return l.emitAt(time.Now().UTC(), "error", msg, merged)
 }
 
-func (l *Logger) emit(level, msg string, fields map[string]any) {
+func (l *Logger) emitAt(timestamp time.Time, level, msg string, fields map[string]any) error {
 	if fields == nil {
 		fields = map[string]any{}
 	}
@@ -66,22 +70,26 @@ func (l *Logger) emit(level, msg string, fields map[string]any) {
 
 	if l.format == FormatJSON {
 		record := make(map[string]any, len(fields)+3)
-		record["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+		record["timestamp"] = timestamp.Format(time.RFC3339Nano)
 		record["level"] = level
 		record["message"] = msg
 		for key, value := range fields {
+			if key == "timestamp" || key == "level" || key == "message" {
+				continue
+			}
 			record[key] = value
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {
 			l.text.Printf("log marshal failure level=%q message=%q error=%q", level, msg, err.Error())
-			return
+			return err
 		}
-		_, _ = l.writer.Write(append(payload, '\n'))
-		return
+		_, err = l.writer.Write(append(payload, '\n'))
+		return err
 	}
 
-	l.text.Println(formatTextLine(msg, level, fields))
+	_, err := fmt.Fprintf(l.writer, "%s %s\n", timestamp.Format("2006/01/02 15:04:05"), formatTextLine(msg, level, fields))
+	return err
 }
 
 func cloneFields(fields map[string]any) map[string]any {
@@ -99,6 +107,9 @@ func formatTextLine(msg, level string, fields map[string]any) string {
 	keys := make([]string, 0, len(fields)+1)
 	keys = append(keys, "level")
 	for key := range fields {
+		if key == "timestamp" || key == "level" || key == "message" {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys[1:])

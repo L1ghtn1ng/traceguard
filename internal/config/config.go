@@ -163,6 +163,12 @@ func Parse() (Config, error) {
 	if cfg.CgroupPath == "" {
 		return Config{}, errors.New("cgroup-path must not be empty")
 	}
+	if strings.TrimSpace(cfg.CachePath) == "" {
+		return Config{}, errors.New("cache-path must not be empty")
+	}
+	if !filepath.IsAbs(cfg.CachePath) {
+		return Config{}, errors.New("cache-path must be an absolute path")
+	}
 	if !filepath.IsAbs(cfg.LogPath) {
 		return Config{}, errors.New("log-path must be an absolute path")
 	}

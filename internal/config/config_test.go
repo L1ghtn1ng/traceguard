@@ -353,6 +353,29 @@ func TestParseRejectsInvalidRemoteSyslogConfig(t *testing.T) {
 	}
 }
 
+func TestParseRejectsInvalidCachePath(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: "cache-path must not be empty"},
+		{name: "relative", value: "cache.txt", want: "cache-path must be an absolute path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard"}
+			clearPolicyEnv(t)
+			t.Setenv("TRACEGUARD_CACHE_PATH", test.value)
+			_, err := Parse()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseEnablesFileAuditFromEnv(t *testing.T) {
 	t.Setenv("TRACEGUARD_FILE_AUDIT", "true")
 
