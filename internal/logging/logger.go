@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,9 +98,7 @@ func cloneFields(fields map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	cloned := make(map[string]any, len(fields))
-	for key, value := range fields {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, fields)
 	return cloned
 }
 

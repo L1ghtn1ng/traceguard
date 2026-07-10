@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -765,11 +766,9 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 	}
 	sink.updateQueueDepth()
 	sink.updateSpoolFiles()
-	sink.wg.Add(1)
-	go func() {
-		defer sink.wg.Done()
+	sink.wg.Go(func() {
 		sink.run(sinkCtx)
-	}()
+	})
 	return sink, nil
 }
 
@@ -997,11 +996,9 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		cancel:     cancel,
 		hostname:   sanitizeSyslogToken(hostname),
 	}
-	sink.wg.Add(1)
-	go func() {
-		defer sink.wg.Done()
+	sink.wg.Go(func() {
 		sink.run(sinkCtx)
-	}()
+	})
 	return sink, nil
 }
 
@@ -1060,7 +1057,7 @@ func (s *syslogSink) send(payload []byte) error {
 		return err
 	}
 	if s.network == "tcp" {
-		payload = []byte(fmt.Sprintf("%d %s", len(payload), payload))
+		payload = fmt.Appendf(nil, "%d %s", len(payload), payload)
 	}
 	_, err = conn.Write(payload)
 	return err
@@ -1427,9 +1424,7 @@ func cloneFields(fields map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	cloned := make(map[string]any, len(fields))
-	for key, value := range fields {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, fields)
 	return cloned
 }
 

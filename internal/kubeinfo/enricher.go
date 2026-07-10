@@ -126,11 +126,9 @@ func New(ctx context.Context, cfg Config, metrics *telemetry.Registry, onError f
 		return nil, err
 	}
 
-	enricher.wg.Add(1)
-	go func() {
-		defer enricher.wg.Done()
+	enricher.wg.Go(func() {
 		enricher.run(sinkCtx)
-	}()
+	})
 
 	return enricher, nil
 }

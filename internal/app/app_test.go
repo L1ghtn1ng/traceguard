@@ -78,7 +78,6 @@ func TestPolicyMode(t *testing.T) {
 		{name: "block dry run", cfg: config.Config{Block: true, DryRun: true}, want: "dry_run"},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -231,7 +230,6 @@ func TestResolveExecutablePath(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -315,7 +313,6 @@ func TestEventKindNameAndSocketAwareness(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -346,7 +343,6 @@ func TestFileAccessName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -373,7 +369,6 @@ func TestFileAuditEventName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 

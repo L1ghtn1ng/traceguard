@@ -26,7 +26,6 @@ func TestParseKernelRelease(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.release, func(t *testing.T) {
 			t.Parallel()
 
@@ -112,7 +111,6 @@ func TestIsKernelAtLeast(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.release, func(t *testing.T) {
 			t.Parallel()
 
@@ -227,7 +225,6 @@ func TestLoadLinux71MonitorObjectsWithSelectsCompatVariants(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -297,7 +294,6 @@ func TestCIDRKeySizesMatchCollectionSpecs(t *testing.T) {
 	)
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

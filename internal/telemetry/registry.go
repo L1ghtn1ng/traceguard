@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"sort"
@@ -323,9 +324,7 @@ func (r *Registry) replaceGauges(prefix string, values map[string]int64) {
 			delete(r.gauges, key)
 		}
 	}
-	for key, value := range values {
-		r.gauges[key] = value
-	}
+	maps.Copy(r.gauges, values)
 }
 
 func metricKey1(name, key, value string) string {

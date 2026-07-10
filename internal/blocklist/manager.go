@@ -558,7 +558,7 @@ func normalizeDomain(raw string) (string, bool) {
 		return "", false
 	}
 
-	for _, label := range strings.Split(raw, ".") {
+	for label := range strings.SplitSeq(raw, ".") {
 		if label == "" || len(label) > 63 {
 			return "", false
 		}
@@ -920,10 +920,7 @@ func resolvedEndpointKey(endpoint ResolvedEndpoint) string {
 }
 
 func bytesCompare(a, b []byte) int {
-	limit := len(a)
-	if len(b) < limit {
-		limit = len(b)
-	}
+	limit := min(len(b), len(a))
 	for i := 0; i < limit; i++ {
 		switch {
 		case a[i] < b[i]:

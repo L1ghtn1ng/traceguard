@@ -195,7 +195,7 @@ func TestCacheEvictsLeastRecentlyUsedEntryAtCapacity(t *testing.T) {
 	t.Parallel()
 
 	cache := NewCache(t.TempDir(), time.Minute)
-	for i := 0; i < maxProcessCacheEntries; i++ {
+	for i := range maxProcessCacheEntries {
 		pid := uint32(i + 1)
 		cache.entries[pid] = cacheEntry{pidfd: -1, lastUsed: uint64(i + 1)}
 	}

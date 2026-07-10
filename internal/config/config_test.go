@@ -244,7 +244,6 @@ func TestParseRejectsRemovedHTTPSExportFlags(t *testing.T) {
 		"-event-export-gzip",
 	}
 	for _, flagName := range tests {
-		flagName := flagName
 		t.Run(flagName, func(t *testing.T) {
 			originalArgs := os.Args
 			t.Cleanup(func() { os.Args = originalArgs })
@@ -335,7 +334,6 @@ func TestParseRejectsInvalidRemoteSyslogConfig(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			originalArgs := os.Args
 			t.Cleanup(func() { os.Args = originalArgs })

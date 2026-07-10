@@ -74,7 +74,7 @@ func detectBPFLSM() bool {
 	if err != nil {
 		return false
 	}
-	for _, lsm := range strings.Split(strings.TrimSpace(string(raw)), ",") {
+	for lsm := range strings.SplitSeq(strings.TrimSpace(string(raw)), ",") {
 		if strings.TrimSpace(lsm) == "bpf" {
 			return true
 		}

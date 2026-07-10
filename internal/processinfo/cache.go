@@ -407,8 +407,8 @@ func ValidateRoot(root string) error {
 }
 
 func parseCgroup(raw []byte) (path, service, container, podUID, runtime string) {
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(strings.TrimSpace(string(raw)), "\n")
+	for line := range lines {
 		parts := strings.SplitN(line, ":", 3)
 		if len(parts) != 3 {
 			continue
@@ -435,7 +435,7 @@ func parseCgroup(raw []byte) (path, service, container, podUID, runtime string) 
 }
 
 func extractService(path string) string {
-	for _, part := range strings.Split(path, "/") {
+	for part := range strings.SplitSeq(path, "/") {
 		if strings.HasSuffix(part, ".service") || strings.HasSuffix(part, ".scope") {
 			return part
 		}

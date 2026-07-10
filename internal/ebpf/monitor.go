@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -504,12 +505,7 @@ func loadLinux71MonitorObjectsWith(loadOptions *ebpf.CollectionOptions, features
 }
 
 func shouldTryDNSRecvmsgCompat(errs ...error) bool {
-	for _, err := range errs {
-		if isDNSHelperVerifierError(err) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(errs, isDNSHelperVerifierError)
 }
 
 func isRecvmsgContextVerifierError(err error) bool {
@@ -827,7 +823,7 @@ func encodeDomainKey(domain string) (domainKey, error) {
 	}
 
 	offset := 0
-	for _, label := range strings.Split(domain, ".") {
+	for label := range strings.SplitSeq(domain, ".") {
 		if label == "" {
 			return key, errors.New("empty label")
 		}

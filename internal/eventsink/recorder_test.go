@@ -414,7 +414,7 @@ func TestRecorderInfoIfChangedBoundsChangeStates(t *testing.T) {
 	t.Parallel()
 
 	recorder, _ := newTestRecorder(t)
-	for idx := 0; idx < maxDedupeStates; idx++ {
+	for idx := range maxDedupeStates {
 		recorder.changeStates[strconv.Itoa(idx)] = "existing"
 	}
 	const current = "current policy"

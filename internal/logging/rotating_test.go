@@ -26,7 +26,7 @@ func TestRotatingFileRotatesAndKeepsBackups(t *testing.T) {
 	defer writer.Close()
 
 	line := bytes.Repeat([]byte("x"), 20)
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if _, err := writer.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			t.Fatalf("Write returned error: %v", err)
 		}
