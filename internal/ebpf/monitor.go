@@ -934,6 +934,9 @@ func syncSuffixMapSlot(m *ebpf.Map, next map[domainSuffixKey]struct{}, slot uint
 
 	for key := range next {
 		key.Slot = slot
+		if _, exists := current[key]; exists {
+			continue
+		}
 		if err := m.Put(key, uint8(1)); err != nil {
 			return err
 		}
