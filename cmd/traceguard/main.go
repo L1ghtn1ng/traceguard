@@ -20,22 +20,27 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	hardening.Anchor()
 
 	cfg, err := config.Parse()
 	if err != nil {
-		log.Fatalf("parse config: %v", err)
+		log.Printf("parse config: %v", err)
+		return 1
 	}
 	if cfg.PrintVersion {
 		fmt.Println(version.String())
-		return
+		return 0
 	}
 	if cfg.Doctor {
 		if err := doctor.Run(cfg, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	writer, err := logging.NewRotatingFile(cfg.LogPath, logging.Options{
@@ -45,13 +50,15 @@ func main() {
 		DirMode:      0o750,
 	})
 	if err != nil {
-		log.Fatalf("initialize logger: %v", err)
+		log.Printf("initialize logger: %v", err)
+		return 1
 	}
 	defer writer.Close()
 
 	logger, err := logging.NewLogger(writer, cfg.LogFormat)
 	if err != nil {
-		log.Fatalf("initialize structured logger: %v", err)
+		log.Printf("initialize structured logger: %v", err)
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -72,7 +79,7 @@ func main() {
 	metrics := telemetry.NewRegistry()
 	if err := metrics.StartServer(ctx, cfg.MetricsAddr, logger); err != nil {
 		logger.Error("start metrics server", err, nil)
-		os.Exit(1)
+		return 1
 	}
 
 	recorder, err := eventsink.NewRecorder(ctx, logger, metrics, eventsink.Config{
@@ -93,12 +100,13 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("initialize event recorder", err, nil)
-		os.Exit(1)
+		return 1
 	}
 	defer recorder.Close()
 
 	if err := app.Run(ctx, cfg, recorder, metrics, reloadCh); err != nil {
 		logger.Error("traceguard", err, nil)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

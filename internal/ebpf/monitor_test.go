@@ -21,6 +21,7 @@ func TestParseKernelRelease(t *testing.T) {
 		{release: "6.12.0-custom", major: 6, minor: 12, ok: true},
 		{release: "6.18.21", major: 6, minor: 18, ok: true},
 		{release: "7.0.0-rc6", major: 7, minor: 0, ok: true},
+		{release: "7.1.1-arch1-1", major: 7, minor: 1, ok: true},
 		{release: "garbage", ok: false},
 	}
 
@@ -35,6 +36,34 @@ func TestParseKernelRelease(t *testing.T) {
 			}
 			if ok && (major != tc.major || minor != tc.minor) {
 				t.Fatalf("version = %d.%d, want %d.%d", major, minor, tc.major, tc.minor)
+			}
+		})
+	}
+}
+
+func TestIsKernelAtLeast(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		release string
+		want    bool
+	}{
+		{release: "7.1.0", want: true},
+		{release: "7.1.1-custom", want: true},
+		{release: "7.2.0", want: true},
+		{release: "8.0.0", want: true},
+		{release: "7.0.13", want: false},
+		{release: "6.18.36", want: false},
+		{release: "garbage", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.release, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isKernelAtLeast(tc.release, 7, 1); got != tc.want {
+				t.Fatalf("isKernelAtLeast(%q, 7, 1) = %v, want %v", tc.release, got, tc.want)
 			}
 		})
 	}
@@ -75,6 +104,87 @@ func TestIsRecvmsgContextVerifierError(t *testing.T) {
 	}
 }
 
+func TestLoadLinux71MonitorObjectsWithSelectsCompatVariants(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16")
+	recvmsgErr := errors.New("field TraceRecvmsg4: program trace_recvmsg4: load program: permission denied: invalid bpf_context access off=40 size=4")
+	dnsRecvmsgErr := errors.New("field TraceDns: program trace_dns: load program: invalid argument: program of this type cannot use helper bpf_get_current_comm#16; field TraceRecvmsg4: program trace_recvmsg4: load program: permission denied: invalid bpf_context access off=40 size=4")
+
+	tests := []struct {
+		name       string
+		loaders    monitorVariantLoaders
+		wantObject string
+	}{
+		{
+			name:       "default",
+			loaders:    fakeLinux71Loaders(nil, errors.New("unused"), errors.New("unused"), errors.New("unused")),
+			wantObject: "traceguardLinux71",
+		},
+		{
+			name:       "dns compat",
+			loaders:    fakeLinux71Loaders(dnsErr, nil, errors.New("unused"), errors.New("unused")),
+			wantObject: "traceguardLinux71DNSCompat",
+		},
+		{
+			name:       "recvmsg compat",
+			loaders:    fakeLinux71Loaders(recvmsgErr, errors.New("unused"), nil, errors.New("unused")),
+			wantObject: "traceguardLinux71RecvmsgCompat",
+		},
+		{
+			name:       "combined compat",
+			loaders:    fakeLinux71Loaders(dnsErr, recvmsgErr, errors.New("unused"), nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+		{
+			name:       "recvmsg then dns compat",
+			loaders:    fakeLinux71Loaders(recvmsgErr, errors.New("unused"), dnsErr, nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+		{
+			name:       "combined direct default error",
+			loaders:    fakeLinux71Loaders(dnsRecvmsgErr, errors.New("unused"), errors.New("unused"), nil),
+			wantObject: "traceguardLinux71DNSRecvmsgCompat",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, features, err := loadLinux71MonitorObjectsWith(nil, KernelFeatures{KernelAtLeast71: true}, tc.loaders)
+			if err != nil {
+				t.Fatalf("loadLinux71MonitorObjectsWith returned error: %v", err)
+			}
+			if !features.EnhancedTelemetry {
+				t.Fatal("EnhancedTelemetry = false, want true")
+			}
+			if features.SelectedFeatureSet != kernelFeatureSetLinux71 {
+				t.Fatalf("SelectedFeatureSet = %q, want %q", features.SelectedFeatureSet, kernelFeatureSetLinux71)
+			}
+			if features.SelectedObject != tc.wantObject {
+				t.Fatalf("SelectedObject = %q, want %q", features.SelectedObject, tc.wantObject)
+			}
+		})
+	}
+}
+
+func fakeLinux71Loaders(defaultErr, dnsErr, recvmsgErr, dnsRecvmsgErr error) monitorVariantLoaders {
+	return monitorVariantLoaders{
+		defaultVariant:   fakeVariantLoader(defaultErr),
+		dnsCompat:        fakeVariantLoader(dnsErr),
+		recvmsgCompat:    fakeVariantLoader(recvmsgErr),
+		dnsRecvmsgCompat: fakeVariantLoader(dnsRecvmsgErr),
+	}
+}
+
+func fakeVariantLoader(err error) func(*ebpf.CollectionOptions) (monitorObjects, error) {
+	return func(*ebpf.CollectionOptions) (monitorObjects, error) {
+		return monitorObjects{}, err
+	}
+}
+
 func TestCIDRKeyBinarySizes(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +203,10 @@ func TestCIDRKeySizesMatchCollectionSpecs(t *testing.T) {
 		name     string
 		loadSpec func() (*ebpf.CollectionSpec, error)
 	}{
+		{name: "linux71", loadSpec: loadTraceguardLinux71},
+		{name: "linux71-dns-compat", loadSpec: loadTraceguardLinux71DNSCompat},
+		{name: "linux71-recvmsg-compat", loadSpec: loadTraceguardLinux71RecvmsgCompat},
+		{name: "linux71-dns-recvmsg-compat", loadSpec: loadTraceguardLinux71DNSRecvmsgCompat},
 		{name: "default", loadSpec: loadTraceguard},
 		{name: "dns-compat", loadSpec: loadTraceguardDNSCompat},
 		{name: "recvmsg-compat", loadSpec: loadTraceguardRecvmsgCompat},

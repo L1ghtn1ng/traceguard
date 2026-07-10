@@ -13,7 +13,7 @@ updates:
     interval: daily
     timezone: Europe/London
   cooldown:
-    default-days: 5
+    default-days: 7
   patterns: ["*"]
   multi-ecosystem-group: all-dependencies
 - package-ecosystem: gomod
@@ -22,7 +22,7 @@ updates:
     interval: daily
     timezone: Europe/London
   cooldown:
-    default-days: 5
+    default-days: 7
   patterns: ["*"]
   multi-ecosystem-group: all-dependencies
   allow:

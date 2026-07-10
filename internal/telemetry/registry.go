@@ -183,6 +183,18 @@ func (r *Registry) SetEBPFAttachedPrograms(count int) {
 	r.setGauge("traceguard_ebpf_attached_programs", int64(count))
 }
 
+func (r *Registry) SetKernelFeatures(features map[string]bool) {
+	gauges := make(map[string]int64, len(features))
+	for feature, enabled := range features {
+		value := int64(0)
+		if enabled {
+			value = 1
+		}
+		gauges[metricKey1("traceguard_kernel_feature_enabled", "feature", feature)] = value
+	}
+	r.replaceGauges("traceguard_kernel_feature_enabled", gauges)
+}
+
 func (r *Registry) IncEBPFReadError() {
 	r.incCounter("traceguard_ebpf_read_errors_total")
 }

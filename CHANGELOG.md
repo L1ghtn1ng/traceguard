@@ -2,6 +2,19 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [1.4.0] - 2026-07-10
+
+### Added
+
+- Added transparent Linux 7.1 eBPF object probing with DNS and `recvmsg` compatibility variants, automatic legacy fallback, and startup, metrics, and doctor diagnostics for the selected object and enhanced-load failures.
+
+### Fixed
+
+- Bounded file-audit and error deduplication state with TTL-based pruning and hard entry limits, preventing event cardinality from causing unbounded memory growth.
+- Bounded the in-memory DNS domain inventory deduplication set so unique-domain traffic cannot grow daemon memory indefinitely.
+- Restricted HTTPS export and Kubernetes API redirects to the original HTTPS origin, preventing credentials and client certificates from being forwarded across origins.
+- Ensured deferred recorder and log cleanup runs before nonzero process exit so queued export events can be flushed or spooled.
+
 ## [1.3.0] - 2026-06-17
 
 ### Added

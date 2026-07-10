@@ -40,6 +40,7 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.IncProcessMetadata("proc")
 	registry.IncProcessLSMMetadata("apparmor")
 	registry.SetEBPFAttachedPrograms(14)
+	registry.SetKernelFeatures(map[string]bool{"enhanced_telemetry": true, "btf": false, "bpf_lsm": true})
 	registry.IncEBPFReadError()
 
 	rendered := registry.Render()
@@ -47,6 +48,9 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`traceguard_blocklist_load_total{source="remote",status="success"} 1`,
 		`traceguard_ebpf_attached_programs 14`,
 		`traceguard_ebpf_read_errors_total 1`,
+		`traceguard_kernel_feature_enabled{feature="bpf_lsm"} 1`,
+		`traceguard_kernel_feature_enabled{feature="btf"} 0`,
+		`traceguard_kernel_feature_enabled{feature="enhanced_telemetry"} 1`,
 		`traceguard_events_total{kind="dns",transport="udp"} 1`,
 		`traceguard_event_export_queue_depth 7`,
 		`traceguard_event_export_spool_files 2`,

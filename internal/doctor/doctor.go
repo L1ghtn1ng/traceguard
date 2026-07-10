@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
+	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
@@ -27,6 +28,7 @@ var defaultChecks = environmentChecks{
 	geteuid:                   os.Geteuid,
 	validateProcRoot:          processinfo.ValidateRoot,
 	checkTracepointPerfAccess: checkTracepointPerfEventAccess,
+	detectKernelFeatures:      ebpfmonitor.ProbeKernelFeatures,
 }
 
 type environmentChecks struct {
@@ -36,6 +38,7 @@ type environmentChecks struct {
 	geteuid                   func() int
 	validateProcRoot          func(string) error
 	checkTracepointPerfAccess func() error
+	detectKernelFeatures      func() ebpfmonitor.KernelFeatures
 }
 
 func Run(cfg config.Config, w io.Writer) error {
@@ -154,6 +157,13 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	} else {
 		check(true, "tracepoint-perf-event", "syscalls/sys_enter_execve")
 	}
+	features := env.detectKernelFeatures()
+	check(true, "kernel-release", emptyDetail(features.Release, "unknown"))
+	check(true, "kernel-at-least-7.1", enabledDetail(features.KernelAtLeast71))
+	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
+	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
+	check(true, "kernel-bpf-object", emptyDetail(features.SelectedObject, "none"))
+	check(true, "kernel-enhanced-telemetry", enhancedTelemetryDetail(features))
 
 	check(cfg.LogFormat == "text" || cfg.LogFormat == "json", "log-format", cfg.LogFormat)
 	check(cfg.ProcessCacheTTL > 0, "process-cache-ttl", cfg.ProcessCacheTTL.String())
@@ -227,6 +237,23 @@ func Summary(err error) string {
 func enabledDetail(enabled bool) string {
 	if enabled {
 		return "enabled"
+	}
+	return "disabled"
+}
+
+func emptyDetail(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func enhancedTelemetryDetail(features ebpfmonitor.KernelFeatures) string {
+	if features.EnhancedTelemetry {
+		return "enabled"
+	}
+	if features.EnhancedLoadFailure != "" {
+		return "disabled: " + features.EnhancedLoadFailure
 	}
 	return "disabled"
 }

@@ -32,6 +32,9 @@ const (
 	exportBatchSize      = 50
 	exportFlushEvery     = 5 * time.Second
 	syslogQueueSize      = 1024
+	dedupePruneInterval  = time.Minute
+	maxDedupeStates      = 65536
+	maxRememberedDomains = 65536
 	maxSpoolFiles        = 10000
 	maxSpoolBytes        = 256 * 1024 * 1024
 	maxSpoolPayloadBytes = 1024 * 1024
@@ -69,6 +72,7 @@ type Recorder struct {
 	errorStates  map[string]errorDedupeState
 	infoStates   map[string]errorDedupeState
 	changeStates map[string]string
+	nextPruneAt  time.Time
 }
 
 type record struct {
@@ -80,6 +84,7 @@ type record struct {
 
 type errorDedupeState struct {
 	lastEmitted     time.Time
+	expiresAt       time.Time
 	suppressedCount uint64
 }
 
@@ -175,14 +180,18 @@ func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.
 
 	r.dedupeMu.Lock()
 	state := r.infoStates[key]
+	r.pruneDedupeStatesLocked(now)
 	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
 		state.suppressedCount++
+		state.expiresAt = state.lastEmitted.Add(ttl)
 		r.infoStates[key] = state
+		limitDedupeStates(r.infoStates, key)
 		r.dedupeMu.Unlock()
 		return
 	}
 	suppressedCount := state.suppressedCount
-	r.infoStates[key] = errorDedupeState{lastEmitted: now}
+	r.infoStates[key] = errorDedupeState{lastEmitted: now, expiresAt: now.Add(ttl)}
+	limitDedupeStates(r.infoStates, key)
 	r.dedupeMu.Unlock()
 
 	if suppressedCount > 0 {
@@ -217,20 +226,53 @@ func (r *Recorder) ErrorDedup(msg string, err error, fields map[string]any, ttl 
 
 	r.dedupeMu.Lock()
 	state := r.errorStates[key]
+	r.pruneDedupeStatesLocked(now)
 	if !state.lastEmitted.IsZero() && now.Sub(state.lastEmitted) < ttl {
 		state.suppressedCount++
+		state.expiresAt = state.lastEmitted.Add(ttl)
 		r.errorStates[key] = state
+		limitDedupeStates(r.errorStates, key)
 		r.dedupeMu.Unlock()
 		return
 	}
 	suppressedCount := state.suppressedCount
-	r.errorStates[key] = errorDedupeState{lastEmitted: now}
+	r.errorStates[key] = errorDedupeState{lastEmitted: now, expiresAt: now.Add(ttl)}
+	limitDedupeStates(r.errorStates, key)
 	r.dedupeMu.Unlock()
 
 	if suppressedCount > 0 {
 		merged["suppressed_count"] = suppressedCount
 	}
 	r.emitAt("error", msg, merged, now)
+}
+
+func (r *Recorder) pruneDedupeStatesLocked(now time.Time) {
+	if !r.nextPruneAt.IsZero() && now.Before(r.nextPruneAt) {
+		return
+	}
+	pruneExpiredDedupeStates(r.infoStates, now)
+	pruneExpiredDedupeStates(r.errorStates, now)
+	r.nextPruneAt = now.Add(dedupePruneInterval)
+}
+
+func pruneExpiredDedupeStates(states map[string]errorDedupeState, now time.Time) {
+	for key, state := range states {
+		if !state.expiresAt.After(now) {
+			delete(states, key)
+		}
+	}
+}
+
+func limitDedupeStates(states map[string]errorDedupeState, preserve string) {
+	for len(states) > maxDedupeStates {
+		for key := range states {
+			if key == preserve {
+				continue
+			}
+			delete(states, key)
+			break
+		}
+	}
 }
 
 func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
@@ -439,9 +481,12 @@ func isBlockedRecord(entry record) bool {
 }
 
 type domainSink struct {
-	writer *logging.RotatingFile
-	mu     sync.Mutex
-	seen   map[string]struct{}
+	writer    *logging.RotatingFile
+	mu        sync.Mutex
+	seen      map[string]struct{}
+	seenOrder []string
+	seenNext  int
+	seenLimit int
 }
 
 func newDomainSink(path string) (*domainSink, error) {
@@ -456,8 +501,9 @@ func newDomainSink(path string) (*domainSink, error) {
 	}
 
 	sink := &domainSink{
-		writer: writer,
-		seen:   make(map[string]struct{}),
+		writer:    writer,
+		seen:      make(map[string]struct{}),
+		seenLimit: maxRememberedDomains,
 	}
 	if err := sink.loadSeen(path, 5); err != nil {
 		_ = writer.Close()
@@ -484,6 +530,26 @@ func (d *domainSink) Write(entry record) {
 	if _, err := d.writer.Write([]byte(entry.Timestamp + "\t" + domain + "\n")); err != nil {
 		return
 	}
+	d.rememberDomain(domain)
+}
+
+func (d *domainSink) rememberDomain(domain string) {
+	if d.seenLimit <= 0 {
+		return
+	}
+	if _, ok := d.seen[domain]; ok {
+		return
+	}
+	if len(d.seenOrder) < d.seenLimit {
+		d.seenOrder = append(d.seenOrder, domain)
+		d.seen[domain] = struct{}{}
+		return
+	}
+
+	evicted := d.seenOrder[d.seenNext]
+	delete(d.seen, evicted)
+	d.seenOrder[d.seenNext] = domain
+	d.seenNext = (d.seenNext + 1) % d.seenLimit
 	d.seen[domain] = struct{}{}
 }
 
@@ -528,7 +594,7 @@ func (d *domainSink) loadSeenFile(path string) error {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		if domain := domainFromLogLine(scanner.Text()); domain != "" {
-			d.seen[domain] = struct{}{}
+			d.rememberDomain(domain)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -628,17 +694,9 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 
 	sink := &exportSink{
 		client: &http.Client{
-			Timeout:   20 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				if req.URL == nil || req.URL.Scheme != "https" {
-					return errors.New("redirect target must use https")
-				}
-				return nil
-			},
+			Timeout:       20 * time.Second,
+			Transport:     transport,
+			CheckRedirect: checkHTTPSRedirect,
 		},
 		target:        parsed.String(),
 		authorization: strings.TrimSpace(cfg.ExportAuthorization),
@@ -1078,6 +1136,19 @@ func newExportTransport(cfg Config) (*http.Transport, error) {
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       tlsConfig,
 	}, nil
+}
+
+func checkHTTPSRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	if req.URL == nil || req.URL.Scheme != "https" {
+		return errors.New("redirect target must use https")
+	}
+	if len(via) == 0 || via[0].URL == nil || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return errors.New("redirect target must use the original origin")
+	}
+	return nil
 }
 
 func (e *exportSink) Close() error {

@@ -122,6 +122,15 @@ func TestDecodeAddressAndEnumNamesHandleUnknownValues(t *testing.T) {
 	if got := socketHookName(99); got != "" {
 		t.Fatalf("socketHookName unknown = %q, want empty", got)
 	}
+	if got := eventSourceName(99); got != "" {
+		t.Fatalf("eventSourceName unknown = %q, want empty", got)
+	}
+	if got := kernelFeatureSetName(99); got != "" {
+		t.Fatalf("kernelFeatureSetName unknown = %q, want empty", got)
+	}
+	if got := uidSourceName(99); got != "" {
+		t.Fatalf("uidSourceName unknown = %q, want empty", got)
+	}
 }
 
 func TestDecodeEventSocketMetadata(t *testing.T) {
@@ -211,23 +220,20 @@ func TestDecodeConnectionEvent(t *testing.T) {
 func TestDecodeFileAccessEvent(t *testing.T) {
 	t.Parallel()
 
-	record := make([]byte, binary.Size(rawEvent{}))
-	writeLE := func(offset int, value any) {
-		t.Helper()
-		buf := bytes.NewBuffer(record[offset:offset])
-		if err := binary.Write(buf, binary.LittleEndian, value); err != nil {
-			t.Fatalf("binary.Write returned error: %v", err)
-		}
+	var raw rawEvent
+	raw.Kind = EventFileAccess
+	raw.PID = 123
+	raw.FileFlags = 0x40
+	raw.FileMode = 0o600
+	copy(raw.Comm[:], "cat")
+	copy(raw.Filename[:], "/etc/passwd")
+
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
 	}
 
-	writeLE(8, uint32(EventFileAccess))
-	writeLE(12, uint32(123))
-	copy(record[16:32], "cat")
-	copy(record[288:544], "/etc/passwd")
-	writeLE(556, uint16(0x40))
-	writeLE(560, uint32(0o600))
-
-	event, err := decodeEvent(record)
+	event, err := decodeEvent(buf.Bytes())
 	if err != nil {
 		t.Fatalf("decodeEvent returned error: %v", err)
 	}
@@ -245,10 +251,45 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	}
 }
 
+func TestDecodeKernelFeatureMetadata(t *testing.T) {
+	t.Parallel()
+
+	var raw rawEvent
+	raw.Kind = EventDNS
+	raw.FeatureSet = 2
+	raw.EventSource = 2
+	raw.UIDSource = 1
+	raw.KernelUID = 1000
+	raw.CgroupID = 12345
+	raw.SocketCookie = 67890
+
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
+	}
+
+	event, err := decodeEvent(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decodeEvent returned error: %v", err)
+	}
+	if event.KernelFeatureSet != "linux71" {
+		t.Fatalf("KernelFeatureSet = %q, want linux71", event.KernelFeatureSet)
+	}
+	if event.EventSource != "cgroup-skb" {
+		t.Fatalf("EventSource = %q, want cgroup-skb", event.EventSource)
+	}
+	if event.UIDSource != "kernel" {
+		t.Fatalf("UIDSource = %q, want kernel", event.UIDSource)
+	}
+	if event.KernelUID != 1000 || event.CgroupID != 12345 || event.SocketCookie != 67890 {
+		t.Fatalf("kernel metadata = uid:%d cgroup:%d cookie:%d", event.KernelUID, event.CgroupID, event.SocketCookie)
+	}
+}
+
 func TestRawEventSizeMatchesBPFEvent(t *testing.T) {
 	t.Parallel()
 
-	if got, want := binary.Size(rawEvent{}), 600; got != want {
+	if got, want := binary.Size(rawEvent{}), 632; got != want {
 		t.Fatalf("rawEvent size = %d, want BPF struct event size %d", got, want)
 	}
 }

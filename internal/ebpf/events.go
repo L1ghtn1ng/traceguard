@@ -27,47 +27,59 @@ const (
 )
 
 type rawEvent struct {
-	TimestampNS uint64
-	Kind        uint32
-	PID         uint32
-	Comm        [commSize]byte
-	Domain      [domainSize]byte
-	Filename    [filenameSize]byte
-	Transport   uint8
-	Family      uint8
-	SocketProto uint8
-	Attribution uint8
-	SocketHook  uint8
-	Direction   uint8
-	Port        uint16
-	LocalPort   uint16
-	CPad        uint16
-	FileFlags   uint32
-	FileMode    uint32
-	Addr        [16]byte
-	LocalAddr   [16]byte
-	TailPad     uint32
+	TimestampNS  uint64
+	Kind         uint32
+	PID          uint32
+	Comm         [commSize]byte
+	Domain       [domainSize]byte
+	Filename     [filenameSize]byte
+	Transport    uint8
+	Family       uint8
+	SocketProto  uint8
+	Attribution  uint8
+	SocketHook   uint8
+	Direction    uint8
+	Port         uint16
+	LocalPort    uint16
+	CPad         uint16
+	FileFlags    uint32
+	FileMode     uint32
+	KernelUID    uint32
+	EventSource  uint32
+	FeatureSet   uint32
+	UIDSource    uint32
+	CPad2        uint32
+	CgroupID     uint64
+	SocketCookie uint64
+	Addr         [16]byte
+	LocalAddr    [16]byte
 }
 
 type Event struct {
-	Timestamp      time.Time
-	Kind           uint32
-	PID            uint32
-	Comm           string
-	Domain         string
-	Filename       string
-	Transport      string
-	Address        string
-	Port           uint16
-	LocalAddress   string
-	LocalPort      uint16
-	FileFlags      uint32
-	FileMode       uint32
-	Attribution    string
-	Direction      string
-	SocketHook     string
-	SocketFamily   string
-	SocketProtocol string
+	Timestamp        time.Time
+	Kind             uint32
+	PID              uint32
+	Comm             string
+	Domain           string
+	Filename         string
+	Transport        string
+	Address          string
+	Port             uint16
+	LocalAddress     string
+	LocalPort        uint16
+	FileFlags        uint32
+	FileMode         uint32
+	KernelUID        uint32
+	CgroupID         uint64
+	SocketCookie     uint64
+	Attribution      string
+	Direction        string
+	SocketHook       string
+	SocketFamily     string
+	SocketProtocol   string
+	EventSource      string
+	KernelFeatureSet string
+	UIDSource        string
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -80,24 +92,30 @@ func decodeEvent(record []byte) (Event, error) {
 	}
 
 	return Event{
-		Timestamp:      time.Unix(0, int64(raw.TimestampNS)).UTC(),
-		Kind:           raw.Kind,
-		PID:            raw.PID,
-		Comm:           zeroTerminated(raw.Comm[:]),
-		Domain:         decodeQName(raw.Domain[:]),
-		Filename:       zeroTerminated(raw.Filename[:]),
-		Transport:      transportName(raw.Transport),
-		Address:        decodeAddress(raw.Family, raw.Addr),
-		Port:           raw.Port,
-		LocalAddress:   decodeAddress(raw.Family, raw.LocalAddr),
-		LocalPort:      raw.LocalPort,
-		FileFlags:      raw.FileFlags,
-		FileMode:       raw.FileMode,
-		Attribution:    attributionName(raw.Attribution),
-		Direction:      directionName(raw.Direction),
-		SocketHook:     socketHookName(raw.SocketHook),
-		SocketFamily:   socketFamilyName(raw.Family),
-		SocketProtocol: socketProtocolName(raw.SocketProto),
+		Timestamp:        time.Unix(0, int64(raw.TimestampNS)).UTC(),
+		Kind:             raw.Kind,
+		PID:              raw.PID,
+		Comm:             zeroTerminated(raw.Comm[:]),
+		Domain:           decodeQName(raw.Domain[:]),
+		Filename:         zeroTerminated(raw.Filename[:]),
+		Transport:        transportName(raw.Transport),
+		Address:          decodeAddress(raw.Family, raw.Addr),
+		Port:             raw.Port,
+		LocalAddress:     decodeAddress(raw.Family, raw.LocalAddr),
+		LocalPort:        raw.LocalPort,
+		FileFlags:        raw.FileFlags,
+		FileMode:         raw.FileMode,
+		KernelUID:        raw.KernelUID,
+		CgroupID:         raw.CgroupID,
+		SocketCookie:     raw.SocketCookie,
+		Attribution:      attributionName(raw.Attribution),
+		Direction:        directionName(raw.Direction),
+		SocketHook:       socketHookName(raw.SocketHook),
+		SocketFamily:     socketFamilyName(raw.Family),
+		SocketProtocol:   socketProtocolName(raw.SocketProto),
+		EventSource:      eventSourceName(raw.EventSource),
+		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
+		UIDSource:        uidSourceName(raw.UIDSource),
 	}, nil
 }
 
@@ -237,6 +255,41 @@ func socketHookName(code uint8) string {
 		return "cgroup_post_bind4"
 	case 10:
 		return "cgroup_post_bind6"
+	default:
+		return ""
+	}
+}
+
+func eventSourceName(code uint32) string {
+	switch code {
+	case 1:
+		return "syscall-tracepoint"
+	case 2:
+		return "cgroup-skb"
+	case 3:
+		return "cgroup-sock-addr"
+	case 4:
+		return "cgroup-sock"
+	default:
+		return ""
+	}
+}
+
+func kernelFeatureSetName(code uint32) string {
+	switch code {
+	case 1:
+		return "legacy"
+	case 2:
+		return "linux71"
+	default:
+		return ""
+	}
+}
+
+func uidSourceName(code uint32) string {
+	switch code {
+	case 1:
+		return "kernel"
 	default:
 		return ""
 	}

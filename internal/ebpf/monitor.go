@@ -82,9 +82,10 @@ type ResolverCIDR struct {
 }
 
 type Monitor struct {
-	objects monitorObjects
-	links   []link.Link
-	reader  *ringbuf.Reader
+	objects  monitorObjects
+	links    []link.Link
+	reader   *ringbuf.Reader
+	features KernelFeatures
 }
 
 type RuntimeMetrics interface {
@@ -174,7 +175,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 	}
 
 	loadOptions := newCollectionOptions()
-	objects, err := loadMonitorObjects(loadOptions)
+	objects, features, err := loadMonitorObjects(loadOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +295,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		}
 	}
 
-	return &Monitor{objects: objects, links: links, reader: reader}, nil
+	return &Monitor{objects: objects, links: links, reader: reader, features: features}, nil
 }
 
 func newCollectionOptions() *ebpf.CollectionOptions {
@@ -313,62 +314,152 @@ func newCollectionOptions() *ebpf.CollectionOptions {
 	return opts
 }
 
-func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, error) {
-	release, _ := kernelRelease()
+func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, KernelFeatures, error) {
+	features := DetectKernelFeatures()
+	release := features.Release
+	if features.KernelAtLeast71 {
+		objects, nextFeatures, err := loadLinux71MonitorObjects(loadOptions, features)
+		if err == nil {
+			return objects, nextFeatures, nil
+		}
+		features = nextFeatures
+	}
+
 	if isLinux612x(release) {
 		objects, err := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
 		if err == nil {
-			return objects, nil
+			features.SelectedObject = "traceguardDNSCompat"
+			return objects, features, nil
 		}
 		if isRecvmsgContextVerifierError(err) {
 			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if compatErr != nil {
-				return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
+				return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
 			}
-			return compatObjects, nil
+			features.SelectedObject = "traceguardDNSRecvmsgCompat"
+			return compatObjects, features, nil
 		}
 		if isDNSHelperVerifierError(err) {
 			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if compatErr == nil {
-				return compatObjects, nil
+				features.SelectedObject = "traceguardDNSRecvmsgCompat"
+				return compatObjects, features, nil
 			}
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: %w", release, err)
 	}
 
 	objects, err := loadMonitorVariant(loadTraceguard, loadOptions)
 	if err == nil {
-		return objects, nil
+		features.SelectedObject = "traceguard"
+		return objects, features, nil
 	}
 	if isRecvmsgContextVerifierError(err) {
 		compatObjects, compatErr := loadMonitorVariant(loadTraceguardRecvmsgCompat, loadOptions)
 		if compatErr == nil {
-			return compatObjects, nil
+			features.SelectedObject = "traceguardRecvmsgCompat"
+			return compatObjects, features, nil
 		}
 		if isDNSHelperVerifierError(err) {
 			combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if combinedErr == nil {
-				return combinedObjects, nil
+				features.SelectedObject = "traceguardDNSRecvmsgCompat"
+				return combinedObjects, features, nil
 			}
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; recvmsg compat retry failed: %w", err, compatErr)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: default load failed: %v; recvmsg compat retry failed: %w", err, compatErr)
 	}
 	if !isDNSHelperVerifierError(err) {
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: %w", err)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: %w", err)
 	}
 
 	compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
 	if compatErr == nil {
-		return compatObjects, nil
+		features.SelectedObject = "traceguardDNSCompat"
+		return compatObjects, features, nil
 	}
 	if isRecvmsgContextVerifierError(compatErr) {
 		combinedObjects, combinedErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 		if combinedErr == nil {
-			return combinedObjects, nil
+			features.SelectedObject = "traceguardDNSRecvmsgCompat"
+			return combinedObjects, features, nil
 		}
-		return monitorObjects{}, fmt.Errorf("load eBPF objects: dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", compatErr, combinedErr)
+		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", compatErr, combinedErr)
 	}
-	return monitorObjects{}, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+	return monitorObjects{}, features, fmt.Errorf("load eBPF objects: default load failed: %v; compat retry failed: %w", err, compatErr)
+}
+
+type monitorVariantLoaders struct {
+	defaultVariant   func(*ebpf.CollectionOptions) (monitorObjects, error)
+	dnsCompat        func(*ebpf.CollectionOptions) (monitorObjects, error)
+	recvmsgCompat    func(*ebpf.CollectionOptions) (monitorObjects, error)
+	dnsRecvmsgCompat func(*ebpf.CollectionOptions) (monitorObjects, error)
+}
+
+func loadLinux71MonitorObjects(loadOptions *ebpf.CollectionOptions, features KernelFeatures) (monitorObjects, KernelFeatures, error) {
+	return loadLinux71MonitorObjectsWith(loadOptions, features, monitorVariantLoaders{
+		defaultVariant: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71, opts)
+		},
+		dnsCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71DNSCompat, opts)
+		},
+		recvmsgCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71RecvmsgCompat, opts)
+		},
+		dnsRecvmsgCompat: func(opts *ebpf.CollectionOptions) (monitorObjects, error) {
+			return loadMonitorVariant(loadTraceguardLinux71DNSRecvmsgCompat, opts)
+		},
+	})
+}
+
+func loadLinux71MonitorObjectsWith(loadOptions *ebpf.CollectionOptions, features KernelFeatures, loaders monitorVariantLoaders) (monitorObjects, KernelFeatures, error) {
+	markSelected := func(objects monitorObjects, name string) (monitorObjects, KernelFeatures, error) {
+		features.EnhancedTelemetry = true
+		features.SelectedFeatureSet = kernelFeatureSetLinux71
+		features.SelectedObject = name
+		features.EnhancedLoadFailure = ""
+		return objects, features, nil
+	}
+
+	objects, err := loaders.defaultVariant(loadOptions)
+	if err == nil {
+		return markSelected(objects, "traceguardLinux71")
+	}
+	features.EnhancedLoadFailure = err.Error()
+
+	if isRecvmsgContextVerifierError(err) {
+		compatObjects, compatErr := loaders.recvmsgCompat(loadOptions)
+		if compatErr == nil {
+			return markSelected(compatObjects, "traceguardLinux71RecvmsgCompat")
+		}
+		if isDNSHelperVerifierError(err) || isDNSHelperVerifierError(compatErr) {
+			combinedObjects, combinedErr := loaders.dnsRecvmsgCompat(loadOptions)
+			if combinedErr == nil {
+				return markSelected(combinedObjects, "traceguardLinux71DNSRecvmsgCompat")
+			}
+		}
+		features.EnhancedLoadFailure = fmt.Sprintf("default load failed: %v; recvmsg compat retry failed: %v", err, compatErr)
+		return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+	}
+	if !isDNSHelperVerifierError(err) {
+		return monitorObjects{}, features, err
+	}
+
+	compatObjects, compatErr := loaders.dnsCompat(loadOptions)
+	if compatErr == nil {
+		return markSelected(compatObjects, "traceguardLinux71DNSCompat")
+	}
+	if isRecvmsgContextVerifierError(compatErr) {
+		combinedObjects, combinedErr := loaders.dnsRecvmsgCompat(loadOptions)
+		if combinedErr == nil {
+			return markSelected(combinedObjects, "traceguardLinux71DNSRecvmsgCompat")
+		}
+		features.EnhancedLoadFailure = fmt.Sprintf("dns compat retry failed: %v; dns+recvmsg compat retry failed: %v", compatErr, combinedErr)
+		return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
+	}
+	features.EnhancedLoadFailure = fmt.Sprintf("default load failed: %v; dns compat retry failed: %v", err, compatErr)
+	return monitorObjects{}, features, errors.New(features.EnhancedLoadFailure)
 }
 
 func isRecvmsgContextVerifierError(err error) bool {
@@ -455,6 +546,10 @@ func (m *Monitor) Close() error {
 
 func (m *Monitor) AttachedPrograms() int {
 	return len(m.links)
+}
+
+func (m *Monitor) KernelFeatures() KernelFeatures {
+	return m.features
 }
 
 func (m *Monitor) SetPolicyMode(enabled, blockAllDomains, blockAllResolvers, allowSuffixesEnabled bool) error {

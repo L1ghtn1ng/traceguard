@@ -50,6 +50,14 @@
 #define SOCKET_HOOK_CGROUP_RECVMSG6 8
 #define SOCKET_HOOK_CGROUP_POST_BIND4 9
 #define SOCKET_HOOK_CGROUP_POST_BIND6 10
+#define EVENT_SOURCE_SYSCALL_TRACEPOINT 1
+#define EVENT_SOURCE_CGROUP_SKB 2
+#define EVENT_SOURCE_CGROUP_SOCK_ADDR 3
+#define EVENT_SOURCE_CGROUP_SOCK 4
+#define KERNEL_FEATURE_SET_LEGACY 1
+#define KERNEL_FEATURE_SET_LINUX71 2
+#define UID_SOURCE_NONE 0
+#define UID_SOURCE_KERNEL 1
 #define SOCKET_INFO_MAX_ENTRIES 16384
 #define LISTENER_INFO_MAX_ENTRIES 16384
 #define CONNECTION_DEDUPE_MAX_ENTRIES 32768
@@ -74,6 +82,14 @@
 
 #ifndef TRACEGUARD_CONNECTION_NO_RECVMSG
 #define TRACEGUARD_CONNECTION_NO_RECVMSG 0
+#endif
+
+#ifndef TRACEGUARD_LINUX71_TELEMETRY
+#define TRACEGUARD_LINUX71_TELEMETRY 0
+#endif
+
+#ifndef TRACEGUARD_KERNEL_HELPER_TELEMETRY
+#define TRACEGUARD_KERNEL_HELPER_TELEMETRY 0
 #endif
 
 struct endpoint4_key {
@@ -194,6 +210,12 @@ struct event {
 	__u16 local_port;
 	__u32 file_flags;
 	__u32 file_mode;
+	__u32 kernel_uid;
+	__u32 event_source;
+	__u32 kernel_feature_set;
+	__u32 uid_source;
+	__u64 cgroup_id;
+	__u64 socket_cookie;
 	__u8 addr[16];
 	__u8 local_addr[16];
 };
@@ -348,17 +370,33 @@ struct {
 	__type(value, __u8);
 } endpoint6_cidr_allow_rules SEC(".maps");
 
-static __always_inline void init_event_base(struct event *event, __u32 kind, __u8 transport)
+static __always_inline __u32 active_kernel_feature_set(void)
+{
+#if TRACEGUARD_LINUX71_TELEMETRY
+	return KERNEL_FEATURE_SET_LINUX71;
+#else
+	return KERNEL_FEATURE_SET_LEGACY;
+#endif
+}
+
+static __always_inline void init_event_base(struct event *event, __u32 kind, __u8 transport, __u32 source)
 {
 	event->timestamp_ns = bpf_ktime_get_ns();
 	event->kind = kind;
 	event->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 	event->transport = transport;
+	event->event_source = source;
+	event->kernel_feature_set = active_kernel_feature_set();
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+	event->kernel_uid = (__u32)bpf_get_current_uid_gid();
+	event->uid_source = UID_SOURCE_KERNEL;
+	event->cgroup_id = bpf_get_current_cgroup_id();
+#endif
 }
 
-static __always_inline void init_event(struct event *event, __u32 kind, __u8 transport)
+static __always_inline void init_event(struct event *event, __u32 kind, __u8 transport, __u32 source)
 {
-	init_event_base(event, kind, transport);
+	init_event_base(event, kind, transport, source);
 	bpf_get_current_comm(event->comm, sizeof(event->comm));
 }
 
@@ -514,7 +552,7 @@ static __always_inline int should_emit_connection_event(const struct connection_
 	return 1;
 }
 
-static __always_inline int emit_connection_event_identity(const struct connection_event_params *params, __u32 pid, const char *comm)
+static __always_inline int emit_connection_event_identity(const struct connection_event_params *params, __u32 pid, const char *comm, __u64 socket_cookie)
 {
 	struct event *event;
 
@@ -528,8 +566,9 @@ static __always_inline int emit_connection_event_identity(const struct connectio
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event_base(event, EVENT_CONNECTION, transport_for_socket_protocol(params->protocol));
+	init_event_base(event, EVENT_CONNECTION, transport_for_socket_protocol(params->protocol), EVENT_SOURCE_CGROUP_SKB);
 	event->pid = pid;
+	event->socket_cookie = socket_cookie;
 	if (comm) {
 		__builtin_memcpy(event->comm, comm, sizeof(event->comm));
 	}
@@ -541,13 +580,33 @@ static __always_inline int emit_connection_event_identity(const struct connectio
 	return 1;
 }
 
-static __always_inline int emit_connection_event_current(const struct connection_event_params *params)
+static __always_inline int emit_connection_event_current(const struct connection_event_params *params, __u32 source, __u64 socket_cookie)
 {
+	struct event *event;
 	char comm[16] = {0};
 	__u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 
+	if (!should_emit_connection_event(params, pid)) {
+		return 1;
+	}
+
+	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	if (!event) {
+		return 1;
+	}
+
 	bpf_get_current_comm(comm, sizeof(comm));
-	return emit_connection_event_identity(params, pid, comm);
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event_base(event, EVENT_CONNECTION, transport_for_socket_protocol(params->protocol), source);
+	event->pid = pid;
+	event->socket_cookie = socket_cookie;
+	__builtin_memcpy(event->comm, comm, sizeof(event->comm));
+	set_event_socket_meta(event, params->family, params->protocol, params->hook, params->attribution);
+	event->direction = params->direction;
+	set_event_peer(event, params->family, params->port, params->addr);
+	set_event_local(event, params->family, params->local_port, params->local_addr);
+	bpf_ringbuf_submit(event, 0);
+	return 1;
 }
 
 static __always_inline int load_sock_local4(struct bpf_sock *sk, __u32 *addr, __u16 *port)
@@ -690,16 +749,21 @@ static __always_inline int load_qname_key(struct __sk_buff *skb, __u32 start, __
 	return -1;
 }
 
-static __always_inline int emit_dns4_event(const struct domain_key *key, __u32 kind, __u8 transport, __u8 protocol, __u32 addr)
+static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct domain_key *key, __u32 kind, __u8 transport, __u32 addr)
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	__u8 protocol = transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
+	(void)skb;
 
 	if (!event) {
 		return kind == EVENT_BLOCKED ? 0 : 1;
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event_base(event, kind, transport);
+	init_event_base(event, kind, transport, EVENT_SOURCE_CGROUP_SKB);
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+	event->socket_cookie = bpf_get_socket_cookie(skb);
+#endif
 	apply_socket_info(event, FAMILY_IPV4, protocol, DNS_PORT, &addr);
 	set_event_peer(event, FAMILY_IPV4, DNS_PORT, &addr);
 	__builtin_memcpy(event->domain, key->domain, sizeof(event->domain));
@@ -707,16 +771,21 @@ static __always_inline int emit_dns4_event(const struct domain_key *key, __u32 k
 	return kind == EVENT_BLOCKED ? 0 : 1;
 }
 
-static __always_inline int emit_dns6_event(const struct domain_key *key, __u32 kind, __u8 transport, __u8 protocol, const __u8 addr[16])
+static __always_inline int emit_dns6_event(struct __sk_buff *skb, const struct domain_key *key, __u32 kind, __u8 transport, const __u8 addr[16])
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	__u8 protocol = transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
+	(void)skb;
 
 	if (!event) {
 		return kind == EVENT_BLOCKED ? 0 : 1;
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event_base(event, kind, transport);
+	init_event_base(event, kind, transport, EVENT_SOURCE_CGROUP_SKB);
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+	event->socket_cookie = bpf_get_socket_cookie(skb);
+#endif
 	apply_socket_info(event, FAMILY_IPV6, protocol, DNS_PORT, addr);
 	set_event_peer(event, FAMILY_IPV6, DNS_PORT, addr);
 	__builtin_memcpy(event->domain, key->domain, sizeof(event->domain));
@@ -865,9 +934,10 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 	return parse_dns_payload(skb, dns_offset, dns_end, key, allow_suffix_match) == 0 ? DNS_PARSE_OK : is_block_enabled() ? DNS_PARSE_DROP : DNS_PARSE_PASS;
 }
 
-static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
+static __always_inline int emit_resolver_event(struct bpf_sock_addr *ctx, __u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook)
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	(void)ctx;
 	(void)addr_len;
 
 	if (!event) {
@@ -875,7 +945,10 @@ static __always_inline int emit_resolver_event(__u32 kind, __u8 transport, __u8 
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event(event, kind, transport);
+	init_event(event, kind, transport, EVENT_SOURCE_CGROUP_SOCK_ADDR);
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+	event->socket_cookie = bpf_get_socket_cookie(ctx);
+#endif
 	set_event_socket_meta(event, family, SOCKET_PROTOCOL_TCP, hook, ATTRIBUTION_KERNEL_CONNECT);
 	set_event_peer(event, family, port, addr);
 	bpf_ringbuf_submit(event, 0);
@@ -1170,7 +1243,7 @@ int trace_dns(struct __sk_buff *skb)
 				return is_block_enabled() ? 0 : 1;
 			}
 			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns4_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, iph.daddr);
+			return emit_dns4_event(skb, &key, kind, TRANSPORT_UDP, iph.daddr);
 		}
 		if (iph.protocol == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1201,7 +1274,7 @@ int trace_dns(struct __sk_buff *skb)
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
 			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns4_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, iph.daddr);
+			return emit_dns4_event(skb, &key, kind, TRANSPORT_TCP, iph.daddr);
 		}
 		return 1;
 	}
@@ -1247,7 +1320,7 @@ int trace_dns(struct __sk_buff *skb)
 				return 1;
 			}
 			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns6_event(&key, kind, TRANSPORT_UDP, SOCKET_PROTOCOL_UDP, ip6h.daddr.s6_addr);
+			return emit_dns6_event(skb, &key, kind, TRANSPORT_UDP, ip6h.daddr.s6_addr);
 		}
 		if (nexthdr == IPPROTO_TCP) {
 			struct tcphdr tcph = {0};
@@ -1278,7 +1351,7 @@ int trace_dns(struct __sk_buff *skb)
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
 			kind = dns_event_kind(&key, allow_suffix_match);
-			return emit_dns6_event(&key, kind, TRANSPORT_TCP, SOCKET_PROTOCOL_TCP, ip6h.daddr.s6_addr);
+			return emit_dns6_event(skb, &key, kind, TRANSPORT_TCP, ip6h.daddr.s6_addr);
 		}
 	}
 
@@ -1347,7 +1420,7 @@ int trace_connection_ingress(struct __sk_buff *skb)
 		params.local_port = local_port;
 		copy_socket_addr(params.addr, FAMILY_IPV4, &iph.saddr);
 		copy_socket_addr(params.local_addr, FAMILY_IPV4, &iph.daddr);
-		return emit_connection_event_identity(&params, listener ? listener->pid : 0, listener ? listener->comm : 0);
+		return emit_connection_event_identity(&params, listener ? listener->pid : 0, listener ? listener->comm : 0, 0);
 	}
 
 	if (version == 6) {
@@ -1393,7 +1466,7 @@ int trace_connection_ingress(struct __sk_buff *skb)
 		params.local_port = local_port;
 		copy_socket_addr(params.addr, FAMILY_IPV6, ip6h.saddr.s6_addr);
 		copy_socket_addr(params.local_addr, FAMILY_IPV6, ip6h.daddr.s6_addr);
-		return emit_connection_event_identity(&params, listener ? listener->pid : 0, listener ? listener->comm : 0);
+		return emit_connection_event_identity(&params, listener ? listener->pid : 0, listener ? listener->comm : 0, 0);
 	}
 
 	return 1;
@@ -1431,7 +1504,13 @@ int trace_sendmsg4(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV4, &user_ip4);
 	copy_socket_addr(params.local_addr, FAMILY_IPV4, have_local ? &local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV4, SOCKET_PROTOCOL_UDP, port, &user_ip4, SOCKET_HOOK_CGROUP_SENDMSG4);
 	}
@@ -1481,7 +1560,13 @@ int trace_sendmsg6(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV6, addr);
 	copy_socket_addr(params.local_addr, FAMILY_IPV6, have_local ? local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV6, SOCKET_PROTOCOL_UDP, port, addr, SOCKET_HOOK_CGROUP_SENDMSG6);
 	}
@@ -1525,7 +1610,13 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV4, &user_ip4);
 	copy_socket_addr(params.local_addr, FAMILY_IPV4, have_local ? &local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV4, SOCKET_PROTOCOL_TCP, port, &user_ip4, SOCKET_HOOK_CGROUP_CONNECT4);
 	}
@@ -1534,10 +1625,10 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	}
 
 	if (cfg && cfg->block_enabled && matched_rule) {
-		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &user_ip4, sizeof(user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
+		return emit_resolver_event(ctx, EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV4, port, &user_ip4, sizeof(user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
 	}
 
-	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV4, port, &user_ip4, sizeof(user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
+	emit_resolver_event(ctx, EVENT_RESOLVER, transport, FAMILY_IPV4, port, &user_ip4, sizeof(user_ip4), SOCKET_HOOK_CGROUP_CONNECT4);
 	return 1;
 }
 
@@ -1589,7 +1680,13 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV6, addr);
 	copy_socket_addr(params.local_addr, FAMILY_IPV6, have_local ? local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	if (port == DNS_PORT) {
 		cache_socket_info(FAMILY_IPV6, SOCKET_PROTOCOL_TCP, port, addr, SOCKET_HOOK_CGROUP_CONNECT6);
 	}
@@ -1598,10 +1695,10 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	}
 
 	if (cfg && cfg->block_enabled && matched_rule) {
-		return emit_resolver_event(EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
+		return emit_resolver_event(ctx, EVENT_RESOLVER_BLOCKED, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
 	}
 
-	emit_resolver_event(EVENT_RESOLVER, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
+	emit_resolver_event(ctx, EVENT_RESOLVER, transport, FAMILY_IPV6, port, addr, sizeof(addr), SOCKET_HOOK_CGROUP_CONNECT6);
 	return 1;
 }
 
@@ -1641,7 +1738,13 @@ int trace_recvmsg4(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV4, &msg_src_ip4);
 	copy_socket_addr(params.local_addr, FAMILY_IPV4, have_local ? &local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	return 1;
 #endif
 }
@@ -1693,7 +1796,13 @@ int trace_recvmsg6(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV6, addr);
 	copy_socket_addr(params.local_addr, FAMILY_IPV6, have_local ? local_addr : 0);
-	emit_connection_event_current(&params);
+	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+		bpf_get_socket_cookie(ctx)
+#else
+		0
+#endif
+	);
 	return 1;
 #endif
 }
@@ -1735,7 +1844,7 @@ static __always_inline int emit_exec_event(const char *filename)
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event(event, EVENT_EXEC, 0);
+	init_event(event, EVENT_EXEC, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
@@ -1752,7 +1861,7 @@ static __always_inline int emit_file_access_event(const char *filename, __u64 fl
 	}
 
 	__builtin_memset(event, 0, sizeof(*event));
-	init_event(event, EVENT_FILE_ACCESS, 0);
+	init_event(event, EVENT_FILE_ACCESS, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
 	event->file_flags = (__u32)flags;
 	event->file_mode = (__u32)mode;
 	if (filename) {

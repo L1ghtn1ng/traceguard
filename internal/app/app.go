@@ -56,6 +56,21 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 	defer monitor.Close()
 	metrics.SetEBPFAttachedPrograms(monitor.AttachedPrograms())
+	kernelFeatures := monitor.KernelFeatures()
+	metrics.SetKernelFeatures(kernelFeatures.FeatureGates())
+	featureFields := map[string]any{
+		"kernel_release":      kernelFeatures.Release,
+		"kernel_at_least_7_1": kernelFeatures.KernelAtLeast71,
+		"kernel_btf":          kernelFeatures.BTFAvailable,
+		"kernel_bpf_lsm":      kernelFeatures.BPFLSMAvailable,
+		"enhanced_telemetry":  kernelFeatures.EnhancedTelemetry,
+		"kernel_feature_set":  kernelFeatures.SelectedFeatureSet,
+		"selected_bpf_object": kernelFeatures.SelectedObject,
+	}
+	if kernelFeatures.EnhancedLoadFailure != "" {
+		featureFields["enhanced_load_failure"] = kernelFeatures.EnhancedLoadFailure
+	}
+	recorder.Info("kernel features selected", featureFields)
 
 	errCh := make(chan error, 2)
 	var endpointIndex atomic.Pointer[map[string]string]
@@ -274,6 +289,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			if process.AppArmorMode != "" {
 				fields["apparmor_mode"] = process.AppArmorMode
 			}
+			appendKernelFeatureFields(fields, event)
 			if kubeEnricher != nil && process.PodUID != "" {
 				if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
 					metrics.IncKubernetesEnrichment(true)
@@ -450,6 +466,25 @@ func appendSocketFields(fields map[string]any, event ebpf.Event, process process
 	}
 	if event.SocketProtocol != "" {
 		fields["socket_protocol"] = event.SocketProtocol
+	}
+}
+
+func appendKernelFeatureFields(fields map[string]any, event ebpf.Event) {
+	if event.KernelFeatureSet != "" {
+		fields["kernel_feature_set"] = event.KernelFeatureSet
+	}
+	if event.EventSource != "" {
+		fields["event_source"] = event.EventSource
+	}
+	if event.UIDSource != "" {
+		fields["uid_source"] = event.UIDSource
+		fields["kernel_uid"] = event.KernelUID
+	}
+	if event.CgroupID != 0 {
+		fields["cgroup_id"] = event.CgroupID
+	}
+	if event.SocketCookie != 0 {
+		fields["socket_cookie"] = event.SocketCookie
 	}
 }
 

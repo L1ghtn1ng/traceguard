@@ -15,6 +15,36 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
+func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
+	t.Parallel()
+
+	original, err := http.NewRequest(http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
+	if err != nil {
+		t.Fatalf("create original request: %v", err)
+	}
+	tests := []struct {
+		name    string
+		target  string
+		wantErr bool
+	}{
+		{name: "same origin", target: "https://kubernetes.default.svc/api/v1/pods?continue=next"},
+		{name: "different host", target: "https://attacker.default.svc/api/v1/pods", wantErr: true},
+		{name: "different port", target: "https://kubernetes.default.svc:8443/api/v1/pods", wantErr: true},
+		{name: "downgrade", target: "http://kubernetes.default.svc/api/v1/pods", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			redirect, err := http.NewRequest(http.MethodGet, test.target, nil)
+			if err != nil {
+				t.Fatalf("create redirect request: %v", err)
+			}
+			if err := checkHTTPSRedirect(redirect, []*http.Request{original}); (err != nil) != test.wantErr {
+				t.Fatalf("checkHTTPSRedirect() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestEnricherIndexesPodsByUID(t *testing.T) {
 	t.Parallel()
 

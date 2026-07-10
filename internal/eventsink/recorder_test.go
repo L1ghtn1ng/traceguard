@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -226,6 +227,31 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 	}
 }
 
+func TestDomainSinkBoundsRememberedDomains(t *testing.T) {
+	t.Parallel()
+
+	sink := &domainSink{
+		seen:      make(map[string]struct{}),
+		seenLimit: 2,
+	}
+	sink.rememberDomain("first.example")
+	sink.rememberDomain("second.example")
+	sink.rememberDomain("third.example")
+
+	if len(sink.seen) != 2 {
+		t.Fatalf("remembered domain count = %d, want 2", len(sink.seen))
+	}
+	if _, ok := sink.seen["first.example"]; ok {
+		t.Fatal("oldest remembered domain was not evicted")
+	}
+	if _, ok := sink.seen["second.example"]; !ok {
+		t.Fatal("second remembered domain was unexpectedly evicted")
+	}
+	if _, ok := sink.seen["third.example"]; !ok {
+		t.Fatal("newest remembered domain was unexpectedly evicted")
+	}
+}
+
 func TestRecorderErrorDedupSuppressesRepeatedErrors(t *testing.T) {
 	t.Parallel()
 
@@ -270,6 +296,47 @@ func TestRecorderErrorDedupEmitsDifferentErrors(t *testing.T) {
 	}
 	if got := lines[1]["error"]; got != "401 Unauthorized" {
 		t.Fatalf("second error = %#v, want 401 Unauthorized", got)
+	}
+}
+
+func TestRecorderPrunesExpiredDedupeStates(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	now := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	recorder.now = func() time.Time { return now }
+
+	recorder.InfoDedup("first-info", map[string]any{"path": "/tmp/first"}, 5*time.Minute)
+	recorder.ErrorDedup("first-error", errors.New("first"), nil, 5*time.Minute)
+	if len(recorder.infoStates) != 1 || len(recorder.errorStates) != 1 {
+		t.Fatalf("initial dedupe state counts = info %d, error %d; want 1 each", len(recorder.infoStates), len(recorder.errorStates))
+	}
+
+	now = now.Add(6 * time.Minute)
+	recorder.InfoDedup("second-info", map[string]any{"path": "/tmp/second"}, 5*time.Minute)
+	if len(recorder.infoStates) != 1 {
+		t.Fatalf("info dedupe state count after expiry = %d, want 1", len(recorder.infoStates))
+	}
+	if len(recorder.errorStates) != 0 {
+		t.Fatalf("error dedupe state count after expiry = %d, want 0", len(recorder.errorStates))
+	}
+}
+
+func TestLimitDedupeStatesBoundsCardinality(t *testing.T) {
+	t.Parallel()
+
+	states := make(map[string]errorDedupeState, maxDedupeStates+1)
+	for idx := 0; idx <= maxDedupeStates; idx++ {
+		states[strconv.Itoa(idx)] = errorDedupeState{}
+	}
+	const preserve = "65536"
+	limitDedupeStates(states, preserve)
+
+	if len(states) != maxDedupeStates {
+		t.Fatalf("dedupe state count = %d, want %d", len(states), maxDedupeStates)
+	}
+	if _, ok := states[preserve]; !ok {
+		t.Fatalf("current dedupe state %q was evicted", preserve)
 	}
 }
 
@@ -583,6 +650,39 @@ func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for export request")
+	}
+}
+
+func TestExportRedirectsStayOnOriginalOrigin(t *testing.T) {
+	t.Parallel()
+
+	original, err := http.NewRequest(http.MethodPost, "https://collector.example.test/v1/events", nil)
+	if err != nil {
+		t.Fatalf("create original request: %v", err)
+	}
+	tests := []struct {
+		name    string
+		target  string
+		via     []*http.Request
+		wantErr bool
+	}{
+		{name: "same origin", target: "https://collector.example.test/v2/events", via: []*http.Request{original}},
+		{name: "different host", target: "https://other.example.test/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "different port", target: "https://collector.example.test:8443/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "downgrade", target: "http://collector.example.test/v2/events", via: []*http.Request{original}, wantErr: true},
+		{name: "missing origin", target: "https://collector.example.test/v2/events", wantErr: true},
+		{name: "too many", target: "https://collector.example.test/v2/events", via: []*http.Request{original, original, original, original, original}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			redirect, err := http.NewRequest(http.MethodPost, test.target, nil)
+			if err != nil {
+				t.Fatalf("create redirect request: %v", err)
+			}
+			if err := checkHTTPSRedirect(redirect, test.via); (err != nil) != test.wantErr {
+				t.Fatalf("checkHTTPSRedirect() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
 	}
 }
 
