@@ -44,3 +44,20 @@ func TestWriteFileAtomicReplacesContents(t *testing.T) {
 		t.Fatalf("content = %q, want second", got)
 	}
 }
+
+func TestWriteFileAtomicCleansRenameTarget(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := dir + string(filepath.Separator) + "cache" + string(filepath.Separator) + "."
+	if err := WriteFileAtomic(path, []byte("payload"), 0o640); err != nil {
+		t.Fatalf("WriteFileAtomic with unclean path: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "cache"))
+	if err != nil {
+		t.Fatalf("read cleaned target: %v", err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("content = %q, want payload", got)
+	}
+}

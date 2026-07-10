@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -25,14 +26,8 @@ type KernelFeatures struct {
 }
 
 func DetectKernelFeatures() KernelFeatures {
-	release, _ := kernelRelease()
-	features := KernelFeatures{
-		Release:            release,
-		KernelAtLeast612:   isKernelAtLeast(release, 6, 12),
-		KernelAtLeast71:    isKernelAtLeast(release, 7, 1),
-		SelectedFeatureSet: kernelFeatureSetLegacy,
-		SelectedObject:     "none",
-	}
+	release, releaseErr := kernelRelease()
+	features := kernelFeaturesForRelease(release, releaseErr)
 	if _, err := btf.LoadKernelSpec(); err == nil {
 		features.BTFAvailable = true
 	}
@@ -40,8 +35,26 @@ func DetectKernelFeatures() KernelFeatures {
 	return features
 }
 
+func kernelFeaturesForRelease(release string, releaseErr error) KernelFeatures {
+	features := KernelFeatures{
+		Release:            release,
+		SelectedFeatureSet: kernelFeatureSetLegacy,
+		SelectedObject:     "none",
+	}
+	if releaseErr != nil {
+		features.EnhancedLoadFailure = fmt.Sprintf("detect kernel release: %v", releaseErr)
+		return features
+	}
+	features.KernelAtLeast612 = isKernelAtLeast(release, 6, 12)
+	features.KernelAtLeast71 = isKernelAtLeast(release, 7, 1)
+	return features
+}
+
 func ProbeKernelFeatures() KernelFeatures {
 	detected := DetectKernelFeatures()
+	if detected.EnhancedLoadFailure != "" {
+		return detected
+	}
 	if !detected.KernelAtLeast612 {
 		detected.EnhancedLoadFailure = ErrUnsupportedKernel.Error()
 		return detected
@@ -49,9 +62,7 @@ func ProbeKernelFeatures() KernelFeatures {
 	loadOptions := newCollectionOptions()
 	objects, features, err := loadMonitorObjects(loadOptions)
 	if err != nil {
-		if features.EnhancedLoadFailure == "" {
-			features.EnhancedLoadFailure = err.Error()
-		}
+		features.EnhancedLoadFailure = err.Error()
 		return features
 	}
 	_ = objects.Close()

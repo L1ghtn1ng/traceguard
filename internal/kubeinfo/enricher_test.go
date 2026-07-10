@@ -43,6 +43,17 @@ func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
 			}
 		})
 	}
+	insecureOriginal, err := http.NewRequest(http.MethodGet, "http://kubernetes.default.svc/api/v1/pods", nil)
+	if err != nil {
+		t.Fatalf("create insecure original request: %v", err)
+	}
+	redirect, err := http.NewRequest(http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
+	if err != nil {
+		t.Fatalf("create redirect request: %v", err)
+	}
+	if err := checkHTTPSRedirect(redirect, []*http.Request{insecureOriginal}); err == nil {
+		t.Fatal("checkHTTPSRedirect accepted an insecure original request")
+	}
 }
 
 func TestNewRejectsNonPositivePollInterval(t *testing.T) {

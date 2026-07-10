@@ -25,8 +25,8 @@ var (
 )
 
 const (
-	blocklistMaxEntries = 8192
-	endpointMaxEntries  = 8192
+	blocklistMaxEntries = 16384
+	endpointMaxEntries  = 16384
 )
 
 type domainKey struct {
@@ -903,9 +903,12 @@ func syncMapSlot[K comparable](m *ebpf.Map, next map[K]struct{}, slot uint8) err
 		if _, keep := next[key]; keep {
 			continue
 		}
-		value, remove := policySlotValue(value, false, slot)
+		newValue, remove := policySlotValue(value, false, slot)
+		if newValue == value {
+			continue
+		}
 		if !remove {
-			if err := m.Put(key, value); err != nil {
+			if err := m.Put(key, newValue); err != nil {
 				return err
 			}
 			continue

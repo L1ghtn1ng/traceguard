@@ -66,6 +66,21 @@ func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
 	}
 }
 
+func TestPolicyLimitsMatchKernelMapCapacities(t *testing.T) {
+	t.Parallel()
+
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	if got := spec.Maps["blocklist"].MaxEntries; got != blocklistMaxEntries {
+		t.Fatalf("blocklist map capacity = %d, userspace limit = %d", got, blocklistMaxEntries)
+	}
+	if got := spec.Maps["endpoint4_rules"].MaxEntries; got != endpointMaxEntries {
+		t.Fatalf("endpoint map capacity = %d, userspace limit = %d", got, endpointMaxEntries)
+	}
+}
+
 func TestDomainSuffixPolicySlotsProduceDistinctKeys(t *testing.T) {
 	t.Parallel()
 

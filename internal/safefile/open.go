@@ -29,7 +29,7 @@ func OpenAbsolute(path string, flags int, mode os.FileMode) (*os.File, error) {
 	file := os.NewFile(uintptr(fd), path)
 	if file == nil {
 		_ = unix.Close(fd)
-		return nil, io.ErrUnexpectedEOF
+		return nil, os.ErrInvalid
 	}
 	return file, nil
 }
@@ -49,7 +49,7 @@ func OpenBeneath(dirfd int, name string, flags int, mode os.FileMode) (*os.File,
 	file := os.NewFile(uintptr(fd), name)
 	if file == nil {
 		_ = unix.Close(fd)
-		return nil, io.ErrUnexpectedEOF
+		return nil, os.ErrInvalid
 	}
 	return file, nil
 }
@@ -97,7 +97,9 @@ func WriteFileAtomic(path string, payload []byte, mode os.FileMode) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("path %q must be absolute", path)
 	}
-	dirPath := filepath.Dir(filepath.Clean(path))
+	cleanPath := filepath.Clean(path)
+	dirPath := filepath.Dir(cleanPath)
+	baseName := filepath.Base(cleanPath)
 	if err := os.MkdirAll(dirPath, 0o750); err != nil {
 		return err
 	}
@@ -133,7 +135,7 @@ func WriteFileAtomic(path string, payload []byte, mode os.FileMode) error {
 		cleanup()
 		return err
 	}
-	if err := unix.Renameat(int(dir.Fd()), tempName, int(dir.Fd()), filepath.Base(path)); err != nil {
+	if err := unix.Renameat(int(dir.Fd()), tempName, int(dir.Fd()), baseName); err != nil {
 		cleanup()
 		return err
 	}

@@ -228,6 +228,23 @@ func TestCacheUsesAndClosesPidfdForRealProc(t *testing.T) {
 	}
 }
 
+func TestStoreEntryLockedClosesReplacedPidfd(t *testing.T) {
+	t.Parallel()
+
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	defer unix.Close(fds[1])
+
+	cache := NewCache(t.TempDir(), time.Minute)
+	cache.entries[100] = cacheEntry{pidfd: fds[0]}
+	cache.storeEntryLocked(100, cacheEntry{pidfd: -1})
+	if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0); err != unix.EBADF {
+		t.Fatalf("replaced pidfd error = %v, want EBADF", err)
+	}
+}
+
 func TestExtractContainerID(t *testing.T) {
 	t.Parallel()
 

@@ -113,15 +113,22 @@ func (c *Cache) Lookup(pid uint32, fallbackComm string) (Metadata, bool) {
 	c.pruneExpiredLocked(now)
 	c.evictLRULocked()
 	c.sequence++
-	c.entries[pid] = cacheEntry{
+	c.storeEntryLocked(pid, cacheEntry{
 		expiresAt: now.Add(c.ttl),
 		metadata:  metadata,
 		pidfd:     pidfd,
 		lastUsed:  c.sequence,
-	}
+	})
 	c.mu.Unlock()
 
 	return metadata, false
+}
+
+func (c *Cache) storeEntryLocked(pid uint32, entry cacheEntry) {
+	if existing, ok := c.entries[pid]; ok {
+		c.closeEntry(existing)
+	}
+	c.entries[pid] = entry
 }
 
 func (c *Cache) Invalidate(pid uint32) {

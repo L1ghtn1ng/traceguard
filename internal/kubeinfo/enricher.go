@@ -322,7 +322,7 @@ func checkHTTPSRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL == nil || req.URL.Scheme != "https" {
 		return errors.New("redirect target must use https")
 	}
-	if len(via) == 0 || via[0].URL == nil || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+	if len(via) == 0 || via[0].URL == nil || via[0].URL.Scheme != "https" || !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
 		return errors.New("redirect target must use the original origin")
 	}
 	return nil
