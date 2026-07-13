@@ -1,6 +1,7 @@
 package safefile
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,62 @@ func TestReadFileRejectsFIFOWithoutBlocking(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ReadFile blocked while opening FIFO")
+	}
+}
+
+func TestOpenAbsoluteFallsBackWhenOpenat2IsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "domains.txt")
+	if err := os.WriteFile(path, []byte("example.com\n"), 0o600); err != nil {
+		t.Fatalf("write domain file: %v", err)
+	}
+
+	file, err := openAbsolute(path, unix.O_RDONLY, 0, func(int, string, *unix.OpenHow) (int, error) {
+		return -1, unix.ENOSYS
+	})
+	if err != nil {
+		t.Fatalf("openAbsolute fallback: %v", err)
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("read fallback file: %v", err)
+	}
+	if string(payload) != "example.com\n" {
+		t.Fatalf("fallback content = %q, want domain file content", payload)
+	}
+}
+
+func TestOpenAbsoluteFallbackRejectsSymlinks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "domains.txt")
+	if err := os.WriteFile(target, []byte("example.com\n"), 0o600); err != nil {
+		t.Fatalf("write domain file: %v", err)
+	}
+	finalLink := filepath.Join(dir, "domains-link.txt")
+	if err := os.Symlink(target, finalLink); err != nil {
+		t.Fatalf("create final symlink: %v", err)
+	}
+	parentLink := filepath.Join(t.TempDir(), "parent-link")
+	if err := os.Symlink(dir, parentLink); err != nil {
+		t.Fatalf("create parent symlink: %v", err)
+	}
+
+	unsupportedOpenat2 := func(int, string, *unix.OpenHow) (int, error) {
+		return -1, unix.ENOSYS
+	}
+	for _, path := range []string{finalLink, filepath.Join(parentLink, "domains.txt")} {
+		file, err := openAbsolute(path, unix.O_RDONLY, 0, unsupportedOpenat2)
+		if file != nil {
+			_ = file.Close()
+		}
+		if err == nil {
+			t.Fatalf("openAbsolute fallback followed symlink in %q", path)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -15,20 +16,68 @@ import (
 const noSymlinks = unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS
 
 func OpenAbsolute(path string, flags int, mode os.FileMode) (*os.File, error) {
+	return openAbsolute(path, flags, mode, unix.Openat2)
+}
+
+type openat2Func func(dirfd int, path string, how *unix.OpenHow) (fd int, err error)
+
+func openAbsolute(path string, flags int, mode os.FileMode, openat2 openat2Func) (*os.File, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("path %q must be absolute", path)
 	}
-	fd, err := unix.Openat2(unix.AT_FDCWD, filepath.Clean(path), &unix.OpenHow{
+	cleaned := filepath.Clean(path)
+	fd, err := openat2(unix.AT_FDCWD, cleaned, &unix.OpenHow{
 		Flags:   uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW),
 		Mode:    uint64(mode.Perm()),
 		Resolve: noSymlinks,
 	})
+	if errors.Is(err, unix.ENOSYS) {
+		return openAbsoluteAt(cleaned, flags, mode)
+	}
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
 	if file == nil {
 		_ = unix.Close(fd)
+		return nil, os.ErrInvalid
+	}
+	return file, nil
+}
+
+// openAbsoluteAt provides the same no-symlink guarantee as OpenAbsolute on
+// kernels or syscall filters that do not implement openat2. Each path
+// component is opened relative to the preceding directory descriptor so an
+// attacker cannot swap a validated directory before the final open.
+func openAbsoluteAt(path string, flags int, mode os.FileMode) (*os.File, error) {
+	dirfd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	components := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+	if len(components) == 1 && components[0] == "" {
+		components[0] = "."
+	}
+	for index, component := range components {
+		componentFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		if index == len(components)-1 {
+			componentFlags = flags | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		}
+		nextfd, openErr := unix.Openat(dirfd, component, componentFlags, uint32(mode.Perm()))
+		if closeErr := unix.Close(dirfd); openErr == nil && closeErr != nil {
+			_ = unix.Close(nextfd)
+			return nil, closeErr
+		}
+		if openErr != nil {
+			return nil, openErr
+		}
+		dirfd = nextfd
+	}
+
+	file := os.NewFile(uintptr(dirfd), path)
+	if file == nil {
+		_ = unix.Close(dirfd)
 		return nil, os.ErrInvalid
 	}
 	return file, nil
