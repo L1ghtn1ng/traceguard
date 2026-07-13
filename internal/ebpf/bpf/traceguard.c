@@ -679,10 +679,7 @@ static __always_inline void init_endpoint4_cidr_key(struct endpoint4_cidr_key *k
 	key->data[0] = transport;
 	key->data[1] = (__u8)(port >> 8);
 	key->data[2] = (__u8)(port & 0xff);
-	key->data[3] = (__u8)(addr & 0xff);
-	key->data[4] = (__u8)((addr >> 8) & 0xff);
-	key->data[5] = (__u8)((addr >> 16) & 0xff);
-	key->data[6] = (__u8)((addr >> 24) & 0xff);
+	__builtin_memcpy(&key->data[3], &addr, sizeof(addr));
 }
 
 static __always_inline void init_endpoint6_cidr_key(struct endpoint6_cidr_key *key, const __u8 addr[16], __u16 port, __u8 transport)

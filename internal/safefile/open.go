@@ -55,7 +55,7 @@ func OpenBeneath(dirfd int, name string, flags int, mode os.FileMode) (*os.File,
 }
 
 func ReadFile(path string, maxBytes int64) ([]byte, error) {
-	file, err := OpenAbsolute(path, unix.O_RDONLY, 0)
+	file, err := OpenAbsolute(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func ReadFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func ReadFileBeneath(dirfd int, name string, maxBytes int64) ([]byte, error) {
-	file, err := OpenBeneath(dirfd, name, unix.O_RDONLY, 0)
+	file, err := OpenBeneath(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

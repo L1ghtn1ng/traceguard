@@ -1,12 +1,30 @@
 package ebpf
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 )
+
+type testCloser struct {
+	id       int
+	closed   *[]int
+	closeErr error
+}
+
+func (c *testCloser) Close() error {
+	*c.closed = append(*c.closed, c.id)
+	return c.closeErr
+}
 
 func TestParseKernelRelease(t *testing.T) {
 	t.Parallel()
@@ -152,6 +170,102 @@ func TestIsDNSHelperVerifierError(t *testing.T) {
 	}
 	if isDNSHelperVerifierError(errors.New("some other verifier error")) {
 		t.Fatal("isDNSHelperVerifierError matched unrelated error")
+	}
+}
+
+func TestVerifierErrorClassifiersInspectTypedLogs(t *testing.T) {
+	t.Parallel()
+
+	dnsErr := fmt.Errorf("field TraceDns: %w", &ebpf.VerifierError{
+		Cause: errors.New("invalid argument"),
+		Log:   []string{"program of this type cannot use helper bpf_get_current_comm#16"},
+	})
+	if !isDNSHelperVerifierError(dnsErr) {
+		t.Fatal("isDNSHelperVerifierError rejected typed verifier log")
+	}
+
+	recvmsgErr := fmt.Errorf("field TraceRecvmsg4: %w", &ebpf.VerifierError{
+		Cause: errors.New("permission denied"),
+		Log:   []string{"invalid bpf_context access off=40 size=4"},
+	})
+	if !isRecvmsgContextVerifierError(recvmsgErr) {
+		t.Fatal("isRecvmsgContextVerifierError rejected typed verifier log")
+	}
+}
+
+func TestAttachMonitorProgramsRollsBackInReverseOrder(t *testing.T) {
+	t.Parallel()
+
+	var closed []int
+	calls := 0
+	functions := attachmentFunctions{
+		attachCgroup: func(_ link.CgroupOptions) (io.Closer, error) {
+			calls++
+			if calls == 4 {
+				return nil, errors.New("attach failed")
+			}
+			return &testCloser{id: calls, closed: &closed}, nil
+		},
+		attachTracepoint: func(string, string, *ebpf.Program) (io.Closer, error) {
+			t.Fatal("tracepoint attach called after cgroup failure")
+			return nil, nil
+		},
+	}
+
+	links, err := attachMonitorPrograms("/sys/fs/cgroup", Options{}, monitorObjects{}, functions)
+	if err == nil || !strings.Contains(err.Error(), "attach failed") {
+		t.Fatalf("attachMonitorPrograms error = %v, want attach failure", err)
+	}
+	if links != nil {
+		t.Fatalf("links = %v, want nil", links)
+	}
+	if !slices.Equal(closed, []int{3, 2, 1}) {
+		t.Fatalf("close order = %v, want [3 2 1]", closed)
+	}
+}
+
+func TestCloseReaderOnCancelStopsWhenRunFinishes(t *testing.T) {
+	t.Parallel()
+
+	var closed []int
+	reader := &testCloser{id: 1, closed: &closed}
+	finished := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		closeReaderOnCancel(context.Background(), reader, finished)
+		close(done)
+	}()
+	close(finished)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("closeReaderOnCancel leaked after Run finished")
+	}
+	if len(closed) != 0 {
+		t.Fatalf("reader closed after normal Run completion: %v", closed)
+	}
+}
+
+func TestCloseReaderOnCancelClosesReader(t *testing.T) {
+	t.Parallel()
+
+	var closed []int
+	reader := &testCloser{id: 1, closed: &closed}
+	finished := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		closeReaderOnCancel(ctx, reader, finished)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("closeReaderOnCancel did not react to cancellation")
+	}
+	if !slices.Equal(closed, []int{1}) {
+		t.Fatalf("closed readers = %v, want [1]", closed)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -416,6 +417,56 @@ func TestManagerWatchWithMetadataReportsFailedRefresh(t *testing.T) {
 		}
 	default:
 		t.Fatal("WatchWithMetadata did not report failed load metadata")
+	}
+}
+
+func TestManagerWatchWithMetadataRetriesAfterReportedFailure(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = io.WriteString(w, "recovered.example\n")
+	}))
+	defer server.Close()
+
+	manager := NewManager(Config{
+		URL:           server.URL,
+		CachePath:     filepath.Join(t.TempDir(), "blocklist.txt"),
+		RefreshPeriod: time.Millisecond,
+	})
+	allowTestServerTLS(manager)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var sawFailure atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.WatchWithMetadata(ctx, func(rules Rules, _ LoadMetadata, loadErr error) error {
+			if loadErr != nil {
+				sawFailure.Store(true)
+				return nil
+			}
+			if len(rules.BlockDomains) == 1 && rules.BlockDomains[0] == "recovered.example" {
+				cancel()
+			}
+			return nil
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WatchWithMetadata returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WatchWithMetadata did not recover after a reported failure")
+	}
+	if !sawFailure.Load() {
+		t.Fatal("WatchWithMetadata did not report the initial failure")
 	}
 }
 

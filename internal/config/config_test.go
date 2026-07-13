@@ -61,6 +61,69 @@ func TestParseRejectsUnexpectedPositionalArgs(t *testing.T) {
 	}
 }
 
+func TestParseRejectsMalformedBooleanEnvironmentValues(t *testing.T) {
+	keys := []string{
+		"TRACEGUARD_BLOCK",
+		"TRACEGUARD_DRY_RUN",
+		"TRACEGUARD_EVENT_EXPORT_SPOOL",
+		"TRACEGUARD_FILE_AUDIT",
+		"TRACEGUARD_KUBERNETES_ENRICH",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard"}
+			clearTypedEnv(t)
+			t.Setenv(key, "ture")
+
+			_, err := Parse()
+			if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "boolean") {
+				t.Fatalf("Parse error = %v, want malformed %s boolean error", err, key)
+			}
+		})
+	}
+}
+
+func TestParseRejectsMalformedDurationEnvironmentValues(t *testing.T) {
+	keys := []string{
+		"TRACEGUARD_REFRESH_INTERVAL",
+		"TRACEGUARD_EVENT_SYSLOG_TIMEOUT",
+		"TRACEGUARD_PROCESS_CACHE_TTL",
+		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard"}
+			clearTypedEnv(t)
+			t.Setenv(key, "six hours")
+
+			_, err := Parse()
+			if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "duration") {
+				t.Fatalf("Parse error = %v, want malformed %s duration error", err, key)
+			}
+		})
+	}
+}
+
+func TestParseRejectsMalformedBlocklistURLs(t *testing.T) {
+	for _, value := range []string{"http://example.test/list", "https:///path", "://bad"} {
+		t.Run(value, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = []string{"traceguard", "-blocklist-url", value}
+			clearPolicyEnv(t)
+
+			_, err := Parse()
+			if err == nil || !strings.Contains(err.Error(), "blocklist-url") {
+				t.Fatalf("Parse error = %v, want malformed blocklist URL rejection", err)
+			}
+		})
+	}
+}
+
 func TestParseRejectsRemovedBlockAllFlag(t *testing.T) {
 	originalArgs := os.Args
 	t.Cleanup(func() { os.Args = originalArgs })
@@ -457,6 +520,28 @@ func TestParseLoadsDomainFileFromFlag(t *testing.T) {
 	}
 }
 
+func TestLoadDomainFileRejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	target := writeDomainFile(t, "example.com\n")
+	link := filepath.Join(t.TempDir(), "domains-link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink returned error: %v", err)
+	}
+	if _, err := loadDomainFile(link); err == nil || !strings.Contains(err.Error(), "read domain file") {
+		t.Fatalf("loadDomainFile error = %v, want symlink rejection", err)
+	}
+}
+
+func TestParseDomainEntriesEnforcesTotalEntryLimit(t *testing.T) {
+	t.Parallel()
+
+	payload := strings.Repeat("example.com\n", maxDomainFileEntries+1)
+	if _, err := parseDomainEntries(strings.NewReader(payload)); err == nil || !strings.Contains(err.Error(), "entry count exceeds") {
+		t.Fatalf("parseDomainEntries error = %v, want entry limit", err)
+	}
+}
+
 func TestParseMergesInlineAndFileBackedInputs(t *testing.T) {
 	path := writeDomainFile(t, "example.com\nbad.example.org\n")
 
@@ -645,6 +730,23 @@ func clearPolicyEnv(t *testing.T) {
 	t.Setenv("TRACEGUARD_BLOCKLIST_URL", "")
 	t.Setenv("TRACEGUARD_BLOCK_DOMAINS", "")
 	t.Setenv("TRACEGUARD_ALLOW_DOMAINS", "")
+}
+
+func clearTypedEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"TRACEGUARD_BLOCK",
+		"TRACEGUARD_DRY_RUN",
+		"TRACEGUARD_EVENT_EXPORT_SPOOL",
+		"TRACEGUARD_FILE_AUDIT",
+		"TRACEGUARD_KUBERNETES_ENRICH",
+		"TRACEGUARD_REFRESH_INTERVAL",
+		"TRACEGUARD_EVENT_SYSLOG_TIMEOUT",
+		"TRACEGUARD_PROCESS_CACHE_TTL",
+		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+	} {
+		t.Setenv(key, "")
+	}
 }
 
 func writeDomainFile(t *testing.T, content string) string {

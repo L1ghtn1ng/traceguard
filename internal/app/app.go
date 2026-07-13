@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
@@ -20,6 +17,7 @@ import (
 
 const (
 	kubernetesRefreshErrorDedupeTTL = 5 * time.Minute
+	policyRefreshErrorDedupeTTL     = 5 * time.Minute
 	fileAccessDedupeTTL             = 5 * time.Minute
 )
 
@@ -81,99 +79,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		case <-ctx.Done():
 		}
 	}
-	var endpointIndex atomic.Pointer[map[string]string]
-	var runtimePolicy atomic.Pointer[blocklist.Policy]
-	var policyMu sync.Mutex
-	applyRules := func(rules blocklist.Rules) error {
-		policyMu.Lock()
-		defer policyMu.Unlock()
-
-		if err := validateRulesForMode(cfg, rules); err != nil {
-			return err
-		}
-		blockResolved, err := blocklist.ResolveEndpoints(ctx, rules.BlockEndpoints)
-		if err != nil {
-			return fmt.Errorf("resolve block endpoint rules: %w", err)
-		}
-		allowResolved, err := blocklist.ResolveEndpoints(ctx, rules.AllowEndpoints)
-		if err != nil {
-			return fmt.Errorf("resolve allow endpoint rules: %w", err)
-		}
-		blockMonitorEndpoints := make([]ebpf.ResolverEndpoint, 0, len(blockResolved))
-		allowMonitorEndpoints := make([]ebpf.ResolverEndpoint, 0, len(allowResolved))
-		blockMonitorCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.BlockEndpointCIDRs))
-		allowMonitorCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.AllowEndpointCIDRs))
-		index := make(map[string]string, len(blockResolved)+len(allowResolved))
-		for _, endpoint := range blockResolved {
-			blockMonitorEndpoints = append(blockMonitorEndpoints, ebpf.ResolverEndpoint{
-				Transport: string(endpoint.Kind),
-				IP:        endpoint.IP,
-				Port:      endpoint.Port,
-			})
-			index[resolverIndexKey(string(endpoint.Kind), endpoint.IP.String(), endpoint.Port)] = endpoint.Host
-		}
-		for _, endpoint := range allowResolved {
-			allowMonitorEndpoints = append(allowMonitorEndpoints, ebpf.ResolverEndpoint{
-				Transport: string(endpoint.Kind),
-				IP:        endpoint.IP,
-				Port:      endpoint.Port,
-			})
-			index[resolverIndexKey(string(endpoint.Kind), endpoint.IP.String(), endpoint.Port)] = endpoint.Host
-		}
-		for _, cidr := range rules.BlockEndpointCIDRs {
-			blockMonitorCIDRs = append(blockMonitorCIDRs, ebpf.ResolverCIDR{
-				Transport: string(cidr.Kind),
-				Prefix:    cidr.Prefix,
-				Port:      cidr.Port,
-			})
-		}
-		for _, cidr := range rules.AllowEndpointCIDRs {
-			allowMonitorCIDRs = append(allowMonitorCIDRs, ebpf.ResolverCIDR{
-				Transport: string(cidr.Kind),
-				Prefix:    cidr.Prefix,
-				Port:      cidr.Port,
-			})
-		}
-		policy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
-
-		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{
-			BlockEnabled:      cfg.Block && !cfg.DryRun,
-			BlockAllDomains:   rules.BlockAllDomains,
-			BlockAllResolvers: rules.BlockAllResolvers,
-			BlockedDomains:    rules.BlockDomains,
-			AllowedDomains:    rules.AllowDomains,
-			AllowedSuffixes:   rules.AllowSuffixes,
-			BlockedEndpoints:  blockMonitorEndpoints,
-			AllowedEndpoints:  allowMonitorEndpoints,
-			BlockedCIDRs:      blockMonitorCIDRs,
-			AllowedCIDRs:      allowMonitorCIDRs,
-		}); err != nil {
-			return fmt.Errorf("commit kernel policy: %w", err)
-		}
-		endpointIndex.Store(&index)
-		runtimePolicy.Store(policy)
-		metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
-		metrics.SetPolicyRuleCounts(policyRuleCounts(rules, len(blockResolved), len(allowResolved)))
-		metrics.SetPolicyLastLoaded()
-		metrics.IncBlocklistRefresh(true)
-		recorder.InfoIfChanged("policy loaded", map[string]any{
-			"block_all_domains":    rules.BlockAllDomains,
-			"block_all_resolvers":  rules.BlockAllResolvers,
-			"block_domains":        len(rules.BlockDomains),
-			"allow_domains":        len(rules.AllowDomains),
-			"block_suffixes":       len(rules.BlockSuffixes),
-			"allow_suffixes":       len(rules.AllowSuffixes),
-			"block_endpoints":      len(blockResolved),
-			"allow_endpoints":      len(allowResolved),
-			"block_endpoint_cidrs": len(rules.BlockEndpointCIDRs),
-			"allow_endpoint_cidrs": len(rules.AllowEndpointCIDRs),
-			"source":               cfg.BlocklistURL,
-			"cache":                cfg.CachePath,
-			"dry_run":              cfg.DryRun,
-		})
-		return nil
-	}
-
+	policy := newPolicyController(ctx, cfg, monitor, recorder, metrics)
+	applyRules := policy.Apply
 	var manager *blocklist.Manager
 	if cfg.Block || cfg.DryRun || cfg.BlocklistURL != "" || len(cfg.ManualDomains) > 0 || len(cfg.ManualAllow) > 0 {
 		manager = blocklist.NewManager(blocklist.Config{
@@ -206,9 +113,15 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 						recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
 					}
 					if loadErr != nil {
-						return loadErr
+						metrics.IncBlocklistRefresh(false)
+						recorder.ErrorDedup("refresh blocklist", loadErr, nil, policyRefreshErrorDedupeTTL)
+						return nil
 					}
-					return applyRules(rules)
+					if err := applyRules(rules); err != nil {
+						metrics.IncBlocklistRefresh(false)
+						recorder.ErrorDedup("apply refreshed blocklist", err, nil, policyRefreshErrorDedupeTTL)
+					}
+					return nil
 				})
 				if err != nil {
 					metrics.IncBlocklistRefresh(false)
@@ -219,37 +132,28 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 
 	if manager != nil && reloadCh != nil {
-		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-reloadCh:
-					rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
-					metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
-					if loadMetadata.CachePersistError != "" {
-						recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
-					}
-					if err != nil {
-						metrics.IncPolicyReload("sighup", false)
-						reportErr(fmt.Errorf("reload policy: %w", err))
-						return
-					}
-					if err := applyRules(rules); err != nil {
-						metrics.IncPolicyReload("sighup", false)
-						reportErr(fmt.Errorf("apply reloaded policy: %w", err))
-						return
-					}
-					metrics.IncPolicyReload("sighup", true)
-					recorder.Info("policy reloaded", map[string]any{
-						"trigger": "sighup",
-					})
-				}
+		go runPolicyReloads(ctx, reloadCh, manager.LoadWithMetadata, applyRules, func(result policyReloadResult) {
+			metrics.IncBlocklistLoad(string(result.Metadata.Source), result.Phase != "load")
+			if result.Metadata.CachePersistError != "" {
+				recorder.Error("persist fetched blocklist cache", errors.New(result.Metadata.CachePersistError), nil)
 			}
-		}()
+			if result.Err != nil {
+				metrics.IncPolicyReload("sighup", false)
+				message := "reload policy"
+				if result.Phase == "apply" {
+					message = "apply reloaded policy"
+				}
+				recorder.Error(message, result.Err, map[string]any{"trigger": "sighup"})
+				return
+			}
+			metrics.IncPolicyReload("sighup", true)
+			recorder.Info("policy reloaded", map[string]any{"trigger": "sighup"})
+		})
 	}
 
+	monitorDone := make(chan struct{})
 	go func() {
+		defer close(monitorDone)
 		reportErr(monitor.Run(ctx, func(event ebpf.Event) {
 			if event.Kind == ebpf.EventExec {
 				processCache.Invalidate(event.PID)
@@ -353,7 +257,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			switch event.Kind {
 			case ebpf.EventDNS:
 				fields["domain"] = event.Domain
-				decision := domainDecision(&runtimePolicy, event.Domain)
+				decision := domainDecision(&policy.runtimePolicy, event.Domain)
 				if decision != blocklist.DecisionNone {
 					fields["policy"] = string(decision)
 				}
@@ -367,12 +271,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			case ebpf.EventBlocked:
 				fields["domain"] = event.Domain
 				fields["policy"] = string(blocklist.DecisionBlock)
+				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
 				recorder.InfoAt(event.Timestamp, "blocked", fields)
 			case ebpf.EventResolver:
-				fields["endpoint"] = resolverHost(&endpointIndex, event)
+				fields["endpoint"] = resolverHost(&policy.endpointIndex, event)
 				fields["address"] = event.Address
 				fields["port"] = event.Port
-				decision := endpointDecision(&runtimePolicy, event.Transport, event.Address, event.Port)
+				decision := endpointDecision(&policy.runtimePolicy, event.Transport, event.Address, event.Port)
 				if decision != blocklist.DecisionNone {
 					fields["policy"] = string(decision)
 				}
@@ -384,10 +289,11 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				}
 				recorder.InfoAt(event.Timestamp, event.Transport, fields)
 			case ebpf.EventResolverBlocked:
-				fields["endpoint"] = resolverHost(&endpointIndex, event)
+				fields["endpoint"] = resolverHost(&policy.endpointIndex, event)
 				fields["address"] = event.Address
 				fields["port"] = event.Port
 				fields["policy"] = string(blocklist.DecisionBlock)
+				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
 				recorder.InfoAt(event.Timestamp, "blocked-"+event.Transport, fields)
 			case ebpf.EventExec:
 				fields["filename"] = event.Filename
@@ -412,205 +318,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		}, metrics))
 	}()
 
+	var runErr error
 	select {
 	case err := <-errCh:
-		cancel()
-		return err
+		runErr = err
 	case <-ctx.Done():
-		return nil
 	}
-}
-
-func policyMode(cfg config.Config) string {
-	switch {
-	case cfg.Block && !cfg.DryRun:
-		return "block"
-	case cfg.DryRun:
-		return "dry_run"
-	default:
-		return "observe"
-	}
-}
-
-func policyRuleCounts(rules blocklist.Rules, resolvedBlockEndpoints, resolvedAllowEndpoints int) map[string]int {
-	return map[string]int{
-		"block|domain":        len(rules.BlockDomains),
-		"allow|domain":        len(rules.AllowDomains),
-		"block|suffix":        len(rules.BlockSuffixes),
-		"allow|suffix":        len(rules.AllowSuffixes),
-		"block|endpoint":      resolvedBlockEndpoints,
-		"allow|endpoint":      resolvedAllowEndpoints,
-		"block|endpoint_cidr": len(rules.BlockEndpointCIDRs),
-		"allow|endpoint_cidr": len(rules.AllowEndpointCIDRs),
-	}
-}
-
-func IsPermissionError(err error) bool {
-	return errors.Is(err, ebpf.ErrInsufficientPrivileges)
-}
-
-func validateRulesForMode(cfg config.Config, rules blocklist.Rules) error {
-	if cfg.Block && !cfg.DryRun && len(rules.BlockSuffixes) > 0 {
-		return fmt.Errorf("suffix and wildcard block domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for block suffix policies")
-	}
-	return nil
-}
-
-func resolverHost(index *atomic.Pointer[map[string]string], event ebpf.Event) string {
-	current := index.Load()
-	if current == nil {
-		return ""
-	}
-	if host, ok := (*current)[resolverIndexKey(event.Transport, event.Address, event.Port)]; ok {
-		return host
-	}
-	return ""
-}
-
-func resolverIndexKey(transport, address string, port uint16) string {
-	return fmt.Sprintf("%s|%s|%d", transport, address, port)
-}
-
-func appendSocketFields(fields map[string]any, event ebpf.Event, process processinfo.Metadata) {
-	if !isSocketAwareEvent(event.Kind) {
-		return
-	}
-	if attribution := eventAttribution(event, process); attribution != "" {
-		fields["attribution"] = attribution
-	}
-	if event.SocketHook != "" {
-		fields["socket_hook"] = event.SocketHook
-	}
-	if event.SocketFamily != "" {
-		fields["socket_family"] = event.SocketFamily
-	}
-	if event.SocketProtocol != "" {
-		fields["socket_protocol"] = event.SocketProtocol
-	}
-}
-
-func appendKernelFeatureFields(fields map[string]any, event ebpf.Event) {
-	if event.KernelFeatureSet != "" {
-		fields["kernel_feature_set"] = event.KernelFeatureSet
-	}
-	if event.EventSource != "" {
-		fields["event_source"] = event.EventSource
-	}
-	if event.UIDSource != "" {
-		fields["uid_source"] = event.UIDSource
-		fields["kernel_uid"] = event.KernelUID
-	}
-	if event.CgroupID != 0 {
-		fields["cgroup_id"] = event.CgroupID
-	}
-	if event.SocketCookie != 0 {
-		fields["socket_cookie"] = event.SocketCookie
-	}
-}
-
-func resolveExecutablePath(event ebpf.Event, process processinfo.Metadata) string {
-	if event.PID == 0 {
-		return ""
-	}
-	if event.Kind == ebpf.EventExec && event.Filename != "" {
-		return event.Filename
-	}
-	if process.Exe != "" {
-		return process.Exe
-	}
-	if len(process.Cmdline) > 0 && filepath.IsAbs(process.Cmdline[0]) {
-		return process.Cmdline[0]
-	}
-	return ""
-}
-
-func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {
-	if isSocketAwareEvent(event.Kind) && process.Source == processinfo.SourceProc {
-		return processinfo.SourceProc
-	}
-	return event.Attribution
-}
-
-func isSocketAwareEvent(kind uint32) bool {
-	switch kind {
-	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked, ebpf.EventConnection:
-		return true
-	default:
-		return false
-	}
-}
-
-func domainDecision(policy *atomic.Pointer[blocklist.Policy], domain string) blocklist.Decision {
-	current := policy.Load()
-	if current == nil {
-		return blocklist.DecisionNone
-	}
-	return current.DomainDecision(domain)
-}
-
-func endpointDecision(policy *atomic.Pointer[blocklist.Policy], transport, address string, port uint16) blocklist.Decision {
-	current := policy.Load()
-	if current == nil {
-		return blocklist.DecisionNone
-	}
-	return current.EndpointDecision(transport, address, port)
-}
-
-func eventKindName(kind uint32) string {
-	switch kind {
-	case ebpf.EventDNS:
-		return "dns"
-	case ebpf.EventBlocked:
-		return "blocked"
-	case ebpf.EventExec:
-		return "exec"
-	case ebpf.EventResolver:
-		return "resolver"
-	case ebpf.EventResolverBlocked:
-		return "resolver_blocked"
-	case ebpf.EventConnection:
-		return "connection"
-	case ebpf.EventFileAccess:
-		return "file_access"
-	default:
-		return "unknown"
-	}
-}
-
-func fileAccessName(flags uint32) string {
-	const (
-		unknownFlags = 1 << 31
-		oAccMode     = 0x3
-		oWritable    = 0x1
-		oReadWrite   = 0x2
-		oCreat       = 0x40
-		oTrunc       = 0x200
-	)
-	if flags&unknownFlags != 0 {
-		return "unknown"
-	}
-	if flags&(oCreat|oTrunc) != 0 {
-		return "write"
-	}
-	switch flags & oAccMode {
-	case oWritable, oReadWrite:
-		return "write"
-	default:
-		return "read"
-	}
-}
-
-func fileAuditEventName(flags uint32) string {
-	if fileCreated(flags) {
-		return "file_created"
-	}
-	return "file_access"
-}
-
-func fileCreated(flags uint32) bool {
-	const (
-		unknownFlags = 1 << 31
-		oCreat       = 0x40
-	)
-	return flags&unknownFlags == 0 && flags&oCreat != 0
+	cancel()
+	<-monitorDone
+	return runErr
 }

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/L1ghtn1ng/traceguard/internal/safefile"
 	"golang.org/x/sys/unix"
 )
+
+const symlinkAllowedLogDirectory = "/var/log/traceguard"
 
 type Options struct {
 	MaxSizeBytes int64
@@ -142,7 +145,13 @@ func (r *RotatingFile) ensureDirectory() error {
 	if err := os.MkdirAll(r.dir, r.dirMode); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
-	dir, err := safefile.OpenAbsolute(r.dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	var dir *os.File
+	var err error
+	if allowsLogDirectorySymlink(r.dir) {
+		dir, err = openDirectoryAllowFinalSymlink(r.dir)
+	} else {
+		dir, err = safefile.OpenAbsolute(r.dir, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	}
 	if err != nil {
 		return fmt.Errorf("log directory %q must not traverse symlinks: %w", r.dir, err)
 	}
@@ -157,6 +166,46 @@ func (r *RotatingFile) ensureDirectory() error {
 	}
 	r.dirFile = dir
 	return nil
+}
+
+func allowsLogDirectorySymlink(path string) bool {
+	return filepath.Clean(path) == symlinkAllowedLogDirectory
+}
+
+func openDirectoryAllowFinalSymlink(path string) (*os.File, error) {
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		return nil, fmt.Errorf("path %q must be absolute", path)
+	}
+
+	dir, err := os.Open("/")
+	if err != nil {
+		return nil, err
+	}
+	components := strings.Split(strings.TrimPrefix(cleaned, string(filepath.Separator)), string(filepath.Separator))
+	for idx, component := range components {
+		flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+		if idx != len(components)-1 {
+			flags |= unix.O_NOFOLLOW
+		}
+		fd, openErr := unix.Openat(int(dir.Fd()), component, flags, 0)
+		if openErr != nil {
+			_ = dir.Close()
+			return nil, openErr
+		}
+		next := os.NewFile(uintptr(fd), component)
+		if next == nil {
+			_ = unix.Close(fd)
+			_ = dir.Close()
+			return nil, os.ErrInvalid
+		}
+		if closeErr := dir.Close(); closeErr != nil {
+			_ = next.Close()
+			return nil, closeErr
+		}
+		dir = next
+	}
+	return dir, nil
 }
 
 func (r *RotatingFile) rotateLocked() error {
@@ -201,9 +250,17 @@ func rotatedName(base string, idx int) string {
 }
 
 func openFileNoFollowAt(dirfd int, name, displayPath string, mode os.FileMode) (*os.File, error) {
-	file, err := safefile.OpenBeneath(dirfd, name, unix.O_APPEND|unix.O_CREAT|unix.O_WRONLY, mode)
+	if !filepath.IsLocal(name) {
+		return nil, fmt.Errorf("open log file %q: path must be local", displayPath)
+	}
+	fd, err := unix.Openat(dirfd, name, unix.O_APPEND|unix.O_CLOEXEC|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_WRONLY, uint32(mode.Perm()))
 	if err != nil {
 		return nil, fmt.Errorf("open log file %q: %w", displayPath, err)
+	}
+	file := os.NewFile(uintptr(fd), displayPath)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open log file %q: %w", displayPath, os.ErrInvalid)
 	}
 
 	var st unix.Stat_t

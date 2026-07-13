@@ -47,6 +47,10 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 
 	rendered := registry.Render()
 	checks := []string{
+		`# HELP traceguard_events_total TraceGuard events total.`,
+		`# TYPE traceguard_events_total counter`,
+		`# HELP traceguard_policy_domains TraceGuard policy domains.`,
+		`# TYPE traceguard_policy_domains gauge`,
 		`traceguard_blocklist_load_total{source="remote",status="success"} 1`,
 		`traceguard_ebpf_attached_programs 14`,
 		`traceguard_ebpf_read_errors_total 1`,
@@ -79,6 +83,21 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+}
+
+func TestMetricsServerUsesBoundedTimeouts(t *testing.T) {
+	t.Parallel()
+
+	server := newHTTPServer("127.0.0.1:0", http.NotFoundHandler())
+	if server.ReadHeaderTimeout <= 0 {
+		t.Fatal("ReadHeaderTimeout is not bounded")
+	}
+	if server.WriteTimeout <= 0 {
+		t.Fatal("WriteTimeout is not bounded")
+	}
+	if server.IdleTimeout <= 0 {
+		t.Fatal("IdleTimeout is not bounded")
 	}
 }
 

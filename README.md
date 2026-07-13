@@ -26,7 +26,7 @@ In block mode, TraceGuard caches the remote blocklist for six hours by default a
 
 ## Design
 
-TraceGuard uses two eBPF programs:
+TraceGuard uses a set of eBPF programs:
 
 - `cgroup_skb/egress` parses outbound UDP and TCP DNS packets on port 53, emits DNS telemetry, and drops matching queries when blocking is enabled
 - `cgroup/connect4` and `cgroup/connect6` observe resolver endpoint connections for DoT and configured DoH endpoints and block matching endpoints when blocking is enabled
@@ -83,11 +83,12 @@ Notes:
 - common IPv6 extension headers are parsed before DNS inspection
 - in block mode, segmented TCP DNS queries, fragmented IPv6 DNS packets, and unparseable IPv4 or IPv6 UDP DNS payloads are denied instead of allowed
 - kernel policy refreshes are published atomically, so packet and connection hooks see either the previous complete policy or the next complete policy
+- failed scheduled or SIGHUP-triggered policy refreshes leave the last successfully committed policy active and are retried without stopping TraceGuard
 - event timestamps represent kernel event occurrence time and are converted from `CLOCK_BOOTTIME` to UTC wall time in userspace
 - `/health` returns HTTP 503 after a critical local event sink write failure and recovers after that sink writes successfully; enforcement continues while unhealthy
 - exact domain policies and suffix allow policies are enforceable in kernel block mode; suffix block policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
 - in enforced block mode with `*`, exact domain rules, suffix allow domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions
-- enforced suffix allow matching checks up to 16 DNS label boundaries and 64 wire-format bytes per suffix candidate to stay within kernel verifier limits; exact allow rules are unaffected
+- enforced suffix allow matching checks up to 16 leading DNS label boundaries and 64 wire-format bytes per suffix candidate to stay within kernel verifier limits; configured allow suffixes over the 64-byte wire limit are rejected in enforced block mode, and exact allow rules are unaffected
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and durable retry spooling
 - on Linux 7.1 or newer, TraceGuard automatically tries an enhanced telemetry eBPF object that adds event source and kernel feature-set fields; if the kernel or verifier rejects that object, TraceGuard falls back to the standard object without user configuration

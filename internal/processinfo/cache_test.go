@@ -75,6 +75,28 @@ func TestCacheLookupReadsProcMetadata(t *testing.T) {
 	}
 }
 
+func TestCacheLookupCapsRetainedCmdline(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeProcEntry(t, root, 100, "status", "Name:\thuge-argv\nPPid:\t0\nUid:\t1000\t1000\t1000\t1000\n")
+	writeProcEntry(t, root, 100, "stat", statWithStartTime("huge-argv", 1000))
+	writeProcEntry(t, root, 100, "cmdline", "/usr/bin/huge-argv\x00"+strings.Repeat("x", maxProcessCmdlineBytes*2)+"\x00")
+
+	cache := NewCache(root, time.Minute)
+	metadata, _ := cache.Lookup(100, "fallback")
+	retained := 0
+	for _, arg := range metadata.Cmdline {
+		retained += len(arg)
+	}
+	if retained > maxProcessCmdlineBytes {
+		t.Fatalf("retained cmdline bytes = %d, want at most %d", retained, maxProcessCmdlineBytes)
+	}
+	if retained == 0 {
+		t.Fatal("capped cmdline discarded all metadata")
+	}
+}
+
 func TestCacheLookupKeepsFallbackWithoutStatusName(t *testing.T) {
 	t.Parallel()
 

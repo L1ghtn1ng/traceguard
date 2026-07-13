@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -189,6 +190,39 @@ func TestEnricherIndexesPodsByUID(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("Render() missing %q in %q", want, rendered)
 		}
+	}
+}
+
+func TestFetchPodsRejectsRepeatedContinuationToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"metadata":{"continue":"repeat"},"items":[]}`))
+	}))
+	defer server.Close()
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("WriteFile token: %v", err)
+	}
+	enricher := &Enricher{client: server.Client(), apiURL: server.URL, tokenPath: tokenPath}
+
+	_, err := enricher.fetchPods(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "repeated continuation token") {
+		t.Fatalf("fetchPods error = %v, want repeated continuation token", err)
+	}
+}
+
+func TestAddPodPageEnforcesCumulativePodLimit(t *testing.T) {
+	t.Parallel()
+
+	pods := make(map[string]Metadata, maxKubernetesPods)
+	for index := range maxKubernetesPods {
+		pods[fmt.Sprintf("pod-%d", index)] = Metadata{}
+	}
+	var item podItem
+	item.Metadata.UID = "one-too-many"
+	if err := addPodPage(pods, []podItem{item}); err == nil || !strings.Contains(err.Error(), "pod count exceeds") {
+		t.Fatalf("addPodPage error = %v, want pod count limit", err)
 	}
 }
 

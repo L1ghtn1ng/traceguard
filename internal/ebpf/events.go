@@ -102,8 +102,12 @@ type Event struct {
 }
 
 func decodeEvent(record []byte) (Event, error) {
+	return decodeEventWithByteOrder(record, binary.NativeEndian)
+}
+
+func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event, error) {
 	var raw rawEvent
-	if err := binary.Read(bytes.NewReader(record), binary.LittleEndian, &raw); err != nil {
+	if err := binary.Read(bytes.NewReader(record), byteOrder, &raw); err != nil {
 		return Event{}, fmt.Errorf("decode raw event: %w", err)
 	}
 	if raw.TimestampNS > math.MaxInt64 {
@@ -222,7 +226,7 @@ func zeroTerminated(data []byte) string {
 	if idx == -1 {
 		idx = len(data)
 	}
-	return strings.TrimSpace(string(data[:idx]))
+	return string(data[:idx])
 }
 
 func transportName(proto uint8) string {

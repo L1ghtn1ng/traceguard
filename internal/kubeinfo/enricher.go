@@ -20,7 +20,11 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
-const podListPageSize = 500
+const (
+	podListPageSize       = 500
+	maxKubernetesPodPages = 1000
+	maxKubernetesPods     = 10000
+)
 
 type Config struct {
 	APIURL    string
@@ -199,34 +203,50 @@ func (e *Enricher) run(ctx context.Context) {
 func (e *Enricher) fetchPods(ctx context.Context) (map[string]Metadata, error) {
 	pods := make(map[string]Metadata)
 	continueToken := ""
-	for {
+	seenTokens := make(map[string]struct{})
+	for pageNumber := 1; pageNumber <= maxKubernetesPodPages; pageNumber++ {
 		page, nextToken, err := e.fetchPodsPage(ctx, continueToken)
 		if err != nil {
 			return nil, err
 		}
-		for _, item := range page {
-			uid := strings.TrimSpace(item.Metadata.UID)
-			if uid == "" {
-				continue
-			}
-			pods[uid] = Metadata{
-				Namespace:      strings.TrimSpace(item.Metadata.Namespace),
-				PodName:        strings.TrimSpace(item.Metadata.Name),
-				NodeName:       strings.TrimSpace(item.Spec.NodeName),
-				PodIP:          strings.TrimSpace(item.Status.PodIP),
-				ServiceAccount: strings.TrimSpace(item.Spec.ServiceAccountName),
-				OwnerKind:      ownerKind(item.Metadata.OwnerReferences),
-				OwnerName:      ownerName(item.Metadata.OwnerReferences),
-				App:            appLabel(item.Metadata.Labels),
-				Containers:     collectContainers(item.Spec.Containers),
-				Images:         collectImages(item.Spec.Containers),
-			}
+		if err := addPodPage(pods, page); err != nil {
+			return nil, err
 		}
 		if nextToken == "" {
 			return pods, nil
 		}
+		if _, exists := seenTokens[nextToken]; exists {
+			return nil, fmt.Errorf("kubernetes pod pagination repeated continuation token %q", nextToken)
+		}
+		seenTokens[nextToken] = struct{}{}
 		continueToken = nextToken
 	}
+	return nil, fmt.Errorf("kubernetes pod pagination exceeds %d pages", maxKubernetesPodPages)
+}
+
+func addPodPage(pods map[string]Metadata, page []podItem) error {
+	for _, item := range page {
+		uid := strings.TrimSpace(item.Metadata.UID)
+		if uid == "" {
+			continue
+		}
+		if _, exists := pods[uid]; !exists && len(pods) >= maxKubernetesPods {
+			return fmt.Errorf("kubernetes pod count exceeds %d", maxKubernetesPods)
+		}
+		pods[uid] = Metadata{
+			Namespace:      strings.TrimSpace(item.Metadata.Namespace),
+			PodName:        strings.TrimSpace(item.Metadata.Name),
+			NodeName:       strings.TrimSpace(item.Spec.NodeName),
+			PodIP:          strings.TrimSpace(item.Status.PodIP),
+			ServiceAccount: strings.TrimSpace(item.Spec.ServiceAccountName),
+			OwnerKind:      ownerKind(item.Metadata.OwnerReferences),
+			OwnerName:      ownerName(item.Metadata.OwnerReferences),
+			App:            appLabel(item.Metadata.Labels),
+			Containers:     collectContainers(item.Spec.Containers),
+			Images:         collectImages(item.Spec.Containers),
+		}
+	}
+	return nil
 }
 
 func (e *Enricher) fetchPodsPage(ctx context.Context, continueToken string) ([]podItem, string, error) {

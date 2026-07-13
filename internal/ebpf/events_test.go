@@ -186,6 +186,39 @@ func TestEncodeDomainSuffixKey(t *testing.T) {
 	}
 }
 
+func TestValidateEnforcedSuffixKeyRejectsUnsupportedWireLength(t *testing.T) {
+	t.Parallel()
+
+	tooLong, err := encodeDomainSuffixKey(strings.Repeat("a", 63) + ".com")
+	if err != nil {
+		t.Fatalf("encodeDomainSuffixKey returned error: %v", err)
+	}
+	if err := validateEnforcedSuffixKey(tooLong); err == nil || !strings.Contains(err.Error(), "exceeds enforced suffix limit") {
+		t.Fatalf("validateEnforcedSuffixKey error = %v, want enforced-limit error", err)
+	}
+
+	manyLabels, err := encodeDomainSuffixKey(strings.Repeat("a.", 19) + "a")
+	if err != nil {
+		t.Fatalf("encodeDomainSuffixKey returned error: %v", err)
+	}
+	if err := validateEnforcedSuffixKey(manyLabels); err != nil {
+		t.Fatalf("validateEnforcedSuffixKey rejected a short wire name with many labels: %v", err)
+	}
+}
+
+func TestEncodeEndpoint4KeyUsesNativeByteOrder(t *testing.T) {
+	t.Parallel()
+
+	ip := []byte{1, 2, 3, 4}
+	key := encodeEndpoint4Key(ip, 853, 3)
+	if got := binary.NativeEndian.AppendUint32(nil, key.Addr); !bytes.Equal(got, ip) {
+		t.Fatalf("serialized endpoint address = %v, want %v", got, ip)
+	}
+	if key.Port != 853 || key.Transport != 3 {
+		t.Fatalf("endpoint metadata = port:%d transport:%d", key.Port, key.Transport)
+	}
+}
+
 func TestDecodeQNameRejectsMalformedWireNames(t *testing.T) {
 	t.Parallel()
 
@@ -260,7 +293,7 @@ func TestDecodeEventSocketMetadata(t *testing.T) {
 	copy(raw.Comm[:], "curl")
 
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
 		t.Fatalf("binary.Write returned error: %v", err)
 	}
 
@@ -279,6 +312,40 @@ func TestDecodeEventSocketMetadata(t *testing.T) {
 	}
 	if event.SocketProtocol != "udp" {
 		t.Fatalf("SocketProtocol = %q, want udp", event.SocketProtocol)
+	}
+}
+
+func TestDecodeEventSupportsBigEndianRecords(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{
+		TimestampNS:  123,
+		Kind:         EventConnection,
+		PID:          0x01020304,
+		Port:         0x1234,
+		LocalPort:    0x5678,
+		CgroupID:     0x0102030405060708,
+		SocketCookie: 0x1112131415161718,
+	}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.BigEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
+	}
+
+	event, err := decodeEventWithByteOrder(buf.Bytes(), binary.BigEndian)
+	if err != nil {
+		t.Fatalf("decodeEventWithByteOrder returned error: %v", err)
+	}
+	if event.PID != raw.PID || event.Port != raw.Port || event.LocalPort != raw.LocalPort || event.CgroupID != raw.CgroupID || event.SocketCookie != raw.SocketCookie {
+		t.Fatalf("decoded multi-byte fields = %#v, want pid=%#x port=%#x local_port=%#x cgroup=%#x cookie=%#x", event, raw.PID, raw.Port, raw.LocalPort, raw.CgroupID, raw.SocketCookie)
+	}
+}
+
+func TestZeroTerminatedPreservesWhitespace(t *testing.T) {
+	t.Parallel()
+
+	if got, want := zeroTerminated([]byte(" report \x00ignored")), " report "; got != want {
+		t.Fatalf("zeroTerminated = %q, want %q", got, want)
 	}
 }
 
@@ -301,7 +368,7 @@ func TestDecodeConnectionEvent(t *testing.T) {
 	copy(raw.Comm[:], "nginx")
 
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
 		t.Fatalf("binary.Write returned error: %v", err)
 	}
 
@@ -341,7 +408,7 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	copy(raw.Filename[:], "/etc/passwd")
 
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
 		t.Fatalf("binary.Write returned error: %v", err)
 	}
 
@@ -376,7 +443,7 @@ func TestDecodeKernelFeatureMetadata(t *testing.T) {
 	raw.SocketCookie = 67890
 
 	var buf bytes.Buffer
-	if err := binary.Write(&buf, binary.LittleEndian, raw); err != nil {
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
 		t.Fatalf("binary.Write returned error: %v", err)
 	}
 

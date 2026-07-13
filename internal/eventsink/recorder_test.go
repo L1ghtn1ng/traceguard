@@ -706,6 +706,46 @@ func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	}
 }
 
+func TestExportSinkKeepsLateEventsUntilClose(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan []byte, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- body
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sink, err := newExportSink(ctx, Config{ExportURL: server.URL}, telemetry.NewRegistry())
+	if err != nil {
+		t.Fatalf("newExportSink returned error: %v", err)
+	}
+	if transport, ok := sink.client.Transport.(*http.Transport); ok {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
+		}
+	}
+
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "late"})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	select {
+	case payload := <-requests:
+		if !bytes.Contains(payload, []byte(`"message":"late"`)) {
+			t.Fatalf("export payload = %s, want late event", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for late export event")
+	}
+}
+
 func TestExportRedirectsStayOnOriginalOrigin(t *testing.T) {
 	t.Parallel()
 

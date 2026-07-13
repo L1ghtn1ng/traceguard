@@ -25,86 +25,38 @@ for dir in "${include_dirs[@]}"; do
   cflags+=("-I${dir}")
 done
 
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardLinux71 \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
-  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
-  -target bpfel
+generate_variant() {
+  local ident=$1
+  shift
 
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardLinux71DNSCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
-  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
-  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
-  -target bpfel
+  go run github.com/cilium/ebpf/cmd/bpf2go \
+    -no-strip \
+    -target bpfel,bpfeb \
+    -cc clang \
+    -cflags "${cflags[*]}" \
+    "$ident" \
+    "$script_dir/bpf/traceguard.c" \
+    -- \
+    "$@"
+}
 
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardLinux71RecvmsgCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
+generate_variant traceguardLinux71 \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1
+generate_variant traceguardLinux71DNSCompat \
   -DTRACEGUARD_LINUX71_TELEMETRY=1 \
-  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
-  -target bpfel
-
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardLinux71DNSRecvmsgCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1
+generate_variant traceguardLinux71RecvmsgCompat \
+  -DTRACEGUARD_LINUX71_TELEMETRY=1 \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1
+generate_variant traceguardLinux71DNSRecvmsgCompat \
   -DTRACEGUARD_LINUX71_TELEMETRY=1 \
   -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
-  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
-  -target bpfel
-
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguard \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
-  -target bpfel
-
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardDNSCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1
+generate_variant traceguard
+generate_variant traceguardDNSCompat \
+  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1
+generate_variant traceguardRecvmsgCompat \
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1
+generate_variant traceguardDNSRecvmsgCompat \
   -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
-  -target bpfel
-
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardRecvmsgCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
-  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
-  -target bpfel
-
-go run github.com/cilium/ebpf/cmd/bpf2go \
-  -no-strip \
-  -cc clang \
-  -cflags "${cflags[*]}" \
-  traceguardDNSRecvmsgCompat \
-  "$script_dir/bpf/traceguard.c" \
-  -- \
-  -DTRACEGUARD_DNS_NO_CURRENT_COMM=1 \
-  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1 \
-  -target bpfel
+  -DTRACEGUARD_CONNECTION_NO_RECVMSG=1

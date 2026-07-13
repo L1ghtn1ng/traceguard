@@ -2,6 +2,14 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [1.5.0] - 2026-07-10
+
+### Fixed
+
+- Restored logging when `/var/log/traceguard` is a symlink by allowing only that directory's final path component to be followed, while continuing to reject symlinked parent directories, custom log directories, and log files.
+- Removed the rotating logger's dependency on `openat2` for descriptor-relative log-file creation, preventing startup failures on systems where the syscall is unavailable while retaining `O_NOFOLLOW` protection.
+- Big refactor
+
 ## [1.4.0] - 2026-07-10
 
 ### Added

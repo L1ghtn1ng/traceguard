@@ -93,6 +93,76 @@ func TestRotatingFileRejectsSymlinkedDirectory(t *testing.T) {
 	}
 }
 
+func TestSymlinkAllowedOnlyForDefaultLogDirectory(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/var/log/traceguard", want: true},
+		{path: "/var/log/traceguard/", want: true},
+		{path: "/var/log/traceguard-extra", want: false},
+		{path: "/var/log/traceguard/subdirectory", want: false},
+		{path: "/tmp/traceguard", want: false},
+	}
+	for _, test := range tests {
+		if got := allowsLogDirectorySymlink(test.path); got != test.want {
+			t.Errorf("allowsLogDirectorySymlink(%q) = %t, want %t", test.path, got, test.want)
+		}
+	}
+}
+
+func TestOpenDirectoryAllowsFinalSymlink(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "logs-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink directory: %v", err)
+	}
+
+	dir, err := openDirectoryAllowFinalSymlink(link)
+	if err != nil {
+		t.Fatalf("openDirectoryAllowFinalSymlink returned error: %v", err)
+	}
+	defer dir.Close()
+	info, err := dir.Stat()
+	if err != nil {
+		t.Fatalf("stat opened directory: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("opened final symlink target is not a directory")
+	}
+}
+
+func TestOpenDirectoryRejectsParentSymlink(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	logs := filepath.Join(target, "logs")
+	if err := os.MkdirAll(logs, 0o755); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	link := filepath.Join(root, "parent-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink parent: %v", err)
+	}
+
+	dir, err := openDirectoryAllowFinalSymlink(filepath.Join(link, "logs"))
+	if dir != nil {
+		_ = dir.Close()
+	}
+	if err == nil {
+		t.Fatal("openDirectoryAllowFinalSymlink accepted a parent symlink")
+	}
+}
+
 func TestRotatingFileDoesNotReopenAfterClose(t *testing.T) {
 	t.Parallel()
 

@@ -1,16 +1,97 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
+
+func TestRunPolicyReloadsContinuesAfterLoadAndApplyFailures(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reloadCh := make(chan struct{}, 3)
+	reloadCh <- struct{}{}
+	reloadCh <- struct{}{}
+	reloadCh <- struct{}{}
+
+	var loads atomic.Int32
+	load := func(context.Context) (blocklist.Rules, blocklist.LoadMetadata, error) {
+		call := loads.Add(1)
+		metadata := blocklist.LoadMetadata{Source: blocklist.LoadSourceRemote}
+		if call == 1 {
+			return blocklist.Rules{}, metadata, errors.New("load failed")
+		}
+		return blocklist.Rules{BlockDomains: []string{"example.com"}}, metadata, nil
+	}
+	var applies atomic.Int32
+	apply := func(blocklist.Rules) error {
+		if applies.Add(1) == 1 {
+			return errors.New("apply failed")
+		}
+		return nil
+	}
+	reports := make(chan policyReloadResult, 3)
+	done := make(chan struct{})
+	go func() {
+		runPolicyReloads(ctx, reloadCh, load, apply, func(result policyReloadResult) {
+			reports <- result
+			if result.Phase == "complete" {
+				cancel()
+			}
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runPolicyReloads did not continue through failures")
+	}
+	close(reports)
+	var phases []string
+	for result := range reports {
+		phases = append(phases, result.Phase)
+	}
+	if !reflect.DeepEqual(phases, []string{"load", "apply", "complete"}) {
+		t.Fatalf("reload phases = %v, want [load apply complete]", phases)
+	}
+}
+
+func TestRunPolicyReloadsStopsWhenReloadChannelCloses(t *testing.T) {
+	t.Parallel()
+
+	reloadCh := make(chan struct{})
+	close(reloadCh)
+	done := make(chan struct{})
+	go func() {
+		runPolicyReloads(t.Context(), reloadCh,
+			func(context.Context) (blocklist.Rules, blocklist.LoadMetadata, error) {
+				t.Error("load called after reload channel closed")
+				return blocklist.Rules{}, blocklist.LoadMetadata{}, nil
+			},
+			func(blocklist.Rules) error { return nil },
+			func(policyReloadResult) {},
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runPolicyReloads did not stop after reload channel closed")
+	}
+}
 
 func TestIsPermissionErrorMatchesWrappedEBPFError(t *testing.T) {
 	t.Parallel()

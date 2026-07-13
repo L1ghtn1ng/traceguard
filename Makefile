@@ -7,10 +7,13 @@ CGO_LDFLAGS ?= -flto -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pie
 GO_BUILD_FLAGS ?= -trimpath -buildmode=pie
 GO_LDFLAGS ?= -s -w -linkmode=external -extldflags "$(CGO_LDFLAGS)"
 
-.PHONY: generate test test-ebpf test-ebpf-c build snapshot tidy
+.PHONY: generate fix test test-ebpf test-ebpf-c build snapshot tidy
 
 generate:
 	$(GO) generate ./internal/ebpf
+
+fix:
+	$(GO) fix ./...
 
 test:
 	$(GO) test ./...

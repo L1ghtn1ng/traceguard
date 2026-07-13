@@ -72,15 +72,12 @@ func run() int {
 	reloadSignalCh := make(chan os.Signal, 1)
 	reloadCh := make(chan struct{}, 1)
 	signal.Notify(reloadSignalCh, syscall.SIGHUP)
-	defer signal.Stop(reloadSignalCh)
-	go func() {
-		for range reloadSignalCh {
-			select {
-			case reloadCh <- struct{}{}:
-			default:
-			}
-		}
+	reloadForwardStop := make(chan struct{})
+	defer func() {
+		signal.Stop(reloadSignalCh)
+		close(reloadForwardStop)
 	}()
+	go forwardReloadSignals(reloadForwardStop, reloadSignalCh, reloadCh)
 
 	metrics := telemetry.NewRegistry()
 	if err := metrics.StartServer(ctx, cfg.MetricsAddr, logger); err != nil {
@@ -115,4 +112,21 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+func forwardReloadSignals(stop <-chan struct{}, signals <-chan os.Signal, reloadCh chan<- struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case _, ok := <-signals:
+			if !ok {
+				return
+			}
+			select {
+			case reloadCh <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
