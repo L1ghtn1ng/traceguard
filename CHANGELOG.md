@@ -2,6 +2,12 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [1.5.1] - 2026-07-13
+
+### Fixed
+
+- Restored block and allow domain-file loading on systems where `openat2` is unavailable by falling back to descriptor-relative `openat` path traversal while continuing to reject symlinked path components.
+
 ## [1.5.0] - 2026-07-13
 
 ### Fixed
