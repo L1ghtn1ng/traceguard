@@ -2,7 +2,7 @@
 
 All notable changes to TraceGuard are documented in this file.
 
-## [1.5.0] - 2026-07-10
+## [1.5.0] - 2026-07-13
 
 ### Fixed
 
