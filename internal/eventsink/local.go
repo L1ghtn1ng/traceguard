@@ -2,8 +2,10 @@ package eventsink
 
 import (
 	"bufio"
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -173,7 +175,12 @@ func (d *domainSink) loadSeen(path string, backups int) error {
 	for idx := backups; idx >= 0; idx-- {
 		current := path
 		if idx > 0 {
-			current = fmt.Sprintf("%s.%d", path, idx)
+			// Read legacy uncompressed backups as well so an upgrade does not
+			// forget domains until those backups age out.
+			if err := d.loadSeenFile(fmt.Sprintf("%s.%d", path, idx)); err != nil {
+				return err
+			}
+			current = fmt.Sprintf("%s.%d.gz", path, idx)
 		}
 		if err := d.loadSeenFile(current); err != nil {
 			return err
@@ -203,7 +210,18 @@ func (d *domainSink) loadSeenFile(path string) error {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	var input io.Reader = file
+	var compressed *gzip.Reader
+	if strings.HasSuffix(path, ".gz") {
+		compressed, err = gzip.NewReader(file)
+		if err != nil {
+			return fmt.Errorf("open compressed domain log %q: %w", path, err)
+		}
+		defer compressed.Close()
+		input = compressed
+	}
+
+	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		if domain := domainFromLogLine(scanner.Text()); domain != "" {
 			d.rememberDomain(domain)

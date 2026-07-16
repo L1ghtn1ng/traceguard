@@ -2,7 +2,10 @@ package logging
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,8 +39,29 @@ func TestRotatingFileRotatesAndKeepsBackups(t *testing.T) {
 		t.Fatalf("current log file missing: %v", err)
 	}
 	for idx := 1; idx <= 5; idx++ {
-		if _, err := os.Stat(rotatedPath(path, idx)); err != nil {
+		rotated := rotatedPath(path, idx)
+		if _, err := os.Stat(rotated); err != nil {
 			t.Fatalf("rotated log %d missing: %v", idx, err)
+		}
+		file, err := os.Open(rotated)
+		if err != nil {
+			t.Fatalf("open rotated log %d: %v", idx, err)
+		}
+		compressed, err := gzip.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			t.Fatalf("open rotated log %d as gzip: %v", idx, err)
+		}
+		content, err := io.ReadAll(compressed)
+		closeErr := errors.Join(compressed.Close(), file.Close())
+		if err != nil || closeErr != nil {
+			t.Fatalf("read rotated log %d: %v", idx, errors.Join(err, closeErr))
+		}
+		if !bytes.Equal(content, append(append([]byte{}, line...), '\n')) {
+			t.Fatalf("rotated log %d content = %q, want one complete line", idx, content)
+		}
+		if _, err := os.Stat(path + fmt.Sprintf(".%d", idx)); !os.IsNotExist(err) {
+			t.Fatalf("uncompressed rotated log %d state: %v", idx, err)
 		}
 	}
 	if _, err := os.Stat(rotatedPath(path, 6)); !os.IsNotExist(err) {
@@ -203,7 +227,7 @@ func TestRotatingFileKeepsStableDirectoryDuringRotation(t *testing.T) {
 	if _, err := writer.Write([]byte("second\n")); err != nil {
 		t.Fatalf("second Write returned error: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(moved, "traceguard.log.1")); err != nil {
+	if _, err := os.Stat(filepath.Join(moved, "traceguard.log.1.gz")); err != nil {
 		t.Fatalf("rotation did not stay in original directory: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "traceguard.log")); !os.IsNotExist(err) {

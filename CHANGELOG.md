@@ -2,6 +2,12 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [1.5.2] - 2026-07-16
+
+### Changed
+
+- Automatically gzip-compress rotated local log files while retaining the five-backup rotation policy, and preserve domain inventory deduplication across compressed and legacy uncompressed backups.
+
 ## [1.5.1] - 2026-07-13
 
 ### Fixed

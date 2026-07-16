@@ -2,6 +2,7 @@ package eventsink
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -216,7 +217,8 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 	if err := os.WriteFile(domainsPath+".1", []byte("2026-06-07T08:00:00Z\trotated.example\n"), 0o640); err != nil {
 		t.Fatalf("write rotated domains log: %v", err)
 	}
-	if err := os.WriteFile(domainsPath+".2", []byte("forged.example\n2026-06-07T07:01:00Z\talso\tbad\n"), 0o640); err != nil {
+	writeGzipFile(t, domainsPath+".2.gz", "2026-06-07T07:30:00Z\tcompressed.example\n")
+	if err := os.WriteFile(domainsPath+".3", []byte("forged.example\n2026-06-07T07:01:00Z\talso\tbad\n"), 0o640); err != nil {
 		t.Fatalf("write malformed rotated domains log: %v", err)
 	}
 
@@ -239,6 +241,7 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 
 	recorder.Info("dns", map[string]any{"domain": "existing.example"})
 	recorder.Info("dns", map[string]any{"domain": "rotated.example"})
+	recorder.Info("dns", map[string]any{"domain": "compressed.example"})
 	recorder.Info("dns", map[string]any{"domain": "forged.example"})
 	recorder.Info("dns", map[string]any{"domain": "bad"})
 	recorder.Info("dns", map[string]any{"domain": "new.example"})
@@ -1203,6 +1206,22 @@ func readDomainLogLines(t *testing.T, path string) []string {
 		return nil
 	}
 	return lines
+}
+
+func writeGzipFile(t *testing.T, path, content string) {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	compressed := gzip.NewWriter(&buffer)
+	if _, err := compressed.Write([]byte(content)); err != nil {
+		t.Fatalf("write gzip content: %v", err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	if err := os.WriteFile(path, buffer.Bytes(), 0o640); err != nil {
+		t.Fatalf("write gzip file: %v", err)
+	}
 }
 
 func mustMarshalRecord(t *testing.T, entry record) json.RawMessage {

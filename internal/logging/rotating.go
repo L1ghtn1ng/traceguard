@@ -1,8 +1,10 @@
 package logging
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,8 +218,19 @@ func (r *RotatingFile) rotateLocked() error {
 		r.file = nil
 	}
 
+	temporary := rotatedName(r.base, 1) + ".tmp"
+	if err := removeIfExistsAt(int(r.dirFile.Fd()), temporary); err != nil {
+		return err
+	}
+	if err := compressFileAt(int(r.dirFile.Fd()), r.base, temporary, r.fileMode); err != nil {
+		return err
+	}
+
 	oldest := rotatedName(r.base, r.backups)
 	if err := removeIfExistsAt(int(r.dirFile.Fd()), oldest); err != nil {
+		return err
+	}
+	if err := removeIfExistsAt(int(r.dirFile.Fd()), legacyRotatedName(r.base, r.backups)); err != nil {
 		return err
 	}
 
@@ -227,9 +240,15 @@ func (r *RotatingFile) rotateLocked() error {
 		if err := renameIfExistsAt(int(r.dirFile.Fd()), src, dst); err != nil {
 			return err
 		}
+		if err := renameIfExistsAt(int(r.dirFile.Fd()), legacyRotatedName(r.base, idx), legacyRotatedName(r.base, idx+1)); err != nil {
+			return err
+		}
 	}
 
-	if err := renameIfExistsAt(int(r.dirFile.Fd()), r.base, rotatedName(r.base, 1)); err != nil {
+	if err := renameIfExistsAt(int(r.dirFile.Fd()), temporary, rotatedName(r.base, 1)); err != nil {
+		return err
+	}
+	if err := removeIfExistsAt(int(r.dirFile.Fd()), r.base); err != nil {
 		return err
 	}
 
@@ -242,11 +261,58 @@ func (r *RotatingFile) rotateLocked() error {
 }
 
 func rotatedPath(path string, idx int) string {
-	return fmt.Sprintf("%s.%d", path, idx)
+	return fmt.Sprintf("%s.%d.gz", path, idx)
 }
 
 func rotatedName(base string, idx int) string {
+	return fmt.Sprintf("%s.%d.gz", base, idx)
+}
+
+func legacyRotatedName(base string, idx int) string {
 	return fmt.Sprintf("%s.%d", base, idx)
+}
+
+func compressFileAt(dirfd int, src, dst string, mode os.FileMode) (retErr error) {
+	srcFD, err := unix.Openat(dirfd, src, unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open log %q for compression: %w", src, err)
+	}
+	source := os.NewFile(uintptr(srcFD), src)
+	if source == nil {
+		_ = unix.Close(srcFD)
+		return fmt.Errorf("open log %q for compression: %w", src, os.ErrInvalid)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, source.Close())
+	}()
+
+	var stat unix.Stat_t
+	if err := unix.Fstat(srcFD, &stat); err != nil {
+		return fmt.Errorf("stat log %q for compression: %w", src, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("log file %q is not a regular file", src)
+	}
+
+	dstFD, err := unix.Openat(dirfd, dst, unix.O_CLOEXEC|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_WRONLY, uint32(mode.Perm()))
+	if err != nil {
+		return fmt.Errorf("create compressed log %q: %w", dst, err)
+	}
+	destination := os.NewFile(uintptr(dstFD), dst)
+	if destination == nil {
+		_ = unix.Close(dstFD)
+		return fmt.Errorf("create compressed log %q: %w", dst, os.ErrInvalid)
+	}
+
+	compressed := gzip.NewWriter(destination)
+	_, copyErr := io.Copy(compressed, source)
+	gzipErr := compressed.Close()
+	closeErr := destination.Close()
+	if err := errors.Join(copyErr, gzipErr, closeErr); err != nil {
+		_ = removeIfExistsAt(dirfd, dst)
+		return fmt.Errorf("compress rotated log %q: %w", src, err)
+	}
+	return nil
 }
 
 func openFileNoFollowAt(dirfd int, name, displayPath string, mode os.FileMode) (*os.File, error) {
