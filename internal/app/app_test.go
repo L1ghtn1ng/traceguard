@@ -1,13 +1,10 @@
 package app
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
@@ -15,81 +12,35 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
-func TestRunPolicyReloadsContinuesAfterLoadAndApplyFailures(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	reloadCh := make(chan struct{}, 3)
-	reloadCh <- struct{}{}
-	reloadCh <- struct{}{}
-	reloadCh <- struct{}{}
-
-	var loads atomic.Int32
-	load := func(context.Context) (blocklist.Rules, blocklist.LoadMetadata, error) {
-		call := loads.Add(1)
-		metadata := blocklist.LoadMetadata{Source: blocklist.LoadSourceRemote}
-		if call == 1 {
-			return blocklist.Rules{}, metadata, errors.New("load failed")
-		}
-		return blocklist.Rules{BlockDomains: []string{"example.com"}}, metadata, nil
-	}
-	var applies atomic.Int32
-	apply := func(blocklist.Rules) error {
-		if applies.Add(1) == 1 {
-			return errors.New("apply failed")
-		}
-		return nil
-	}
-	reports := make(chan policyReloadResult, 3)
-	done := make(chan struct{})
-	go func() {
-		runPolicyReloads(ctx, reloadCh, load, apply, func(result policyReloadResult) {
-			reports <- result
-			if result.Phase == "complete" {
-				cancel()
-			}
-		})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runPolicyReloads did not continue through failures")
-	}
-	close(reports)
-	var phases []string
-	for result := range reports {
-		phases = append(phases, result.Phase)
-	}
-	if !reflect.DeepEqual(phases, []string{"load", "apply", "complete"}) {
-		t.Fatalf("reload phases = %v, want [load apply complete]", phases)
-	}
+type recordingProcessCache struct {
+	calls []string
 }
 
-func TestRunPolicyReloadsStopsWhenReloadChannelCloses(t *testing.T) {
+func (c *recordingProcessCache) Lookup(pid uint32, comm string) (processinfo.Metadata, bool) {
+	c.calls = append(c.calls, fmt.Sprintf("lookup:%d:%s", pid, comm))
+	return processinfo.Metadata{PID: pid, Comm: "old"}, true
+}
+
+func (c *recordingProcessCache) Invalidate(pid uint32) {
+	c.calls = append(c.calls, fmt.Sprintf("invalidate:%d", pid))
+}
+
+func TestExecProcessLookupInvalidatesAfterEnrichment(t *testing.T) {
 	t.Parallel()
 
-	reloadCh := make(chan struct{})
-	close(reloadCh)
-	done := make(chan struct{})
-	go func() {
-		runPolicyReloads(t.Context(), reloadCh,
-			func(context.Context) (blocklist.Rules, blocklist.LoadMetadata, error) {
-				t.Error("load called after reload channel closed")
-				return blocklist.Rules{}, blocklist.LoadMetadata{}, nil
-			},
-			func(blocklist.Rules) error { return nil },
-			func(policyReloadResult) {},
-		)
-		close(done)
-	}()
+	cache := &recordingProcessCache{}
+	process, hit := lookupProcessForEvent(cache, ebpfmonitor.Event{
+		Kind: ebpfmonitor.EventExec,
+		PID:  42,
+		Comm: "old",
+	})
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("runPolicyReloads did not stop after reload channel closed")
+	if !hit || process.Comm != "old" {
+		t.Fatalf("lookup result = %#v, %v; want old metadata cache hit", process, hit)
+	}
+	wantCalls := []string{"lookup:42:old", "invalidate:42"}
+	if !reflect.DeepEqual(cache.calls, wantCalls) {
+		t.Fatalf("cache calls = %v, want %v", cache.calls, wantCalls)
 	}
 }
 
@@ -121,14 +72,14 @@ func TestValidateRulesForModeAllowsAllowSuffixRulesInBlockMode(t *testing.T) {
 	}
 }
 
-func TestValidateRulesForModeRejectsBlockSuffixRulesInBlockMode(t *testing.T) {
+func TestValidateRulesForModeAllowsBlockSuffixRulesInBlockMode(t *testing.T) {
 	t.Parallel()
 
 	err := validateRulesForMode(config.Config{Block: true}, blocklist.Rules{
 		BlockSuffixes: []string{"example.com"},
 	})
-	if err == nil {
-		t.Fatal("validateRulesForMode accepted suffix block in block mode")
+	if err != nil {
+		t.Fatalf("validateRulesForMode rejected suffix block in block mode: %v", err)
 	}
 }
 
@@ -390,6 +341,8 @@ func TestEventKindNameAndSocketAwareness(t *testing.T) {
 		{name: "resolver blocked", kind: ebpfmonitor.EventResolverBlocked, wantName: "resolver_blocked", wantSockets: true},
 		{name: "connection", kind: ebpfmonitor.EventConnection, wantName: "connection", wantSockets: true},
 		{name: "file access", kind: ebpfmonitor.EventFileAccess, wantName: "file_access", wantSockets: false},
+		{name: "egress blocked", kind: ebpfmonitor.EventEgressBlocked, wantName: "egress_blocked", wantSockets: true},
+		{name: "egress would block", kind: ebpfmonitor.EventEgressWouldBlock, wantName: "egress_would_block", wantSockets: true},
 		{name: "unknown", kind: 99, wantName: "unknown", wantSockets: false},
 	}
 

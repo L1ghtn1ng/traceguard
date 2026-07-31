@@ -2,6 +2,19 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added strict YAML v1 policy from local and HTTPS sources, with remote-base/local-overlay semantics, ETag and Last-Modified refreshes, authenticated TLS/mTLS transport, atomic restricted cache writes, and validated stale-cache fallback.
+- Added atomic UID- and cgroup-aware outbound TCP/UDP egress enforcement for IPv4 and IPv6 CIDRs and ports, including default allow/block posture, explicit allow precedence, dry-run events, rule attribution, and cgroup reconciliation.
+- Added kernel-enforced DNS suffix blocks while preserving exact, suffix-allow, resolver endpoint, and deny-all behavior.
+- Added a bounded alert-only detection engine with match/exclude filters, thresholds, grouping, cooldowns, Kubernetes and LSM enrichment fields, three enabled baseline rules, metrics, schema, example policy, and operational documentation.
+
+### Removed
+
+- Removed the superseded newline blocklist, manual domain flags and environment variables, and their separate cache, refresh, reload, doctor, and telemetry paths. Strict YAML v1 policy is now the single source for DNS, egress, and detection policy.
+
 ## [1.5.2] - 2026-07-16
 
 ### Changed

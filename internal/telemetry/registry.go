@@ -36,25 +36,6 @@ func (r *Registry) IncConnection(direction, family, protocol, attribution string
 	))
 }
 
-func (r *Registry) IncBlocklistRefresh(success bool) {
-	name := "traceguard_blocklist_refresh_errors_total"
-	status := "error"
-	if success {
-		name = "traceguard_blocklist_refresh_success_total"
-		status = "success"
-	}
-	r.incCounter(name)
-	r.setGauge(metricKey1("traceguard_blocklist_last_refresh_timestamp_seconds", "status", status), time.Now().UTC().Unix())
-}
-
-func (r *Registry) IncBlocklistLoad(source string, success bool) {
-	status := "error"
-	if success {
-		status = "success"
-	}
-	r.incCounter(metricKey2("traceguard_blocklist_load_total", "source", source, "status", status))
-}
-
 func (r *Registry) SetPolicyCounts(domains, endpoints int) {
 	r.setGauge("traceguard_policy_domains", int64(domains))
 	r.setGauge("traceguard_policy_endpoints", int64(endpoints))
@@ -126,6 +107,49 @@ func (r *Registry) IncPolicyReload(trigger string, success bool) {
 	r.incCounter(metricKey2("traceguard_policy_reload_total", "status", status, "trigger", trigger))
 }
 
+func (r *Registry) IncPolicySourceLoad(source string, success bool) {
+	status := "error"
+	if success {
+		status = "success"
+	}
+	r.incCounter(metricKey2("traceguard_policy_source_load_total", "source", source, "status", status))
+}
+
+func (r *Registry) SetPolicySourceHealthy(source string, healthy bool) {
+	r.setComponentHealthy("policy:"+source, "traceguard_policy_source_healthy", "source", source, healthy)
+}
+
+func (r *Registry) SetEgressRuleCounts(allow, block int) {
+	r.replaceGauges("traceguard_egress_rules", map[string]int64{
+		metricKey1("traceguard_egress_rules", "action", "allow"): int64(allow),
+		metricKey1("traceguard_egress_rules", "action", "block"): int64(block),
+	})
+}
+
+func (r *Registry) IncEgressDecision(decision, mode string) {
+	r.incCounter(metricKey2("traceguard_egress_decisions_total", "decision", decision, "mode", mode))
+}
+
+func (r *Registry) SetDetectionRules(count int) {
+	r.setGauge("traceguard_detection_rules", int64(count))
+}
+
+func (r *Registry) SetDetectionStateGroups(count int) {
+	r.setGauge("traceguard_detection_state_groups", int64(count))
+}
+
+func (r *Registry) IncDetectionAlert(ruleID, severity string) {
+	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
+}
+
+func (r *Registry) IncCgroupReconcile(success bool) {
+	status := "error"
+	if success {
+		status = "success"
+	}
+	r.incCounter(metricKey1("traceguard_cgroup_reconcile_total", "status", status))
+}
+
 func (r *Registry) IncEventArchive(status string) {
 	r.incCounter(metricKey1("traceguard_event_archive_total", "status", status))
 }
@@ -195,15 +219,19 @@ func (r *Registry) IncEBPFReadError() {
 }
 
 func (r *Registry) SetEventSinkHealthy(sink string, healthy bool) {
+	r.setComponentHealthy("sink:"+sink, "traceguard_event_sink_healthy", "sink", sink, healthy)
+}
+
+func (r *Registry) setComponentHealthy(component, metric, label, value string, healthy bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if healthy {
-		delete(r.unhealthy, sink)
-		r.gauges[metricKey1("traceguard_event_sink_healthy", "sink", sink)] = 1
+		delete(r.unhealthy, component)
+		r.gauges[metricKey1(metric, label, value)] = 1
 		return
 	}
-	r.unhealthy[sink] = struct{}{}
-	r.gauges[metricKey1("traceguard_event_sink_healthy", "sink", sink)] = 0
+	r.unhealthy[component] = struct{}{}
+	r.gauges[metricKey1(metric, label, value)] = 0
 }
 
 func (r *Registry) Healthy() bool {

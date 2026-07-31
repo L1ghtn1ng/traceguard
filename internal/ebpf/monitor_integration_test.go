@@ -37,6 +37,27 @@ func TestTraceDNSProgramLoadsForIntegration(t *testing.T) {
 	defer objects.Settings.Close()
 }
 
+func TestLinux71MonitorObjectsLoadForIntegration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+
+	objects, features, err := loadLinux71MonitorObjects(newCollectionOptions(), KernelFeatures{
+		KernelAtLeast612: true,
+		KernelAtLeast71:  true,
+	})
+	if err != nil {
+		fatalVerifierError(t, "loadLinux71MonitorObjects", err)
+	}
+	defer objects.Close()
+	if !features.EnhancedTelemetry {
+		t.Fatal("enhanced telemetry was not selected")
+	}
+}
+
 func TestTraceDNSMalformedIPv6UDPFailClosedInBlockMode(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")

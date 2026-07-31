@@ -12,6 +12,10 @@ import (
 const maxEnforcedSuffixWireBytes = 64
 
 func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
+	egress, err := compileEgressPolicy(policy.Egress)
+	if err != nil {
+		return err
+	}
 	nextBlock := make(map[domainKey]struct{}, len(policy.BlockedDomains))
 	for _, domain := range policy.BlockedDomains {
 		key, err := encodeDomainKey(domain)
@@ -41,6 +45,19 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 		}
 		nextAllowSuffixes[key] = struct{}{}
 	}
+	nextBlockSuffixes := make(map[domainSuffixKey]struct{}, len(policy.BlockedSuffixes))
+	for _, suffix := range policy.BlockedSuffixes {
+		key, err := encodeDomainSuffixKey(suffix)
+		if err != nil {
+			return fmt.Errorf("encode block suffix entry %q: %w", suffix, err)
+		}
+		if policy.BlockEnabled {
+			if err := validateEnforcedSuffixKey(key); err != nil {
+				return fmt.Errorf("encode block suffix entry %q: %w", suffix, err)
+			}
+		}
+		nextBlockSuffixes[key] = struct{}{}
+	}
 	if len(nextBlock) > blocklistMaxEntries {
 		return fmt.Errorf("blocklist contains %d entries, exceeds map capacity %d", len(nextBlock), blocklistMaxEntries)
 	}
@@ -49,6 +66,9 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	}
 	if len(nextAllowSuffixes) > blocklistMaxEntries {
 		return fmt.Errorf("allow suffix list contains %d entries, exceeds map capacity %d", len(nextAllowSuffixes), blocklistMaxEntries)
+	}
+	if len(nextBlockSuffixes) > blocklistMaxEntries {
+		return fmt.Errorf("block suffix list contains %d entries, exceeds map capacity %d", len(nextBlockSuffixes), blocklistMaxEntries)
 	}
 	nextBlock4 := make(map[endpoint4Key]struct{})
 	nextBlock6 := make(map[endpoint6Key]struct{})
@@ -167,6 +187,7 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 		{name: "blocklist", fn: func() error { return syncMapSlot(m.objects.Blocklist, nextBlock, inactiveSlot) }},
 		{name: "allowlist", fn: func() error { return syncMapSlot(m.objects.Allowlist, nextAllow, inactiveSlot) }},
 		{name: "allow suffix list", fn: func() error { return syncSuffixMapSlot(m.objects.AllowSuffixes, nextAllowSuffixes, inactiveSlot) }},
+		{name: "block suffix list", fn: func() error { return syncSuffixMapSlot(m.objects.BlockSuffixes, nextBlockSuffixes, inactiveSlot) }},
 		{name: "endpoint4 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4Rules, nextBlock4, inactiveSlot) }},
 		{name: "endpoint6 block rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6Rules, nextBlock6, inactiveSlot) }},
 		{name: "endpoint4 allow rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4AllowRules, nextAllow4, inactiveSlot) }},
@@ -175,6 +196,10 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 		{name: "endpoint6 block cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6CidrRules, nextBlockCIDR6, inactiveSlot) }},
 		{name: "endpoint4 allow cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint4CidrAllowRules, nextAllowCIDR4, inactiveSlot) }},
 		{name: "endpoint6 allow cidr rules", fn: func() error { return syncMapSlot(m.objects.Endpoint6CidrAllowRules, nextAllowCIDR6, inactiveSlot) }},
+		{name: "egress4 allow rules", fn: func() error { return syncEgress4MapSlot(m.objects.Egress4AllowRules, egress.allow4, inactiveSlot) }},
+		{name: "egress4 block rules", fn: func() error { return syncEgress4MapSlot(m.objects.Egress4BlockRules, egress.block4, inactiveSlot) }},
+		{name: "egress6 allow rules", fn: func() error { return syncEgress6MapSlot(m.objects.Egress6AllowRules, egress.allow6, inactiveSlot) }},
+		{name: "egress6 block rules", fn: func() error { return syncEgress6MapSlot(m.objects.Egress6BlockRules, egress.block6, inactiveSlot) }},
 	} {
 		if err := update.fn(); err != nil {
 			return fmt.Errorf("prepare inactive %s: %w", update.name, err)
@@ -194,9 +219,30 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	if len(policy.AllowedSuffixes) > 0 {
 		settings.AllowSuffixesEnabled = 1
 	}
+	if len(policy.BlockedSuffixes) > 0 {
+		settings.BlockSuffixesEnabled = 1
+	}
+	if policy.Egress.Enabled {
+		settings.EgressEnabled = 1
+	}
+	if policy.Egress.Enforce {
+		settings.EgressEnforce = 1
+	}
+	if policy.Egress.DefaultBlock {
+		settings.EgressDefaultBlock = 1
+	}
+	ruleIDs := make(map[uint32]string, len(egress.ruleIDs)+len(m.currentRuleIDs))
+	for ruleNumber, ruleID := range m.currentRuleIDs {
+		ruleIDs[ruleNumber] = ruleID
+	}
+	for ruleNumber, ruleID := range egress.ruleIDs {
+		ruleIDs[ruleNumber] = ruleID
+	}
+	m.egressRuleIDs.Store(&ruleIDs)
 	if err := m.objects.Settings.Put(uint32(0), settings); err != nil {
 		return fmt.Errorf("commit policy settings: %w", err)
 	}
+	m.currentRuleIDs = egress.ruleIDs
 	m.activePolicySlot = inactiveSlot
 	return nil
 }
@@ -289,13 +335,8 @@ func syncMapSlot[K comparable](m *ebpf.Map, next map[K]struct{}, slot uint8) err
 		return err
 	}
 
-	for key := range next {
-		value, _ := policySlotValue(current[key], true, slot)
-		if err := m.Put(key, value); err != nil {
-			return err
-		}
-	}
-
+	// Clear stale entries from the inactive slot before adding its replacement.
+	// The active slot remains present throughout the update.
 	for key, value := range current {
 		if _, keep := next[key]; keep {
 			continue
@@ -311,6 +352,12 @@ func syncMapSlot[K comparable](m *ebpf.Map, next map[K]struct{}, slot uint8) err
 			continue
 		}
 		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	for key := range next {
+		value, _ := policySlotValue(current[key], true, slot)
+		if err := m.Put(key, value); err != nil {
 			return err
 		}
 	}
@@ -332,15 +379,6 @@ func syncSuffixMapSlot(m *ebpf.Map, next map[domainSuffixKey]struct{}, slot uint
 		return err
 	}
 
-	for key := range next {
-		key.Slot = slot
-		if _, exists := current[key]; exists {
-			continue
-		}
-		if err := m.Put(key, uint8(1)); err != nil {
-			return err
-		}
-	}
 	for key := range current {
 		if key.Slot != slot {
 			continue
@@ -351,6 +389,15 @@ func syncSuffixMapSlot(m *ebpf.Map, next map[domainSuffixKey]struct{}, slot uint
 			continue
 		}
 		if err := m.Delete(stored); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	for key := range next {
+		key.Slot = slot
+		if _, exists := current[key]; exists {
+			continue
+		}
+		if err := m.Put(key, uint8(1)); err != nil {
 			return err
 		}
 	}

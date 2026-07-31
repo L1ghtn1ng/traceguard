@@ -11,9 +11,11 @@ TraceGuard is a Go 1.26 Linux security utility that uses the kernel eBPF subsyst
 - detect configured DNS-over-HTTPS resolver connections
 - trace `execve` and `execveat` activity so newly spawned programs are visible
 - audit file access through open-style syscall tracepoints when enabled
-- optionally block DNS lookups for domains loaded from a local or remote blocklist
-- apply exact-match allow rules that take precedence over exact-match block rules
-- support suffix policies such as `*.example.com` and `suffix:example.com`
+- optionally block DNS lookups defined by local or remote YAML policy
+- enforce exact and suffix DNS policies, with allow rules taking precedence
+- enforce UID- and cgroup-aware outbound TCP/UDP CIDR and port policy
+- load a strict YAML v1 policy from a local file, HTTPS endpoint, or both
+- emit bounded alert-only detections over fully enriched events, with a default baseline
 - expose health and Prometheus-style metrics over HTTP
 - optionally archive JSON events locally and export them to an HTTPS collector
 - support batched authenticated HTTPS export with durable retry spooling
@@ -22,7 +24,8 @@ TraceGuard is a Go 1.26 Linux security utility that uses the kernel eBPF subsyst
 - optionally enrich pod-scoped events with Kubernetes namespace, pod, node, workload, service account, container, and image metadata
 - run a built-in environment doctor check before deployment
 
-In block mode, TraceGuard caches the remote blocklist for six hours by default and refreshes it on the same cadence.
+Remote YAML policy is cached with validated stale-cache fallback and refreshed
+every five minutes by default.
 
 ## Design
 
@@ -30,15 +33,19 @@ TraceGuard uses a set of eBPF programs:
 
 - `cgroup_skb/egress` parses outbound UDP and TCP DNS packets on port 53, emits DNS telemetry, and drops matching queries when blocking is enabled
 - `cgroup/connect4` and `cgroup/connect6` observe resolver endpoint connections for DoT and configured DoH endpoints and block matching endpoints when blocking is enabled
+- `cgroup/connect4`, `cgroup/connect6`, `cgroup/sendmsg4`, and `cgroup/sendmsg6` enforce outbound TCP/UDP egress policy by UID, cgroup ID, destination CIDR, port, and protocol
 - `tracepoint/syscalls/sys_enter_execve*` emits process execution events
 - `tracepoint/syscalls/sys_enter_open*` and `sys_enter_creat` emit file access audit events when file auditing is enabled
 
 The user-space service:
 
-- normalizes blocklist input before loading it into a BPF hash map
-- supports `block:` and `allow:` policy entries in local and remote rule sources
+- normalizes DNS policy before loading it into BPF maps
+- supports block and allow DNS entries in local and remote YAML policy
 - supports exact and suffix domain rules in the policy engine
-- caches the remote blocklist on disk with atomic file replacement
+- strictly validates and overlays versioned local and remote YAML policy
+- reconciles cgroup path selectors to kernel cgroup IDs as workloads change
+- evaluates bounded match, exclusion, threshold, grouping, and cooldown detection rules
+- caches remote YAML policy on disk with atomic file replacement
 - enriches event records from `/proc` using a bounded metadata cache
 - adds SELinux/AppArmor process labels to enriched records where the host LSM exposes them
 - can archive structured events to a local JSONL file with rotation
@@ -62,7 +69,7 @@ The user-space service:
 
 Notes:
 
-- blocking is exact-match on normalized DNS QNAMEs for classic UDP/TCP DNS on port 53
+- DNS blocking supports exact and suffix matches on normalized QNAMEs for classic UDP/TCP DNS on port 53
 - allow rules take precedence over block rules; plain domain allow rules are exact matches, while `*.example.com` and `suffix:example.com` allow suffix matches
 - suffix rules match a domain and any subdomain, for example `*.example.com` or `suffix:example.com`
 - `*` enables a deny-all policy for DNS names and identifiable resolver traffic, with explicit allow rules punching holes back in
@@ -86,12 +93,15 @@ Notes:
 - failed scheduled or SIGHUP-triggered policy refreshes leave the last successfully committed policy active and are retried without stopping TraceGuard
 - event timestamps represent kernel event occurrence time and are converted from `CLOCK_BOOTTIME` to UTC wall time in userspace
 - `/health` returns HTTP 503 after a critical local event sink write failure and recovers after that sink writes successfully; enforcement continues while unhealthy
-- exact domain policies and suffix allow policies are enforceable in kernel block mode; suffix block policies are available for observe and dry-run workflows but are rejected in enforced block mode on this kernel path
+- exact and suffix domain block/allow policies are enforceable in kernel block mode
 - in enforced block mode with `*`, exact domain rules, suffix allow domain rules, DoH/DoT endpoint rules, and resolver IP/CIDR rules are supported as exceptions
-- enforced suffix allow matching checks up to 16 leading DNS label boundaries and 64 wire-format bytes per suffix candidate to stay within kernel verifier limits; configured allow suffixes over the 64-byte wire limit are rejected in enforced block mode, and exact allow rules are unaffected
+- enforced suffix matching checks every possible DNS label boundary and hashes at most 64 wire-format bytes per suffix candidate; configured block or allow suffixes over that limit are rejected in enforced block mode, and exact rules are unaffected
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and durable retry spooling
 - on Linux 7.1 or newer, TraceGuard automatically tries an enhanced telemetry eBPF object that adds event source and kernel feature-set fields; if the kernel or verifier rejects that object, TraceGuard falls back to the standard object without user configuration
+- outbound egress policy defaults to allow; explicit allow rules win over block rules, and DNS plus egress are independent enforcement gates
+- cgroup selectors use cgroup v2 paths relative to the configured cgroup root and are reconciled every 30 seconds
+- the detection engine is alert-only, caps state at 16,384 threshold groups, and enables three baseline rules by default
 
 ## Build
 
@@ -122,77 +132,40 @@ Observe only:
 sudo ./traceguard
 ```
 
-Block exact domains:
+Enforce a local policy:
 
 ```bash
 sudo ./traceguard -block \
-  -block-domain example.com \
-  -block-domain bad.example.org
-```
-
-Allow a resolver hostname even if it appears in a remote blocklist:
-
-```bash
-sudo ./traceguard -block \
-  -blocklist-url https://security.example/blocklist.txt \
-  -allow-domain resolver.corp.example
-```
-
-Deny all DNS names and resolver endpoints, then allow only explicit exceptions:
-
-```bash
-sudo ./traceguard -block \
-  -block-domain '*' \
-  -allow-domain corp.example \
-  -allow-domain '*.trusted.example' \
-  -allow-domain 1.1.1.1 \
-  -allow-domain 1.1.1.0/24 \
-  -allow-domain https://1.1.1.1/dns-query \
-  -allow-domain dot://[2606:4700:4700::1111]
-```
-
-If you prefer the wildcard form directly, quote it so your shell does not expand it:
-
-```bash
-sudo ./traceguard -block -block-domain '*'
+  -policy-path /etc/traceguard/policy.yaml
 ```
 
 Dry-run the policy without enforcing drops:
 
 ```bash
 sudo ./traceguard -dry-run \
-  -block-domain '*.example.com'
+  -policy-path /etc/traceguard/policy.yaml
 ```
 
-Manually reload policy sources:
+The strict YAML v1 policy is the single source for DNS blocks and exceptions,
+resolver endpoints, outbound egress rules, and detections. Copy
+[`examples/policy.yaml`](examples/policy.yaml) as a starting point, then see the
+[policy guide](docs/policy.md) and [JSON Schema](docs/policy.schema.json).
+
+Manually reload the configured policy sources:
 
 ```bash
 sudo kill -HUP $(pidof traceguard)
 ```
 
-Block a DoH resolver endpoint and a DoT resolver endpoint:
+Use a remote base policy with a local overlay, private CA, and mTLS:
 
 ```bash
 sudo ./traceguard -block \
-  -block-domain https://dns.google/dns-query \
-  -block-domain dot://one.one.one.one
-```
-
-Block from a remote list with six-hour refresh:
-
-```bash
-sudo ./traceguard -block \
-  -blocklist-url https://security.example/blocklist.txt \
-  -cache-path /var/lib/traceguard/blocklist.txt \
-  -refresh-interval 6h
-```
-
-Load manual block and allow entries from files:
-
-```bash
-sudo ./traceguard -block \
-  -block-domain @/etc/traceguard/block-domains.txt \
-  -allow-domain @/etc/traceguard/allow-domains.txt
+  -policy-url https://policy.example/traceguard/v1 \
+  -policy-path /etc/traceguard/policy.yaml \
+  -policy-ca-path /etc/traceguard/policy-ca.crt \
+  -policy-client-cert /etc/traceguard/policy-client.crt \
+  -policy-client-key /etc/traceguard/policy-client.key
 ```
 
 Print the program version:
@@ -293,11 +266,14 @@ Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
 - `TRACEGUARD_DRY_RUN`
-- `TRACEGUARD_BLOCKLIST_URL`
-- `TRACEGUARD_BLOCK_DOMAINS`
-- `TRACEGUARD_ALLOW_DOMAINS`
-- `TRACEGUARD_CACHE_PATH`
-- `TRACEGUARD_REFRESH_INTERVAL`
+- `TRACEGUARD_POLICY_PATH`
+- `TRACEGUARD_POLICY_URL`
+- `TRACEGUARD_POLICY_CACHE_PATH`
+- `TRACEGUARD_POLICY_REFRESH_INTERVAL`
+- `TRACEGUARD_POLICY_AUTHORIZATION`
+- `TRACEGUARD_POLICY_CA_PATH`
+- `TRACEGUARD_POLICY_CLIENT_CERT`
+- `TRACEGUARD_POLICY_CLIENT_KEY`
 - `TRACEGUARD_CGROUP_PATH`
 - `TRACEGUARD_LOG_PATH`
 - `TRACEGUARD_LOG_FORMAT`
@@ -328,9 +304,8 @@ By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_F
 Packaged defaults in `/etc/traceguard/traceguard.env`:
 
 - observe-only mode: `TRACEGUARD_BLOCK=false` and `TRACEGUARD_DRY_RUN=false`
-- remote blocklist disabled: `TRACEGUARD_BLOCKLIST_URL=`
-- cache path: `TRACEGUARD_CACHE_PATH=/var/lib/traceguard/blocklist.txt`
-- refresh interval: `TRACEGUARD_REFRESH_INTERVAL=6h`
+- YAML policy sources disabled unless `TRACEGUARD_POLICY_PATH` or `TRACEGUARD_POLICY_URL` is set
+- YAML policy cache and refresh: `TRACEGUARD_POLICY_CACHE_PATH=/var/lib/traceguard/policy.yaml`, `TRACEGUARD_POLICY_REFRESH_INTERVAL=5m`
 - cgroup path: `TRACEGUARD_CGROUP_PATH=/sys/fs/cgroup`
 - log path and format: `TRACEGUARD_LOG_PATH=/var/log/traceguard/traceguard.log`, `TRACEGUARD_LOG_FORMAT=json`
 - first-seen DNS query domains are also retained in `/var/log/traceguard/domains.log`; this is a deduplicated DNS-domain inventory, not full HTTP URL/path capture
@@ -343,16 +318,6 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint
-
-Manual policy inputs:
-
-- Use `-block-domain` and `-allow-domain` repeatedly for inline entries.
-- Use `-block-domain @/abs/path` and `-allow-domain @/abs/path` to load entries from files.
-- Use `TRACEGUARD_BLOCK_DOMAINS` and `TRACEGUARD_ALLOW_DOMAINS` for env-based configuration.
-- Set `TRACEGUARD_BLOCK_DOMAINS=@/abs/path` or `TRACEGUARD_ALLOW_DOMAINS=@/abs/path` to load entries from files.
-- Use `*` as the deny-all marker with `-block-domain '*'` or `TRACEGUARD_BLOCK_DOMAINS=*`.
-- Use `example.com` with `-allow-domain` for an exact exception only; it does not allow `foo.example.com`.
-- Use `*.example.com` or `suffix:example.com` with `-allow-domain` for enforced block-mode exceptions that cover a domain and its subdomains.
 
 Example output:
 
@@ -390,6 +355,7 @@ The generated packages install:
 
 - `/usr/bin/traceguard`
 - `/etc/traceguard/traceguard.env`
+- `/usr/share/doc/traceguard/policy.example.yaml` and `policy.schema.json`
 - `/var/log/traceguard/traceguard.log` at runtime via the packaged service defaults
 - a systemd unit at the distro-appropriate system path
 - metrics on the configured listen address, `:9091` by default in the packaged env file
@@ -397,11 +363,9 @@ The generated packages install:
 ## Secure Development Notes
 
 - Dependencies are managed through Go modules and suitable for GoReleaser verifiable builds.
-- Remote blocklist fetches use HTTPS only, bounded response sizes, and network timeouts.
-- Oversized remote blocklists are rejected instead of being silently truncated.
-- Remote blocklist redirects are limited and must remain on HTTPS.
+- Remote YAML policy fetches use HTTPS only, bounded response sizes, same-origin redirects, and network timeouts.
 - Log file creation rejects symlink targets and non-regular files to reduce log-path attacks.
-- Cache reads reject symlinks, cache writes are atomic, and cached blocklists are written with restricted permissions.
+- Policy cache reads reject symlinks and cache writes are atomic with restricted permissions.
 - The BPF parser uses explicit bounds checks and fixed maximum sizes to satisfy the verifier and reduce parser risk.
 - Block mode fails closed if blocked-event telemetry cannot be emitted or if TCP/IPv6 DNS traffic cannot be safely inspected.
 - Process enrichment is performed from `/proc` in userspace; if a process exits before enrichment, TraceGuard falls back to kernel-provided task metadata.
@@ -413,8 +377,8 @@ The generated packages install:
 - Optional Kubernetes API enrichment can add namespace, pod name, pod IP, node name, service account, controller workload, app label, container names, and image names keyed by the observed pod UID.
 - `dry-run` uses the same policy engine as enforcement mode but logs `would-block` decisions instead of enabling kernel drops.
 - `SIGHUP` triggers an immediate policy reload from local and remote sources.
-- Metrics and health endpoints are served when `-metrics-addr` is set. The packaged env file enables them on `:9091`.
-- Metrics include event volume, policy decisions, blocklist refresh/load status, policy size and mode, eBPF attachment/read health, export queue and spool backlog, process attribution quality, Kubernetes refreshes, and enrichment hit/miss counts.
+- Metrics and health endpoints are served when `-metrics-addr` is set. The packaged env file enables them on `:9091`; stale YAML cache fallback keeps enforcement active while marking the remote policy source unhealthy.
+- Metrics include event volume, policy decisions, YAML policy source health, DNS/egress rule counts, detection alerts and state, eBPF attachment/read health, export queue and spool backlog, process attribution quality, Kubernetes refreshes, and enrichment hit/miss counts.
 - HTTPS batch export requires an HTTPS endpoint and uses bounded in-memory queuing to avoid blocking the main event loop.
 - HTTPS batch export sends records as JSON arrays, supports an optional `Authorization` header, optional mTLS, and can spool failed batches to disk for replay.
 - Remote syslog export sends RFC5424-style structured events over UDP, TCP, or TLS without durable spooling.

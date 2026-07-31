@@ -5,12 +5,32 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
+	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
+
+type processMetadataCache interface {
+	Lookup(uint32, string) (processinfo.Metadata, bool)
+	Invalidate(uint32)
+}
+
+func lookupProcessForEvent(cache processMetadataCache, event ebpf.Event) (processinfo.Metadata, bool) {
+	process, hit := cache.Lookup(event.PID, event.Comm)
+	if event.Kind == ebpf.EventExec {
+		// exec events are emitted at syscall entry, before the process image
+		// changes. Invalidate after enrichment so subsequent events cannot retain
+		// pre-exec metadata for the full cache TTL.
+		cache.Invalidate(event.PID)
+	}
+	return process, hit
+}
 
 func policyMode(cfg config.Config) string {
 	switch {
@@ -41,9 +61,6 @@ func IsPermissionError(err error) bool {
 }
 
 func validateRulesForMode(cfg config.Config, rules blocklist.Rules) error {
-	if cfg.Block && !cfg.DryRun && len(rules.BlockSuffixes) > 0 {
-		return fmt.Errorf("suffix and wildcard block domain rules are not enforceable in block mode on this kernel path; use observe or dry-run mode for block suffix policies")
-	}
 	return nil
 }
 
@@ -124,7 +141,8 @@ func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {
 
 func isSocketAwareEvent(kind uint32) bool {
 	switch kind {
-	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked, ebpf.EventConnection:
+	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked,
+		ebpf.EventConnection, ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 		return true
 	default:
 		return false
@@ -163,6 +181,10 @@ func eventKindName(kind uint32) string {
 		return "connection"
 	case ebpf.EventFileAccess:
 		return "file_access"
+	case ebpf.EventEgressBlocked:
+		return "egress_blocked"
+	case ebpf.EventEgressWouldBlock:
+		return "egress_would_block"
 	default:
 		return "unknown"
 	}
@@ -204,4 +226,28 @@ func fileCreated(flags uint32) bool {
 		oCreat       = 0x40
 	)
 	return flags&unknownFlags == 0 && flags&oCreat != 0
+}
+
+func emitDetectionAlerts(detector *detection.Engine, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
+	alerts := detector.Evaluate(detection.Event{
+		Timestamp: timestamp,
+		Name:      eventName,
+		Fields:    fields,
+	})
+	metrics.SetDetectionStateGroups(detector.StateCount())
+	for _, alert := range alerts {
+		alertFields := alert.Fields
+		alertFields["source_event"] = eventName
+		alertFields["event"] = "detection_alert"
+		alertFields["detection_rule_id"] = alert.RuleID
+		alertFields["severity"] = alert.Severity
+		alertFields["detection_message"] = alert.Message
+		alertFields["tags"] = alert.Tags
+		alertFields["threshold_count"] = alert.Count
+		if alert.Window > 0 {
+			alertFields["threshold_window"] = alert.Window.String()
+		}
+		metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
+		recorder.InfoAt(alert.Timestamp, "detection-alert", alertFields)
+	}
 }

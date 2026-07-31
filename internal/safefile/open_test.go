@@ -112,7 +112,7 @@ func TestOpenAbsoluteFallbackRejectsSymlinks(t *testing.T) {
 func TestWriteFileAtomicReplacesContents(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "cache", "blocklist.txt")
+	path := filepath.Join(t.TempDir(), "cache", "policy.yaml")
 	if err := WriteFileAtomic(path, []byte("first"), 0o640); err != nil {
 		t.Fatalf("first WriteFileAtomic: %v", err)
 	}

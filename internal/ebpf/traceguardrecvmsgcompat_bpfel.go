@@ -36,7 +36,8 @@ type traceguardRecvmsgCompatDnsParseResult struct {
 	Key              traceguardRecvmsgCompatDomainKey
 	QnameLength      uint16
 	AllowSuffixMatch uint8
-	Pad              [5]uint8
+	BlockSuffixMatch uint8
+	Pad              [4]uint8
 }
 
 type traceguardRecvmsgCompatDomainKey struct {
@@ -51,6 +52,20 @@ type traceguardRecvmsgCompatDomainSuffixKey struct {
 	PolicySlot uint8
 	Pad0       uint8
 	Pad1       uint32
+}
+
+type traceguardRecvmsgCompatEgress4Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [21]uint8
+	Pad       [3]uint8
+}
+
+type traceguardRecvmsgCompatEgress6Key struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [33]uint8
+	Pad       [3]uint8
 }
 
 type traceguardRecvmsgCompatEndpoint4CidrKey struct {
@@ -104,7 +119,11 @@ type traceguardRecvmsgCompatSettings struct {
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
 	ActivePolicySlot     uint8
-	Pad                  [3]uint8
+	BlockSuffixesEnabled uint8
+	EgressEnabled        uint8
+	EgressEnforce        uint8
+	EgressDefaultBlock   uint8
+	Pad                  [7]uint8
 }
 
 type traceguardRecvmsgCompatSocketInfoKey struct {
@@ -131,9 +150,14 @@ type traceguardRecvmsgCompatSocketInfoValue struct {
 const (
 	traceguardRecvmsgCompatMapAllowSuffixes           = "allow_suffixes"
 	traceguardRecvmsgCompatMapAllowlist               = "allowlist"
+	traceguardRecvmsgCompatMapBlockSuffixes           = "block_suffixes"
 	traceguardRecvmsgCompatMapBlocklist               = "blocklist"
 	traceguardRecvmsgCompatMapConnectionDedupe        = "connection_dedupe"
 	traceguardRecvmsgCompatMapDnsScratch              = "dns_scratch"
+	traceguardRecvmsgCompatMapEgress4AllowRules       = "egress4_allow_rules"
+	traceguardRecvmsgCompatMapEgress4BlockRules       = "egress4_block_rules"
+	traceguardRecvmsgCompatMapEgress6AllowRules       = "egress6_allow_rules"
+	traceguardRecvmsgCompatMapEgress6BlockRules       = "egress6_block_rules"
 	traceguardRecvmsgCompatMapEndpoint4AllowRules     = "endpoint4_allow_rules"
 	traceguardRecvmsgCompatMapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
 	traceguardRecvmsgCompatMapEndpoint4CidrRules      = "endpoint4_cidr_rules"
@@ -230,9 +254,14 @@ type traceguardRecvmsgCompatProgramSpecs struct {
 type traceguardRecvmsgCompatMapSpecs struct {
 	AllowSuffixes           *ebpf.MapSpec `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
+	BlockSuffixes           *ebpf.MapSpec `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
 	DnsScratch              *ebpf.MapSpec `ebpf:"dns_scratch"`
+	Egress4AllowRules       *ebpf.MapSpec `ebpf:"egress4_allow_rules"`
+	Egress4BlockRules       *ebpf.MapSpec `ebpf:"egress4_block_rules"`
+	Egress6AllowRules       *ebpf.MapSpec `ebpf:"egress6_allow_rules"`
+	Egress6BlockRules       *ebpf.MapSpec `ebpf:"egress6_block_rules"`
 	Endpoint4AllowRules     *ebpf.MapSpec `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.MapSpec `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.MapSpec `ebpf:"endpoint4_cidr_rules"`
@@ -275,9 +304,14 @@ func (o *traceguardRecvmsgCompatObjects) Close() error {
 type traceguardRecvmsgCompatMaps struct {
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
+	Egress4AllowRules       *ebpf.Map `ebpf:"egress4_allow_rules"`
+	Egress4BlockRules       *ebpf.Map `ebpf:"egress4_block_rules"`
+	Egress6AllowRules       *ebpf.Map `ebpf:"egress6_allow_rules"`
+	Egress6BlockRules       *ebpf.Map `ebpf:"egress6_block_rules"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -296,9 +330,14 @@ func (m *traceguardRecvmsgCompatMaps) Close() error {
 	return _TraceguardRecvmsgCompatClose(
 		m.AllowSuffixes,
 		m.Allowlist,
+		m.BlockSuffixes,
 		m.Blocklist,
 		m.ConnectionDedupe,
 		m.DnsScratch,
+		m.Egress4AllowRules,
+		m.Egress4BlockRules,
+		m.Egress6AllowRules,
+		m.Egress6BlockRules,
 		m.Endpoint4AllowRules,
 		m.Endpoint4CidrAllowRules,
 		m.Endpoint4CidrRules,

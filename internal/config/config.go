@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	defaultRefreshInterval = 6 * time.Hour
+	defaultPolicyRefresh   = 5 * time.Minute
 	defaultCgroupPath      = "/sys/fs/cgroup"
-	defaultCachePath       = "/var/lib/traceguard/blocklist.txt"
+	defaultPolicyCachePath = "/var/lib/traceguard/policy.yaml"
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
 	defaultLogFormat       = "json"
 	defaultMetricsAddr     = ":9091"
@@ -29,32 +29,17 @@ const (
 	defaultKubePoll      = 2 * time.Minute
 )
 
-type domainList []string
-
-func (d *domainList) String() string {
-	return strings.Join(*d, ",")
-}
-
-func (d *domainList) Set(value string) error {
-	entries, err := parseDomainInput(value)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		return errors.New("empty domain value")
-	}
-	*d = append(*d, entries...)
-	return nil
-}
-
 type Config struct {
 	Block                    bool
 	DryRun                   bool
-	BlocklistURL             string
-	ManualDomains            []string
-	ManualAllow              []string
-	CachePath                string
-	RefreshInterval          time.Duration
+	PolicyPath               string
+	PolicyURL                string
+	PolicyCachePath          string
+	PolicyRefreshInterval    time.Duration
+	PolicyAuthorization      string
+	PolicyCAPath             string
+	PolicyClientCert         string
+	PolicyClientKey          string
 	CgroupPath               string
 	LogPath                  string
 	LogFormat                string
@@ -92,7 +77,7 @@ func Parse() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	refreshDefault, err := envDuration("TRACEGUARD_REFRESH_INTERVAL", defaultRefreshInterval)
+	policyRefreshDefault, err := envDuration("TRACEGUARD_POLICY_REFRESH_INTERVAL", defaultPolicyRefresh)
 	if err != nil {
 		return Config{}, err
 	}
@@ -124,15 +109,16 @@ func Parse() (Config, error) {
 	cfg := Config{}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
-	fs.BoolVar(&cfg.Block, "block", blockDefault, "enable DNS blocking for domains loaded from the configured sources")
-	fs.BoolVar(&cfg.DryRun, "dry-run", dryRunDefault, "evaluate block policy and log would-block decisions without enforcing drops")
-	fs.StringVar(&cfg.BlocklistURL, "blocklist-url", envString("TRACEGUARD_BLOCKLIST_URL", ""), "HTTPS URL that returns newline-delimited domains or URLs to block")
-	var manual domainList
-	var manualAllow domainList
-	fs.Var(&manual, "block-domain", "exact domain, deny-all marker '*', @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to block; may be specified more than once")
-	fs.Var(&manualAllow, "allow-domain", "exact or wildcard domain, @/abs/path file, bare resolver IP/CIDR, or DoH/DoT endpoint to allow even if it also appears in a block policy; may be specified more than once")
-	fs.StringVar(&cfg.CachePath, "cache-path", envString("TRACEGUARD_CACHE_PATH", defaultCachePath), "path to the cached remote blocklist")
-	fs.DurationVar(&cfg.RefreshInterval, "refresh-interval", refreshDefault, "remote blocklist refresh interval")
+	fs.BoolVar(&cfg.Block, "block", blockDefault, "enforce configured DNS and outbound egress block decisions")
+	fs.BoolVar(&cfg.DryRun, "dry-run", dryRunDefault, "evaluate DNS and outbound egress policy and log would-block decisions without enforcing drops")
+	fs.StringVar(&cfg.PolicyPath, "policy-path", envString("TRACEGUARD_POLICY_PATH", ""), "absolute path to a strict YAML v1 policy overlay")
+	fs.StringVar(&cfg.PolicyURL, "policy-url", envString("TRACEGUARD_POLICY_URL", ""), "HTTPS URL that returns a strict YAML v1 base policy")
+	fs.StringVar(&cfg.PolicyCachePath, "policy-cache-path", envString("TRACEGUARD_POLICY_CACHE_PATH", defaultPolicyCachePath), "absolute path to the cached remote YAML policy")
+	fs.DurationVar(&cfg.PolicyRefreshInterval, "policy-refresh-interval", policyRefreshDefault, "remote YAML policy refresh interval")
+	fs.StringVar(&cfg.PolicyAuthorization, "policy-authorization", envString("TRACEGUARD_POLICY_AUTHORIZATION", ""), "optional Authorization header value for the remote YAML policy")
+	fs.StringVar(&cfg.PolicyCAPath, "policy-ca-path", envString("TRACEGUARD_POLICY_CA_PATH", ""), "path to an optional CA bundle for the remote YAML policy")
+	fs.StringVar(&cfg.PolicyClientCert, "policy-client-cert", envString("TRACEGUARD_POLICY_CLIENT_CERT", ""), "path to an optional client certificate for the remote YAML policy")
+	fs.StringVar(&cfg.PolicyClientKey, "policy-client-key", envString("TRACEGUARD_POLICY_CLIENT_KEY", ""), "path to an optional client key for the remote YAML policy")
 	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for egress attachment")
 	fs.StringVar(&cfg.LogPath, "log-path", envString("TRACEGUARD_LOG_PATH", defaultLogPath), "absolute path to the primary log file")
 	fs.StringVar(&cfg.LogFormat, "log-format", envString("TRACEGUARD_LOG_FORMAT", defaultLogFormat), "log format: text or json")
@@ -164,49 +150,54 @@ func Parse() (Config, error) {
 		return Config{}, err
 	}
 	if fs.NArg() > 0 {
-		return Config{}, fmt.Errorf("unexpected positional arguments: %s; quote '*' as -block-domain '*'", strings.Join(fs.Args(), ", "))
+		return Config{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), ", "))
 	}
 	normalizeKubernetesConfig(&cfg)
 	if cfg.PrintVersion || cfg.Doctor {
 		return cfg, nil
 	}
 
-	cfg.ManualDomains, err = loadDomainEnv("TRACEGUARD_BLOCK_DOMAINS")
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.ManualAllow, err = loadDomainEnv("TRACEGUARD_ALLOW_DOMAINS")
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.ManualDomains = compact(append(cfg.ManualDomains, manual...))
-	cfg.ManualAllow = compact(append(cfg.ManualAllow, manualAllow...))
-	if cfg.RefreshInterval <= 0 {
-		return Config{}, errors.New("refresh-interval must be positive")
+	if cfg.PolicyRefreshInterval <= 0 {
+		return Config{}, errors.New("policy-refresh-interval must be positive")
 	}
 
-	if (cfg.Block || cfg.DryRun) && cfg.BlocklistURL == "" && len(cfg.ManualDomains) == 0 && len(cfg.ManualAllow) == 0 {
+	if (cfg.Block || cfg.DryRun) && cfg.PolicyPath == "" && cfg.PolicyURL == "" {
 		return Config{}, errors.New("block and dry-run modes require at least one policy source")
 	}
 
-	if cfg.BlocklistURL != "" {
-		parsed, err := neturl.Parse(strings.TrimSpace(cfg.BlocklistURL))
+	if cfg.PolicyURL != "" {
+		parsed, err := neturl.Parse(strings.TrimSpace(cfg.PolicyURL))
 		if err != nil {
-			return Config{}, fmt.Errorf("blocklist-url: %w", err)
+			return Config{}, fmt.Errorf("policy-url: %w", err)
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
-			return Config{}, errors.New("blocklist-url must use https:// and include a host")
+			return Config{}, errors.New("policy-url must use https:// and include a host")
 		}
 	}
 
 	if cfg.CgroupPath == "" {
 		return Config{}, errors.New("cgroup-path must not be empty")
 	}
-	if strings.TrimSpace(cfg.CachePath) == "" {
-		return Config{}, errors.New("cache-path must not be empty")
+	if cfg.PolicyPath != "" && !filepath.IsAbs(cfg.PolicyPath) {
+		return Config{}, errors.New("policy-path must be an absolute path")
 	}
-	if !filepath.IsAbs(cfg.CachePath) {
-		return Config{}, errors.New("cache-path must be an absolute path")
+	if strings.TrimSpace(cfg.PolicyCachePath) == "" {
+		return Config{}, errors.New("policy-cache-path must not be empty")
+	}
+	if !filepath.IsAbs(cfg.PolicyCachePath) {
+		return Config{}, errors.New("policy-cache-path must be an absolute path")
+	}
+	if cfg.PolicyCAPath != "" && !filepath.IsAbs(cfg.PolicyCAPath) {
+		return Config{}, errors.New("policy-ca-path must be an absolute path")
+	}
+	if cfg.PolicyClientCert != "" && !filepath.IsAbs(cfg.PolicyClientCert) {
+		return Config{}, errors.New("policy-client-cert must be an absolute path")
+	}
+	if cfg.PolicyClientKey != "" && !filepath.IsAbs(cfg.PolicyClientKey) {
+		return Config{}, errors.New("policy-client-key must be an absolute path")
+	}
+	if (cfg.PolicyClientCert == "") != (cfg.PolicyClientKey == "") {
+		return Config{}, errors.New("policy-client-cert and policy-client-key must be set together")
 	}
 	if !filepath.IsAbs(cfg.LogPath) {
 		return Config{}, errors.New("log-path must be an absolute path")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
 )
 
@@ -75,11 +76,17 @@ func TestPolicySlotValuePreservesActiveSlot(t *testing.T) {
 func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
 	t.Parallel()
 
-	if got := binary.Size(runtimeSettings{}); got != 8 {
-		t.Fatalf("runtimeSettings size = %d, want 8", got)
+	if got := binary.Size(runtimeSettings{}); got != 16 {
+		t.Fatalf("runtimeSettings size = %d, want 16", got)
 	}
 	if got := binary.Size(domainSuffixKey{}); got != 16 {
 		t.Fatalf("domainSuffixKey size = %d, want 16", got)
+	}
+	if got := binary.Size(egress4Key{}); got != 28 {
+		t.Fatalf("egress4Key size = %d, want 28", got)
+	}
+	if got := binary.Size(egress6Key{}); got != 40 {
+		t.Fatalf("egress6Key size = %d, want 40", got)
 	}
 }
 
@@ -90,12 +97,61 @@ func TestPolicyLimitsMatchKernelMapCapacities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadTraceguard returned error: %v", err)
 	}
-	if got := spec.Maps["blocklist"].MaxEntries; got != blocklistMaxEntries {
-		t.Fatalf("blocklist map capacity = %d, userspace limit = %d", got, blocklistMaxEntries)
+	if got, want := spec.Maps["blocklist"].MaxEntries, uint32(2*blocklistMaxEntries); got != want {
+		t.Fatalf("blocklist map capacity = %d, want two policy slots (%d)", got, want)
 	}
-	if got := spec.Maps["endpoint4_rules"].MaxEntries; got != endpointMaxEntries {
-		t.Fatalf("endpoint map capacity = %d, userspace limit = %d", got, endpointMaxEntries)
+	if got, want := spec.Maps["endpoint4_rules"].MaxEntries, uint32(2*endpointMaxEntries); got != want {
+		t.Fatalf("endpoint map capacity = %d, want two policy slots (%d)", got, want)
 	}
+	for _, name := range []string{"block_suffixes", "egress4_allow_rules", "egress4_block_rules", "egress6_allow_rules", "egress6_block_rules"} {
+		if got, want := spec.Maps[name].MaxEntries, uint32(2*egressMaxEntries); got != want {
+			t.Fatalf("%s map capacity = %d, want two policy slots (%d)", name, got, want)
+		}
+	}
+}
+
+func TestLinux71ObjectsIncludeEnhancedTelemetryHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		loadSpec func() (*ebpf.CollectionSpec, error)
+	}{
+		{name: "default", loadSpec: loadTraceguardLinux71},
+		{name: "dns compat", loadSpec: loadTraceguardLinux71DNSCompat},
+		{name: "recvmsg compat", loadSpec: loadTraceguardLinux71RecvmsgCompat},
+		{name: "dns recvmsg compat", loadSpec: loadTraceguardLinux71DNSRecvmsgCompat},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec, err := tc.loadSpec()
+			if err != nil {
+				t.Fatalf("load spec: %v", err)
+			}
+			for _, helper := range []asm.BuiltinFunc{
+				asm.FnGetCurrentUidGid,
+				asm.FnGetCurrentCgroupId,
+				asm.FnGetSocketCookie,
+			} {
+				if !collectionUsesHelper(spec, helper) {
+					t.Errorf("generated object does not call %s", helper)
+				}
+			}
+		})
+	}
+}
+
+func collectionUsesHelper(spec *ebpf.CollectionSpec, helper asm.BuiltinFunc) bool {
+	for _, program := range spec.Programs {
+		for _, instruction := range program.Instructions {
+			if instruction.IsBuiltinCall() && asm.BuiltinFunc(instruction.Constant) == helper {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestDomainSuffixPolicySlotsProduceDistinctKeys(t *testing.T) {

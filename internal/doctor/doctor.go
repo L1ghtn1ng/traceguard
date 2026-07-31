@@ -16,6 +16,7 @@ import (
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
+	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 )
 
@@ -85,14 +86,54 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	} else {
 		check(false, "log-path", err.Error())
 	}
-	check(strings.TrimSpace(cfg.CachePath) != "" && filepath.IsAbs(cfg.CachePath), "cache-path", emptyDetail(cfg.CachePath, "must be a non-empty absolute path"))
-
-	if cfg.BlocklistURL != "" {
-		parsed, err := url.Parse(cfg.BlocklistURL)
-		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "blocklist-url", cfg.BlocklistURL)
+	check(strings.TrimSpace(cfg.PolicyCachePath) != "" && filepath.IsAbs(cfg.PolicyCachePath), "policy-cache-path", emptyDetail(cfg.PolicyCachePath, "must be a non-empty absolute path"))
+	check(cfg.PolicyRefreshInterval > 0, "policy-refresh-interval", cfg.PolicyRefreshInterval.String())
+	if cfg.PolicyPath != "" {
+		if !filepath.IsAbs(cfg.PolicyPath) {
+			check(false, "policy-path", "must be absolute")
+		} else if info, err := env.stat(cfg.PolicyPath); err != nil {
+			check(false, "policy-path", err.Error())
+		} else if info.IsDir() {
+			check(false, "policy-path", "must be a regular file")
+		} else if info.Size() > policyconfig.MaxDocumentBytes {
+			check(false, "policy-path", fmt.Sprintf("file exceeds %d bytes", policyconfig.MaxDocumentBytes))
+		} else if payload, err := env.readFile(cfg.PolicyPath); err != nil {
+			check(false, "policy-parse", err.Error())
+		} else if document, err := policyconfig.Parse(payload); err != nil {
+			check(false, "policy-parse", err.Error())
+		} else {
+			check(true, "policy-path", cfg.PolicyPath)
+			check(true, "policy-parse", fmt.Sprintf("version=%d egress_rules=%d detections=%d", document.Version, len(document.Egress.Rules), len(document.DetectionRules)))
+		}
 	} else {
-		check(true, "blocklist-url", "not configured")
+		check(true, "policy-path", "not configured")
 	}
+	if cfg.PolicyURL != "" {
+		parsed, err := url.Parse(cfg.PolicyURL)
+		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "policy-url", cfg.PolicyURL)
+	} else {
+		check(true, "policy-url", "not configured")
+	}
+	for _, target := range []struct {
+		path string
+		name string
+	}{
+		{path: cfg.PolicyCAPath, name: "policy-ca-path"},
+		{path: cfg.PolicyClientCert, name: "policy-client-cert"},
+		{path: cfg.PolicyClientKey, name: "policy-client-key"},
+	} {
+		if target.path == "" {
+			continue
+		}
+		if !filepath.IsAbs(target.path) {
+			check(false, target.name, "must be absolute")
+		} else if info, err := env.stat(target.path); err != nil {
+			check(false, target.name, err.Error())
+		} else {
+			check(!info.IsDir(), target.name, target.path)
+		}
+	}
+	check((cfg.PolicyClientCert == "") == (cfg.PolicyClientKey == ""), "policy-client-credentials", "certificate and key must be configured together")
 
 	if cfg.MetricsAddr != "" {
 		_, err := net.ResolveTCPAddr("tcp", cfg.MetricsAddr)

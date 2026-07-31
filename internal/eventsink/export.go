@@ -132,14 +132,17 @@ func (e *exportSink) run(ctx context.Context) {
 		batch = batch[:0]
 	}
 	shutdown := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), exportShutdownFlush)
+		defer cancel()
 		for {
 			select {
 			case payload := <-e.queue:
 				batch = append(batch, payload)
 				e.updateQueueDepth()
+				if len(batch) >= exportBatchSize {
+					flush(shutdownCtx)
+				}
 			default:
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), exportShutdownFlush)
-				defer cancel()
 				// The worker context is already canceled during Close; use a short
 				// independent context so the final batch can be delivered or spooled.
 				flush(shutdownCtx)

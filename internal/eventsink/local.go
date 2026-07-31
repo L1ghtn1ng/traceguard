@@ -90,7 +90,7 @@ func (b *blockedSink) Close() error {
 }
 
 func isBlockedRecord(entry record) bool {
-	return entry.Message == "blocked" || strings.HasPrefix(entry.Message, "blocked-")
+	return entry.Message == "blocked" || entry.Message == "egress_blocked" || strings.HasPrefix(entry.Message, "blocked-")
 }
 
 type domainSink struct {

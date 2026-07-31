@@ -1,5 +1,5 @@
 [Unit]
-Description=TraceGuard DNS and exec monitor
+Description=TraceGuard eBPF runtime policy and detection monitor
 After=network-online.target
 Wants=network-online.target
 

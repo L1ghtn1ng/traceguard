@@ -1,85 +1,13 @@
 package blocklist
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
 )
-
-func ParseEntries(r io.Reader) ([]string, error) {
-	rules, err := ParseRules(r)
-	if err != nil {
-		return nil, err
-	}
-	return rules.BlockDomains, nil
-}
-
-func ParseRules(r io.Reader) (Rules, error) {
-	blockDomains := make(map[string]struct{})
-	allowDomains := make(map[string]struct{})
-	blockSuffixes := make(map[string]struct{})
-	allowSuffixes := make(map[string]struct{})
-	blockEndpoints := make(map[string]EndpointRule)
-	allowEndpoints := make(map[string]EndpointRule)
-	blockEndpointCIDRs := make(map[string]EndpointCIDR)
-	allowEndpointCIDRs := make(map[string]EndpointCIDR)
-	var blockAllDomains bool
-	var blockAllResolvers bool
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-
-		if ip := net.ParseIP(fields[0]); ip != nil {
-			parsedRule := false
-			for _, field := range fields[1:] {
-				if strings.HasPrefix(field, "#") {
-					break
-				}
-				parsedRule = true
-				addRuleEntry(field, ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
-			}
-			if !parsedRule {
-				addRuleEntry(fields[0], ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
-			}
-			continue
-		}
-
-		addRuleEntry(fields[0], ruleBlock, &blockAllDomains, &blockAllResolvers, blockDomains, allowDomains, blockSuffixes, allowSuffixes, blockEndpoints, allowEndpoints, blockEndpointCIDRs, allowEndpointCIDRs)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return Rules{}, err
-	}
-
-	rules := Rules{
-		BlockAllDomains:    blockAllDomains,
-		BlockAllResolvers:  blockAllResolvers,
-		BlockDomains:       sortedDomains(blockDomains),
-		AllowDomains:       sortedDomains(allowDomains),
-		BlockSuffixes:      sortedDomains(blockSuffixes),
-		AllowSuffixes:      sortedDomains(allowSuffixes),
-		BlockEndpoints:     sortedEndpoints(blockEndpoints),
-		AllowEndpoints:     sortedEndpoints(allowEndpoints),
-		BlockEndpointCIDRs: sortedEndpointCIDRs(blockEndpointCIDRs),
-		AllowEndpointCIDRs: sortedEndpointCIDRs(allowEndpointCIDRs),
-	}
-	return rules, nil
-}
 
 type ruleAction uint8
 
@@ -88,75 +16,133 @@ const (
 	ruleAllow
 )
 
-func addRuleEntry(raw string, defaultAction ruleAction, blockAllDomains, blockAllResolvers *bool, blockDomains, allowDomains, blockSuffixes, allowSuffixes map[string]struct{}, blockEndpoints, allowEndpoints map[string]EndpointRule, blockEndpointCIDRs, allowEndpointCIDRs map[string]EndpointCIDR) {
-	action, target := splitRulePrefix(raw, defaultAction)
+type ruleAccumulator struct {
+	blockAllDomains    bool
+	blockAllResolvers  bool
+	blockDomains       map[string]struct{}
+	allowDomains       map[string]struct{}
+	blockSuffixes      map[string]struct{}
+	allowSuffixes      map[string]struct{}
+	blockEndpoints     map[string]EndpointRule
+	allowEndpoints     map[string]EndpointRule
+	blockEndpointCIDRs map[string]EndpointCIDR
+	allowEndpointCIDRs map[string]EndpointCIDR
+}
+
+func newRuleAccumulator() *ruleAccumulator {
+	return &ruleAccumulator{
+		blockDomains:       make(map[string]struct{}),
+		allowDomains:       make(map[string]struct{}),
+		blockSuffixes:      make(map[string]struct{}),
+		allowSuffixes:      make(map[string]struct{}),
+		blockEndpoints:     make(map[string]EndpointRule),
+		allowEndpoints:     make(map[string]EndpointRule),
+		blockEndpointCIDRs: make(map[string]EndpointCIDR),
+		allowEndpointCIDRs: make(map[string]EndpointCIDR),
+	}
+}
+
+// ParsePolicyRules parses strict policy entries. Each entry's action comes only
+// from the list containing it; legacy action prefixes and invalid entries fail.
+func ParsePolicyRules(block, allow []string) (Rules, error) {
+	rules := newRuleAccumulator()
+	for _, group := range []struct {
+		name    string
+		entries []string
+		action  ruleAction
+	}{
+		{name: "block", entries: block, action: ruleBlock},
+		{name: "allow", entries: allow, action: ruleAllow},
+	} {
+		for index, raw := range group.entries {
+			value := strings.TrimSpace(raw)
+			lower := strings.ToLower(value)
+			if strings.HasPrefix(lower, "allow:") || strings.HasPrefix(lower, "block:") {
+				return Rules{}, fmt.Errorf("dns.%s[%d] must not include an action prefix", group.name, index)
+			}
+			if !rules.addTarget(value, group.action) {
+				return Rules{}, fmt.Errorf("dns.%s[%d] is invalid: %q", group.name, index, raw)
+			}
+		}
+	}
+	return rules.build(), nil
+}
+
+func (r *ruleAccumulator) addTarget(target string, action ruleAction) bool {
 	if target == "*" {
 		if action == ruleBlock {
-			*blockAllDomains = true
-			*blockAllResolvers = true
+			r.blockAllDomains = true
+			r.blockAllResolvers = true
+			return true
 		}
-		return
+		return false
 	}
 	if suffix, ok := normalizeSuffix(target); ok {
 		if action == ruleAllow {
-			allowSuffixes[suffix] = struct{}{}
-			return
+			r.allowSuffixes[suffix] = struct{}{}
+			return true
 		}
-		blockSuffixes[suffix] = struct{}{}
-		return
+		r.blockSuffixes[suffix] = struct{}{}
+		return true
 	}
 	if cidrs, ok := normalizeResolverCIDR(target); ok {
 		for _, cidr := range cidrs {
 			if action == ruleAllow {
-				allowEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
+				r.allowEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
 				continue
 			}
-			blockEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
+			r.blockEndpointCIDRs[endpointCIDRKey(cidr)] = cidr
 		}
-		return
+		return true
 	}
 	if endpoints, ok := normalizeResolverLiteral(target); ok {
 		for _, endpoint := range endpoints {
 			if action == ruleAllow {
-				allowEndpoints[endpointKey(endpoint)] = endpoint
+				r.allowEndpoints[endpointKey(endpoint)] = endpoint
 				continue
 			}
-			blockEndpoints[endpointKey(endpoint)] = endpoint
+			r.blockEndpoints[endpointKey(endpoint)] = endpoint
 		}
-		return
+		return true
 	}
 	if endpoint, ok := normalizeEndpoint(target); ok {
 		if action == ruleAllow {
-			allowEndpoints[endpointKey(endpoint)] = endpoint
+			r.allowEndpoints[endpointKey(endpoint)] = endpoint
 			if net.ParseIP(endpoint.Host) == nil {
-				allowDomains[endpoint.Host] = struct{}{}
+				r.allowDomains[endpoint.Host] = struct{}{}
 			}
-			return
+			return true
 		}
-		blockEndpoints[endpointKey(endpoint)] = endpoint
+		r.blockEndpoints[endpointKey(endpoint)] = endpoint
 		if net.ParseIP(endpoint.Host) == nil {
-			blockDomains[endpoint.Host] = struct{}{}
+			r.blockDomains[endpoint.Host] = struct{}{}
 		}
-		return
+		return true
 	}
 	if domain, ok := normalizeDomain(target); ok {
 		if action == ruleAllow {
-			allowDomains[domain] = struct{}{}
-			return
+			r.allowDomains[domain] = struct{}{}
+			return true
 		}
-		blockDomains[domain] = struct{}{}
+		r.blockDomains[domain] = struct{}{}
+		return true
 	}
+	return false
 }
 
-func splitRulePrefix(raw string, defaultAction ruleAction) (ruleAction, string) {
-	value := strings.TrimSpace(raw)
-	if strings.HasPrefix(strings.ToLower(value), "allow:") {
-		return ruleAllow, strings.TrimSpace(value[len("allow:"):])
+func (r *ruleAccumulator) build() Rules {
+	return Rules{
+		BlockAllDomains:    r.blockAllDomains,
+		BlockAllResolvers:  r.blockAllResolvers,
+		BlockDomains:       sortedDomains(r.blockDomains),
+		AllowDomains:       sortedDomains(r.allowDomains),
+		BlockSuffixes:      sortedDomains(r.blockSuffixes),
+		AllowSuffixes:      sortedDomains(r.allowSuffixes),
+		BlockEndpoints:     sortedEndpoints(r.blockEndpoints),
+		AllowEndpoints:     sortedEndpoints(r.allowEndpoints),
+		BlockEndpointCIDRs: sortedEndpointCIDRs(r.blockEndpointCIDRs),
+		AllowEndpointCIDRs: sortedEndpointCIDRs(r.allowEndpointCIDRs),
 	}
-	if strings.HasPrefix(strings.ToLower(value), "block:") {
-		return ruleBlock, strings.TrimSpace(value[len("block:"):])
-	}
-	return defaultAction, value
 }
 
 func normalizeSuffix(raw string) (string, bool) {
@@ -286,133 +272,6 @@ func normalizeDomain(raw string) (string, bool) {
 	}
 
 	return raw, true
-}
-
-func mergeDomains(groups ...[]string) []string {
-	dedup := make(map[string]struct{})
-	for _, group := range groups {
-		for _, domain := range group {
-			dedup[domain] = struct{}{}
-		}
-	}
-
-	out := make([]string, 0, len(dedup))
-	for domain := range dedup {
-		out = append(out, domain)
-	}
-	slices.Sort(out)
-	return out
-}
-
-func mergeRules(groups ...Rules) Rules {
-	var merged Rules
-	for _, group := range groups {
-		merged.BlockAllDomains = merged.BlockAllDomains || group.BlockAllDomains
-		merged.BlockAllResolvers = merged.BlockAllResolvers || group.BlockAllResolvers
-	}
-	merged.BlockDomains = mergeDomains(func() [][]string {
-		out := make([][]string, 0, len(groups))
-		for _, group := range groups {
-			out = append(out, group.BlockDomains)
-		}
-		return out
-	}()...)
-	merged.AllowDomains = mergeDomains(func() [][]string {
-		out := make([][]string, 0, len(groups))
-		for _, group := range groups {
-			out = append(out, group.AllowDomains)
-		}
-		return out
-	}()...)
-	merged.BlockSuffixes = mergeDomains(func() [][]string {
-		out := make([][]string, 0, len(groups))
-		for _, group := range groups {
-			out = append(out, group.BlockSuffixes)
-		}
-		return out
-	}()...)
-	merged.AllowSuffixes = mergeDomains(func() [][]string {
-		out := make([][]string, 0, len(groups))
-		for _, group := range groups {
-			out = append(out, group.AllowSuffixes)
-		}
-		return out
-	}()...)
-	merged.BlockEndpoints = mergeEndpointGroups(groups, func(group Rules) []EndpointRule { return group.BlockEndpoints })
-	merged.AllowEndpoints = mergeEndpointGroups(groups, func(group Rules) []EndpointRule { return group.AllowEndpoints })
-	merged.BlockEndpointCIDRs = mergeEndpointCIDRGroups(groups, func(group Rules) []EndpointCIDR { return group.BlockEndpointCIDRs })
-	merged.AllowEndpointCIDRs = mergeEndpointCIDRGroups(groups, func(group Rules) []EndpointCIDR { return group.AllowEndpointCIDRs })
-	return merged
-}
-
-func mergeEndpointGroups(groups []Rules, pick func(Rules) []EndpointRule) []EndpointRule {
-	seen := make(map[string]struct{})
-	out := make([]EndpointRule, 0)
-	for _, group := range groups {
-		for _, endpoint := range pick(group) {
-			key := endpointKey(endpoint)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, endpoint)
-		}
-	}
-	slices.SortFunc(out, func(a, b EndpointRule) int {
-		if a.Kind != b.Kind {
-			return strings.Compare(string(a.Kind), string(b.Kind))
-		}
-		if a.Host != b.Host {
-			return strings.Compare(a.Host, b.Host)
-		}
-		switch {
-		case a.Port < b.Port:
-			return -1
-		case a.Port > b.Port:
-			return 1
-		default:
-			return 0
-		}
-	})
-	return out
-}
-
-func mergeEndpointCIDRGroups(groups []Rules, pick func(Rules) []EndpointCIDR) []EndpointCIDR {
-	seen := make(map[string]struct{})
-	out := make([]EndpointCIDR, 0)
-	for _, group := range groups {
-		for _, cidr := range pick(group) {
-			key := endpointCIDRKey(cidr)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, cidr)
-		}
-	}
-	slices.SortFunc(out, func(a, b EndpointCIDR) int {
-		if a.Kind != b.Kind {
-			return strings.Compare(string(a.Kind), string(b.Kind))
-		}
-		if a.Prefix.Addr().BitLen() != b.Prefix.Addr().BitLen() {
-			if a.Prefix.Addr().BitLen() < b.Prefix.Addr().BitLen() {
-				return -1
-			}
-			return 1
-		}
-		if a.Prefix.String() != b.Prefix.String() {
-			return strings.Compare(a.Prefix.String(), b.Prefix.String())
-		}
-		switch {
-		case a.Port < b.Port:
-			return -1
-		case a.Port > b.Port:
-			return 1
-		default:
-			return 0
-		}
-	})
-	return out
 }
 
 func normalizeEndpoint(raw string) (EndpointRule, bool) {

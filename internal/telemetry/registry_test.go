@@ -20,6 +20,14 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.IncProcessCache(true)
 	registry.IncPolicyDecision("block")
 	registry.IncPolicyReload("sighup", true)
+	registry.IncPolicySourceLoad("remote", true)
+	registry.SetPolicySourceHealthy("remote", true)
+	registry.SetEgressRuleCounts(2, 3)
+	registry.IncEgressDecision("block", "dry-run")
+	registry.SetDetectionRules(4)
+	registry.SetDetectionStateGroups(7)
+	registry.IncDetectionAlert("metadata-burst", "warning")
+	registry.IncCgroupReconcile(true)
 	registry.IncEventArchive("success")
 	registry.IncEventExport("queued")
 	registry.IncEventSyslog("success")
@@ -38,7 +46,6 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		"allow|endpoint": 1,
 	})
 	registry.SetKubernetesPodCount(3)
-	registry.IncBlocklistLoad("remote", true)
 	registry.IncProcessMetadata("proc")
 	registry.IncProcessLSMMetadata("apparmor")
 	registry.SetEBPFAttachedPrograms(14)
@@ -51,7 +58,6 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`# TYPE traceguard_events_total counter`,
 		`# HELP traceguard_policy_domains TraceGuard policy domains.`,
 		`# TYPE traceguard_policy_domains gauge`,
-		`traceguard_blocklist_load_total{source="remote",status="success"} 1`,
 		`traceguard_ebpf_attached_programs 14`,
 		`traceguard_ebpf_read_errors_total 1`,
 		`traceguard_kernel_feature_enabled{feature="bpf_lsm"} 1`,
@@ -66,6 +72,15 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`traceguard_policy_rules{action="allow",type="endpoint"} 1`,
 		`traceguard_policy_rules{action="block",type="domain"} 2`,
 		`traceguard_policy_reload_total{status="success",trigger="sighup"} 1`,
+		`traceguard_policy_source_load_total{source="remote",status="success"} 1`,
+		`traceguard_policy_source_healthy{source="remote"} 1`,
+		`traceguard_egress_rules{action="allow"} 2`,
+		`traceguard_egress_rules{action="block"} 3`,
+		`traceguard_egress_decisions_total{decision="block",mode="dry-run"} 1`,
+		`traceguard_detection_rules 4`,
+		`traceguard_detection_state_groups 7`,
+		`traceguard_detection_alerts_total{rule_id="metadata-burst",severity="warning"} 1`,
+		`traceguard_cgroup_reconcile_total{status="success"} 1`,
 		`traceguard_event_archive_total{status="success"} 1`,
 		`traceguard_event_export_total{status="queued"} 1`,
 		`traceguard_event_syslog_total{status="success"} 1`,
@@ -115,6 +130,19 @@ func TestEventSinkHealthRecovers(t *testing.T) {
 	registry.SetEventSinkHealthy("archive", true)
 	if !registry.Healthy() {
 		t.Fatal("registry did not recover after sink success")
+	}
+}
+
+func TestPolicySourceHealthAffectsReadinessAndRecovers(t *testing.T) {
+	t.Parallel()
+	registry := NewRegistry()
+	registry.SetPolicySourceHealthy("remote", false)
+	if registry.Healthy() {
+		t.Fatal("registry stayed healthy after policy source failure")
+	}
+	registry.SetPolicySourceHealthy("remote", true)
+	if !registry.Healthy() {
+		t.Fatal("registry did not recover after policy source success")
 	}
 }
 

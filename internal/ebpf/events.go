@@ -43,6 +43,8 @@ const (
 	EventResolverBlocked
 	EventConnection
 	EventFileAccess
+	EventEgressBlocked
+	EventEgressWouldBlock
 )
 
 type rawEvent struct {
@@ -67,7 +69,7 @@ type rawEvent struct {
 	EventSource  uint32
 	FeatureSet   uint32
 	UIDSource    uint32
-	CPad2        uint32
+	RuleID       uint32
 	CgroupID     uint64
 	SocketCookie uint64
 	Addr         [16]byte
@@ -99,6 +101,8 @@ type Event struct {
 	EventSource      string
 	KernelFeatureSet string
 	UIDSource        string
+	RuleNumber       uint32
+	RuleID           string
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -143,6 +147,7 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		EventSource:      eventSourceName(raw.EventSource),
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
+		RuleNumber:       raw.RuleID,
 	}, nil
 }
 

@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://traceguard.dev/schema/policy-v1.json",
+  "title": "TraceGuard policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {"const": 1},
+    "builtin_profiles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"const": "baseline"}
+    },
+    "disabled_rule_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/rule_id"}
+    },
+    "dns": {"$ref": "#/$defs/dns"},
+    "egress": {"$ref": "#/$defs/egress"},
+    "detections": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/detection"}
+    }
+  },
+  "$defs": {
+    "rule_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "string_list": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"type": "string"}
+    },
+    "uid_list": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}
+    },
+    "port_list": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 0, "maximum": 65535}
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*$"
+    },
+    "dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "block": {"$ref": "#/$defs/string_list"},
+        "allow": {"$ref": "#/$defs/string_list"}
+      }
+    },
+    "egress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["allow", "block"]},
+        "rules": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/egress_rule"}
+        }
+      }
+    },
+    "egress_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "uids": {"$ref": "#/$defs/uid_list"},
+            "cgroup_paths": {"$ref": "#/$defs/string_list"},
+            "cgroup_prefixes": {"$ref": "#/$defs/string_list"}
+          }
+        },
+        "destinations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cidrs": {"$ref": "#/$defs/string_list"},
+            "ports": {"$ref": "#/$defs/port_list"},
+            "protocols": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"enum": ["tcp", "udp"]}
+            }
+          }
+        }
+      }
+    },
+    "detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "properties": {"enabled": {"const": false}},
+              "required": ["enabled"]
+            }
+          },
+          "then": {"required": ["severity", "events", "message"]}
+        }
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "enabled": {"type": "boolean"},
+        "severity": {
+          "enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block"]
+          }
+        },
+        "match": {"$ref": "#/$defs/detection_match"},
+        "exclude": {"$ref": "#/$defs/detection_match"},
+        "threshold": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "count": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "within": {"$ref": "#/$defs/duration"},
+            "group_by": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "path", "service", "container", "pod", "k8s_namespace"]
+              }
+            }
+          }
+        },
+        "cooldown": {"$ref": "#/$defs/duration"},
+        "message": {"type": "string", "minLength": 1},
+        "tags": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      }
+    },
+    "detection_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actions": {"$ref": "#/$defs/string_list"},
+        "directions": {"type": "array", "items": {"enum": ["inbound", "outbound"]}},
+        "transports": {"$ref": "#/$defs/string_list"},
+        "protocols": {"type": "array", "items": {"enum": ["tcp", "udp"]}},
+        "uids": {"$ref": "#/$defs/uid_list"},
+        "domains": {"$ref": "#/$defs/string_list"},
+        "domain_suffixes": {"$ref": "#/$defs/string_list"},
+        "destination_cidrs": {"$ref": "#/$defs/string_list"},
+        "ports": {"$ref": "#/$defs/port_list"},
+        "executable_globs": {"$ref": "#/$defs/string_list"},
+        "command_globs": {"$ref": "#/$defs/string_list"},
+        "file_path_globs": {"$ref": "#/$defs/string_list"},
+        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}},
+        "cgroup_prefixes": {"$ref": "#/$defs/string_list"},
+        "services": {"$ref": "#/$defs/string_list"},
+        "container_ids": {"$ref": "#/$defs/string_list"},
+        "pod_uids": {"$ref": "#/$defs/string_list"},
+        "k8s_namespaces": {"$ref": "#/$defs/string_list"},
+        "k8s_pods": {"$ref": "#/$defs/string_list"},
+        "k8s_service_accounts": {"$ref": "#/$defs/string_list"},
+        "k8s_owners": {"$ref": "#/$defs/string_list"},
+        "k8s_apps": {"$ref": "#/$defs/string_list"},
+        "lsm_sources": {"$ref": "#/$defs/string_list"},
+        "lsm_labels": {"$ref": "#/$defs/string_list"}
+      }
+    }
+  }
+}

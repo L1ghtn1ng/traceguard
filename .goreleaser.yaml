@@ -38,6 +38,8 @@ archives:
       - LICENSE
       - packaging/systemd/traceguard.service
       - packaging/default/traceguard.env
+      - examples/policy.yaml
+      - docs/policy.schema.json
 
 checksum:
   name_template: checksums.txt
@@ -57,8 +59,8 @@ nfpms:
       - rpm
       - archlinux
     description: |
-      TraceGuard observes DNS lookups and exec activity with eBPF and can block
-      exact-match DNS domains from a local or remote six-hour-refreshed blocklist.
+      TraceGuard observes Linux runtime activity with eBPF and enforces DNS and
+      UID/cgroup-aware outbound policy from legacy or strict YAML sources.
     license: MIT
     maintainer: TraceGuard Maintainers <maintainers@example.invalid>
     section: admin
@@ -72,6 +74,10 @@ nfpms:
         type: config|noreplace
       - src: README.md
         dst: /usr/share/doc/traceguard/README.md
+      - src: examples/policy.yaml
+        dst: /usr/share/doc/traceguard/policy.example.yaml
+      - src: docs/policy.schema.json
+        dst: /usr/share/doc/traceguard/policy.schema.json
       - src: LICENSE
         dst: /usr/share/licenses/traceguard/LICENSE
 

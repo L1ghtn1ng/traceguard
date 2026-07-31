@@ -131,14 +131,15 @@ func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	recorder.Info("would-block", map[string]any{"domain": "dry-run.example", "policy": "block"})
 	recorder.Info("blocked", map[string]any{"domain": "blocked.example", "policy": "block"})
 	recorder.Info("blocked-doh", map[string]any{"endpoint": "dns.example", "policy": "block"})
+	recorder.Info("egress_blocked", map[string]any{"peer_address": "203.0.113.9", "policy": "block"})
 
 	content, err := os.ReadFile(blockedPath)
 	if err != nil {
 		t.Fatalf("ReadFile blocked log: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("blocked log line count = %d, want 2; content=%q", len(lines), content)
+	if len(lines) != 3 {
+		t.Fatalf("blocked log line count = %d, want 3; content=%q", len(lines), content)
 	}
 
 	var first map[string]any
@@ -155,6 +156,14 @@ func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	}
 	if second["message"] != "blocked-doh" || second["endpoint"] != "dns.example" || second["policy"] != "block" {
 		t.Fatalf("second blocked line = %#v, want blocked resolver record", second)
+	}
+
+	var third map[string]any
+	if err := json.Unmarshal([]byte(lines[2]), &third); err != nil {
+		t.Fatalf("json.Unmarshal third blocked line: %v", err)
+	}
+	if third["message"] != "egress_blocked" || third["peer_address"] != "203.0.113.9" || third["policy"] != "block" {
+		t.Fatalf("third blocked line = %#v, want blocked egress record", third)
 	}
 }
 
@@ -384,19 +393,19 @@ func TestRecorderInfoIfChangedSuppressesUnchangedPayload(t *testing.T) {
 
 	if !recorder.InfoIfChanged("policy loaded", map[string]any{
 		"block_domains": 1,
-		"source":        "https://example.test/blocklist.txt",
+		"source":        "https://example.test/policy.yaml",
 	}) {
 		t.Fatal("InfoIfChanged did not emit initial policy snapshot")
 	}
 	if recorder.InfoIfChanged("policy loaded", map[string]any{
-		"source":        "https://example.test/blocklist.txt",
+		"source":        "https://example.test/policy.yaml",
 		"block_domains": 1,
 	}) {
 		t.Fatal("InfoIfChanged emitted unchanged policy snapshot")
 	}
 	if !recorder.InfoIfChanged("policy loaded", map[string]any{
 		"block_domains": 2,
-		"source":        "https://example.test/blocklist.txt",
+		"source":        "https://example.test/policy.yaml",
 	}) {
 		t.Fatal("InfoIfChanged suppressed changed policy snapshot")
 	}
@@ -1008,6 +1017,54 @@ func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for close flush request")
+	}
+}
+
+func TestExportSinkShutdownKeepsBatchesBounded(t *testing.T) {
+	t.Parallel()
+
+	batchSizes := make(chan int, exportQueueSize/exportBatchSize+2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var batch []json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Errorf("decode export batch: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		batchSizes <- len(batch)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sink := &exportSink{
+		client:  server.Client(),
+		target:  server.URL,
+		queue:   make(chan json.RawMessage, exportQueueSize),
+		metrics: telemetry.NewRegistry(),
+	}
+	entry := mustMarshalRecord(t, record{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Level:     "info",
+		Message:   "queued",
+	})
+	for range exportQueueSize {
+		sink.queue <- entry
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	sink.run(ctx)
+	close(batchSizes)
+
+	total := 0
+	for size := range batchSizes {
+		if size > exportBatchSize {
+			t.Errorf("shutdown export batch size = %d, limit = %d", size, exportBatchSize)
+		}
+		total += size
+	}
+	if total != exportQueueSize {
+		t.Fatalf("exported records = %d, want %d", total, exportQueueSize)
 	}
 }
 

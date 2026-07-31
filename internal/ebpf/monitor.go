@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -22,6 +23,7 @@ var (
 const (
 	blocklistMaxEntries = 16384
 	endpointMaxEntries  = 16384
+	egressMaxEntries    = 16384
 )
 
 type domainKey struct {
@@ -41,7 +43,11 @@ type runtimeSettings struct {
 	BlockAllResolvers    uint8
 	AllowSuffixesEnabled uint8
 	ActivePolicySlot     uint8
-	_                    [3]byte
+	BlockSuffixesEnabled uint8
+	EgressEnabled        uint8
+	EgressEnforce        uint8
+	EgressDefaultBlock   uint8
+	_                    [7]byte
 }
 
 type endpoint4Key struct {
@@ -70,6 +76,18 @@ type endpoint6CIDRKey struct {
 	_         [1]byte
 }
 
+type egress4Key struct {
+	PrefixLen uint32
+	Data      [21]uint8
+	_         [3]byte
+}
+
+type egress6Key struct {
+	PrefixLen uint32
+	Data      [33]uint8
+	_         [3]byte
+}
+
 type ResolverEndpoint struct {
 	Transport string
 	IP        net.IP
@@ -82,17 +100,38 @@ type ResolverCIDR struct {
 	Port      uint16
 }
 
+type EgressRuleConfig struct {
+	ID                string
+	Action            string
+	UIDs              []uint32
+	CgroupIDs         []uint64
+	HasUIDSelector    bool
+	HasCgroupSelector bool
+	CIDRs             []netip.Prefix
+	Ports             []uint16
+	Protocols         []string
+}
+
+type EgressPolicyConfig struct {
+	Enabled      bool
+	Enforce      bool
+	DefaultBlock bool
+	Rules        []EgressRuleConfig
+}
+
 type PolicyConfig struct {
 	BlockEnabled      bool
 	BlockAllDomains   bool
 	BlockAllResolvers bool
 	BlockedDomains    []string
 	AllowedDomains    []string
+	BlockedSuffixes   []string
 	AllowedSuffixes   []string
 	BlockedEndpoints  []ResolverEndpoint
 	AllowedEndpoints  []ResolverEndpoint
 	BlockedCIDRs      []ResolverCIDR
 	AllowedCIDRs      []ResolverCIDR
+	Egress            EgressPolicyConfig
 }
 
 type Monitor struct {
@@ -102,6 +141,8 @@ type Monitor struct {
 	features         KernelFeatures
 	policyMu         sync.Mutex
 	activePolicySlot uint8
+	egressRuleIDs    atomic.Pointer[map[uint32]string]
+	currentRuleIDs   map[uint32]string
 }
 
 type RuntimeMetrics interface {
@@ -132,6 +173,7 @@ type monitorObjects struct {
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
+	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
@@ -143,6 +185,10 @@ type monitorObjects struct {
 	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
+	Egress4AllowRules       *ebpf.Map `ebpf:"egress4_allow_rules"`
+	Egress4BlockRules       *ebpf.Map `ebpf:"egress4_block_rules"`
+	Egress6AllowRules       *ebpf.Map `ebpf:"egress6_allow_rules"`
+	Egress6BlockRules       *ebpf.Map `ebpf:"egress6_block_rules"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 }
 
@@ -167,6 +213,7 @@ func (o *monitorObjects) Close() error {
 		o.TraceCreat,
 		o.Allowlist,
 		o.AllowSuffixes,
+		o.BlockSuffixes,
 		o.Blocklist,
 		o.DnsScratch,
 		o.Endpoint4AllowRules,
@@ -177,6 +224,10 @@ func (o *monitorObjects) Close() error {
 		o.Endpoint6CidrAllowRules,
 		o.Endpoint6CidrRules,
 		o.Endpoint6Rules,
+		o.Egress4AllowRules,
+		o.Egress4BlockRules,
+		o.Egress6AllowRules,
+		o.Egress6BlockRules,
 		o.Events,
 		o.Settings,
 	} {
@@ -265,6 +316,11 @@ func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeM
 				metrics.IncEBPFReadError()
 			}
 			return err
+		}
+		if event.RuleNumber != 0 {
+			if ruleIDs := m.egressRuleIDs.Load(); ruleIDs != nil {
+				event.RuleID = (*ruleIDs)[event.RuleNumber]
+			}
 		}
 		handler(event)
 	}

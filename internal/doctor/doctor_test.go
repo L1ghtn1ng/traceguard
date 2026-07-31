@@ -50,7 +50,6 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 
 	root := t.TempDir()
 	cfg := readyConfig(root)
-	cfg.BlocklistURL = "http://example.test/blocklist.txt"
 	cfg.EventExportURL = "http://collector.test/events"
 	cfg.EventExportCAPath = filepath.Join(root, "missing-ca.crt")
 	cfg.EventExportClientCert = filepath.Join(root, "missing-client.crt")
@@ -78,7 +77,6 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{
-		"FAIL blocklist-url",
 		"FAIL event-export-url",
 		"FAIL event-export-ca-path",
 		"FAIL event-export-client-cert",
@@ -95,7 +93,7 @@ func TestRunReportsConfigAndEnvironmentFailures(t *testing.T) {
 		"FAIL kubernetes-token-path",
 		"FAIL kubernetes-ca-path",
 		"FAIL kubernetes-poll-interval",
-		"doctor found 17 failing checks",
+		"doctor found 16 failing checks",
 	} {
 		if !strings.Contains(text+"\n"+err.Error(), want) {
 			t.Fatalf("missing %q\noutput:\n%s\nerr:%v", want, text, err)
@@ -130,19 +128,20 @@ func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write fa
 
 func readyConfig(root string) config.Config {
 	return config.Config{
-		CgroupPath:          filepath.Join(root, "cgroup"),
-		CachePath:           filepath.Join(root, "cache", "blocklist.txt"),
-		LogPath:             filepath.Join(root, "logs", "traceguard.log"),
-		LogFormat:           "json",
-		MetricsAddr:         "127.0.0.1:0",
-		EventExportURL:      "https://collector.test/events",
-		EventExportCAPath:   filepath.Join(root, "ca.crt"),
-		ProcessCacheTTL:     time.Minute,
-		KubernetesNodeName:  "node-a",
-		KubernetesPoll:      time.Minute,
-		KubernetesAPIURL:    "https://kubernetes.default.svc",
-		KubernetesTokenPath: filepath.Join(root, "token"),
-		KubernetesCAPath:    filepath.Join(root, "kube-ca.crt"),
+		CgroupPath:            filepath.Join(root, "cgroup"),
+		PolicyCachePath:       filepath.Join(root, "cache", "policy.yaml"),
+		PolicyRefreshInterval: time.Minute,
+		LogPath:               filepath.Join(root, "logs", "traceguard.log"),
+		LogFormat:             "json",
+		MetricsAddr:           "127.0.0.1:0",
+		EventExportURL:        "https://collector.test/events",
+		EventExportCAPath:     filepath.Join(root, "ca.crt"),
+		ProcessCacheTTL:       time.Minute,
+		KubernetesNodeName:    "node-a",
+		KubernetesPoll:        time.Minute,
+		KubernetesAPIURL:      "https://kubernetes.default.svc",
+		KubernetesTokenPath:   filepath.Join(root, "token"),
+		KubernetesCAPath:      filepath.Join(root, "kube-ca.crt"),
 	}
 }
 

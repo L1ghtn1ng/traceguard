@@ -8,9 +8,11 @@ import (
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/kubeinfo"
+	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
@@ -79,86 +81,80 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		case <-ctx.Done():
 		}
 	}
-	policy := newPolicyController(ctx, cfg, monitor, recorder, metrics)
-	applyRules := policy.Apply
-	var manager *blocklist.Manager
-	if cfg.Block || cfg.DryRun || cfg.BlocklistURL != "" || len(cfg.ManualDomains) > 0 || len(cfg.ManualAllow) > 0 {
-		manager = blocklist.NewManager(blocklist.Config{
-			URL:           cfg.BlocklistURL,
-			CachePath:     cfg.CachePath,
-			RefreshPeriod: cfg.RefreshInterval,
-			ManualDomains: cfg.ManualDomains,
-			ManualAllow:   cfg.ManualAllow,
+	detector, err := detection.New(nil, nil)
+	if err != nil {
+		return fmt.Errorf("initialize detection engine: %w", err)
+	}
+	metrics.SetDetectionRules(detector.RuleCount())
+	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector)
+
+	var yamlManager *policyconfig.Manager
+	if cfg.PolicyPath != "" || cfg.PolicyURL != "" {
+		yamlManager, err = policyconfig.NewManager(policyconfig.Config{
+			Path:           cfg.PolicyPath,
+			URL:            cfg.PolicyURL,
+			CachePath:      cfg.PolicyCachePath,
+			RefreshPeriod:  cfg.PolicyRefreshInterval,
+			Authorization:  cfg.PolicyAuthorization,
+			CAPath:         cfg.PolicyCAPath,
+			ClientCertPath: cfg.PolicyClientCert,
+			ClientKeyPath:  cfg.PolicyClientKey,
 		})
-
-		rules, loadMetadata, err := manager.LoadWithMetadata(ctx)
-		metrics.IncBlocklistLoad(string(loadMetadata.Source), err == nil)
-		if loadMetadata.CachePersistError != "" {
-			recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
-		}
 		if err != nil {
-			metrics.IncBlocklistRefresh(false)
-			return fmt.Errorf("load blocklist: %w", err)
+			return fmt.Errorf("initialize YAML policy source: %w", err)
 		}
-		if err := applyRules(rules); err != nil {
-			metrics.IncBlocklistRefresh(false)
-			return fmt.Errorf("apply blocklist: %w", err)
+		bundle, metadata, loadErr := yamlManager.Load(ctx)
+		source := yamlPolicySource(metadata, cfg)
+		metrics.IncPolicySourceLoad(source, loadErr == nil)
+		setYAMLPolicyHealth(metrics, cfg, metadata, loadErr)
+		if metadata.CachePersistError != "" {
+			recorder.Error("persist fetched YAML policy cache", errors.New(metadata.CachePersistError), nil)
 		}
-
-		if cfg.BlocklistURL != "" {
-			go func() {
-				err := manager.WatchWithMetadata(ctx, func(rules blocklist.Rules, loadMetadata blocklist.LoadMetadata, loadErr error) error {
-					metrics.IncBlocklistLoad(string(loadMetadata.Source), loadErr == nil)
-					if loadMetadata.CachePersistError != "" {
-						recorder.Error("persist fetched blocklist cache", errors.New(loadMetadata.CachePersistError), nil)
-					}
-					if loadErr != nil {
-						metrics.IncBlocklistRefresh(false)
-						recorder.ErrorDedup("refresh blocklist", loadErr, nil, policyRefreshErrorDedupeTTL)
-						return nil
-					}
-					if err := applyRules(rules); err != nil {
-						metrics.IncBlocklistRefresh(false)
-						recorder.ErrorDedup("apply refreshed blocklist", err, nil, policyRefreshErrorDedupeTTL)
-					}
-					return nil
-				})
-				if err != nil {
-					metrics.IncBlocklistRefresh(false)
+		if metadata.StaleFallback {
+			recorder.Error("remote YAML policy unavailable; using stale cache", errors.New(metadata.RemoteError), nil)
+		}
+		if loadErr != nil {
+			return fmt.Errorf("load YAML policy: %w", loadErr)
+		}
+		if err := policyController.ApplyBundle(bundle); err != nil {
+			return fmt.Errorf("apply YAML policy: %w", err)
+		}
+		if cfg.PolicyURL != "" {
+			go yamlManager.Watch(ctx, func(bundle policyconfig.Bundle, metadata policyconfig.LoadMetadata, loadErr error) {
+				source := yamlPolicySource(metadata, cfg)
+				metrics.IncPolicySourceLoad(source, loadErr == nil)
+				setYAMLPolicyHealth(metrics, cfg, metadata, loadErr)
+				if metadata.CachePersistError != "" {
+					recorder.Error("persist fetched YAML policy cache", errors.New(metadata.CachePersistError), nil)
 				}
-				reportErr(err)
-			}()
+				if metadata.StaleFallback {
+					recorder.ErrorDedup("remote YAML policy unavailable; using stale cache", errors.New(metadata.RemoteError), nil, policyRefreshErrorDedupeTTL)
+				}
+				if loadErr != nil {
+					recorder.ErrorDedup("refresh YAML policy", loadErr, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
+					return
+				}
+				if err := applyPolicyWithHealth(metrics, func() error {
+					return policyController.ApplyBundle(bundle)
+				}); err != nil {
+					recorder.ErrorDedup("apply refreshed YAML policy", err, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
+				}
+			})
 		}
 	}
 
-	if manager != nil && reloadCh != nil {
-		go runPolicyReloads(ctx, reloadCh, manager.LoadWithMetadata, applyRules, func(result policyReloadResult) {
-			metrics.IncBlocklistLoad(string(result.Metadata.Source), result.Phase != "load")
-			if result.Metadata.CachePersistError != "" {
-				recorder.Error("persist fetched blocklist cache", errors.New(result.Metadata.CachePersistError), nil)
-			}
-			if result.Err != nil {
-				metrics.IncPolicyReload("sighup", false)
-				message := "reload policy"
-				if result.Phase == "apply" {
-					message = "apply reloaded policy"
-				}
-				recorder.Error(message, result.Err, map[string]any{"trigger": "sighup"})
-				return
-			}
-			metrics.IncPolicyReload("sighup", true)
-			recorder.Info("policy reloaded", map[string]any{"trigger": "sighup"})
-		})
+	if reloadCh != nil && yamlManager != nil {
+		go runPolicyReloads(ctx, reloadCh, yamlManager, policyController, cfg, recorder, metrics)
+	}
+	if yamlManager != nil {
+		go runCgroupReconciliation(ctx, policyController, recorder, metrics)
 	}
 
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
 		reportErr(monitor.Run(ctx, func(event ebpf.Event) {
-			if event.Kind == ebpf.EventExec {
-				processCache.Invalidate(event.PID)
-			}
-			process, hit := processCache.Lookup(event.PID, event.Comm)
+			process, hit := lookupProcessForEvent(processCache, event)
 			metrics.IncProcessCache(hit)
 			metrics.IncProcessMetadata(process.Source)
 			metrics.IncProcessLSMMetadata(process.LSMSource)
@@ -257,7 +253,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			switch event.Kind {
 			case ebpf.EventDNS:
 				fields["domain"] = event.Domain
-				decision := domainDecision(&policy.runtimePolicy, event.Domain)
+				decision := domainDecision(&policyController.runtimePolicy, event.Domain)
 				if decision != blocklist.DecisionNone {
 					fields["policy"] = string(decision)
 				}
@@ -265,19 +261,19 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				if cfg.DryRun && decision == blocklist.DecisionBlock {
 					fields["mode"] = "dry-run"
 					recorder.InfoAt(event.Timestamp, "would-block", fields)
-					return
+				} else {
+					recorder.InfoAt(event.Timestamp, "dns", fields)
 				}
-				recorder.InfoAt(event.Timestamp, "dns", fields)
 			case ebpf.EventBlocked:
 				fields["domain"] = event.Domain
 				fields["policy"] = string(blocklist.DecisionBlock)
 				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
 				recorder.InfoAt(event.Timestamp, "blocked", fields)
 			case ebpf.EventResolver:
-				fields["endpoint"] = resolverHost(&policy.endpointIndex, event)
+				fields["endpoint"] = resolverHost(&policyController.endpointIndex, event)
 				fields["address"] = event.Address
 				fields["port"] = event.Port
-				decision := endpointDecision(&policy.runtimePolicy, event.Transport, event.Address, event.Port)
+				decision := endpointDecision(&policyController.runtimePolicy, event.Transport, event.Address, event.Port)
 				if decision != blocklist.DecisionNone {
 					fields["policy"] = string(decision)
 				}
@@ -285,11 +281,11 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				if cfg.DryRun && decision == blocklist.DecisionBlock {
 					fields["mode"] = "dry-run"
 					recorder.InfoAt(event.Timestamp, "would-block-"+event.Transport, fields)
-					return
+				} else {
+					recorder.InfoAt(event.Timestamp, event.Transport, fields)
 				}
-				recorder.InfoAt(event.Timestamp, event.Transport, fields)
 			case ebpf.EventResolverBlocked:
-				fields["endpoint"] = resolverHost(&policy.endpointIndex, event)
+				fields["endpoint"] = resolverHost(&policyController.endpointIndex, event)
 				fields["address"] = event.Address
 				fields["port"] = event.Port
 				fields["policy"] = string(blocklist.DecisionBlock)
@@ -311,10 +307,31 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 				fields["file_mode"] = event.FileMode
 				fields["file_access"] = fileAccessName(event.FileFlags)
 				recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
+			case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
+				fields["direction"] = event.Direction
+				fields["peer_address"] = event.Address
+				fields["peer_port"] = event.Port
+				fields["local_address"] = event.LocalAddress
+				fields["local_port"] = event.LocalPort
+				fields["policy"] = string(blocklist.DecisionBlock)
+				mode := "block"
+				if event.Kind == ebpf.EventEgressWouldBlock {
+					mode = "dry-run"
+				}
+				fields["mode"] = mode
+				if event.RuleID != "" {
+					fields["policy_rule_id"] = event.RuleID
+				} else {
+					fields["policy_rule_id"] = "default"
+				}
+				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+				metrics.IncEgressDecision("block", mode)
+				recorder.InfoAt(event.Timestamp, eventName, fields)
 			default:
 				fields["kind"] = event.Kind
 				recorder.InfoAt(event.Timestamp, "event", fields)
 			}
+			emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
 		}, metrics))
 	}()
 

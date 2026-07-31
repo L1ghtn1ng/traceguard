@@ -26,7 +26,7 @@ Include as much of the following as you can:
 - Whether the issue occurs in observe, dry-run, or enforced block mode
 - Relevant configuration, with secrets and tokens redacted
 - Reproduction steps, proof of impact, and any suggested mitigation
-- Whether Kubernetes enrichment, file access auditing, remote blocklists, metrics, or event export are enabled
+- Whether Kubernetes enrichment, file access auditing, remote policy, metrics, or event export are enabled
 
 ## Response Process
 
@@ -41,7 +41,7 @@ The following are generally considered security issues:
 - Privilege escalation or unintended code execution
 - Bypass of enforced DNS or resolver endpoint blocking
 - Exposure of sensitive telemetry, credentials, or local files
-- TLS verification flaws in remote blocklist fetch, HTTPS event export, or TLS syslog export
+- TLS verification flaws in remote policy fetch, HTTPS event export, or TLS syslog export
 - Unauthorized access introduced by metrics, logging, cache, or spool handling
 - Incorrect SELinux/AppArmor label reporting or file access auditing behavior that materially affects security decisions
 - Denial of service caused by untrusted network input or malformed policy input in privileged paths
@@ -53,7 +53,7 @@ The following are usually not treated as security vulnerabilities by themselves:
 
 - Detection gaps that are already documented in `README.md`, including the inability to recover encrypted DoH query names
 - Availability issues on unsupported kernels, unsupported privilege models, or non-Linux platforms
-- False positives, false negatives, or bad entries in third-party blocklists without an underlying TraceGuard defect
+- False positives, false negatives, or bad entries in externally managed policies without an underlying TraceGuard defect
 - Feature requests for new protocols, broader inspection coverage, or alternative deployment models
 - Publicly known vulnerabilities in unpatched downstream environments where TraceGuard is only one component
 
@@ -64,7 +64,7 @@ Because TraceGuard runs with elevated privileges, treat deployment choices as pa
 - Run the latest supported release and keep the host kernel and Go dependencies current.
 - Prefer the packaged systemd unit or an equivalent hardened service definition with a tight capability set and restricted writable paths.
 - Expose `-metrics-addr` only on localhost or a trusted management network. The built-in `/health` and `/metrics` server is plain HTTP and does not provide authentication.
-- Keep `-blocklist-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS for event export where appropriate. Prefer `syslog+tls://` over UDP or plaintext TCP when sending syslog events outside a trusted management network.
+- Keep `-policy-url` and `-event-export-url` on `https://` endpoints. Use custom CA roots and mTLS where appropriate. Prefer `syslog+tls://` over UDP or plaintext TCP when sending syslog events outside a trusted management network.
 - Protect `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION`, event export client keys, cache files, export spool data, and logs with least-privilege filesystem permissions. The HTTPS export spool can contain structured telemetry from failed batches until replay succeeds.
 - The packaged env file enables file access auditing. Set `TRACEGUARD_FILE_AUDIT=false` when the expected event volume or retained path data is not acceptable for the host.
 - Review Kubernetes API credentials and RBAC carefully before enabling `-kubernetes-enrich`.

@@ -1,0 +1,251 @@
+# TraceGuard policy v1 example.
+#
+# This file uses example domains and documentation-only IP ranges. Adjust every
+# value for your environment and start with `-dry-run` before enabling `-block`.
+
+version: 1
+
+# The baseline detection profile is enabled by default. Listing it makes that
+# choice explicit. See docs/policy.md for the built-in rule IDs.
+builtin_profiles:
+  - baseline
+
+# IDs in this list are removed after remote and local policies are merged. It
+# can disable an egress rule, a custom detection, or a built-in detection.
+# disabled_rule_ids:
+#   - baseline.policy-denial-burst
+#   - remote-rule-that-is-not-needed-on-this-host
+
+dns:
+  block:
+    # Exact domain.
+    - malware.example
+
+    # Suffix forms are equivalent. They match the base domain and subdomains.
+    - "*.tracking.example"
+    - suffix:telemetry.example
+
+    # Explicit encrypted DNS resolver endpoints.
+    - https://192.0.2.53:8443/dns-query
+    - dot://[2001:db8::53]:8853
+
+    # A bare IP or CIDR covers both DoH on port 443 and DoT on port 853.
+    - 203.0.113.53
+    - 2001:db8:100::/48
+
+    # Quote "*" because YAML otherwise treats it as an alias marker. This
+    # blocks every DNS name and encrypted resolver unless an allow rule wins.
+    # - "*"
+
+  allow:
+    # Exact allow overrides the tracking.example suffix block for this name.
+    - updates.tracking.example
+
+    # Allow a trusted domain and all of its subdomains.
+    - "*.corp.example"
+
+    # Resolver allow rules also override broader resolver blocks.
+    - https://192.0.2.10/dns-query
+    - dot://[2001:db8::10]
+    - 198.51.100.0/24
+
+egress:
+  # Keep unmatched traffic allowed while introducing policy. Change this to
+  # block only after the allow rules have been exercised in dry-run mode.
+  default: allow
+
+  rules:
+    # Protect the cloud instance metadata endpoint for Kubernetes workloads.
+    - id: block-cloud-metadata
+      action: block
+      selectors:
+        cgroup_prefixes:
+          - /kubepods.slice
+      destinations:
+        cidrs:
+          - 169.254.169.254/32
+        ports:
+          - 80
+        protocols:
+          - tcp
+
+    # Block direct SMTP from every workload. Omitting selectors makes the rule
+    # global; omitting CIDRs makes it apply to every IPv4 and IPv6 destination.
+    - id: block-direct-smtp
+      action: block
+      destinations:
+        ports:
+          - 25
+          - 465
+          - 587
+        protocols:
+          - tcp
+
+    # Restrict a batch workload from reaching arbitrary networks.
+    - id: block-batch-internet
+      action: block
+      selectors:
+        cgroup_prefixes:
+          - /system.slice/traceguard-batch
+      destinations:
+        cidrs:
+          - 0.0.0.0/0
+          - ::/0
+
+    # Explicit allows win over the broader block-batch-internet rule.
+    - id: allow-batch-dns
+      action: allow
+      selectors:
+        cgroup_prefixes:
+          - /system.slice/traceguard-batch
+      destinations:
+        cidrs:
+          - 192.0.2.10/32
+          - 2001:db8::10/128
+        ports:
+          - 53
+        protocols:
+          - tcp
+          - udp
+
+    - id: allow-batch-api
+      action: allow
+      selectors:
+        cgroup_prefixes:
+          - /system.slice/traceguard-batch
+      destinations:
+        cidrs:
+          - 198.51.100.20/32
+        ports:
+          - 443
+        protocols:
+          - tcp
+
+    # When UID and cgroup selectors are both present, both must match. Values
+    # inside either list are alternatives.
+    - id: block-service-admin-network
+      action: block
+      selectors:
+        uids:
+          - 1001
+          - 1002
+        cgroup_paths:
+          - /system.slice/example-api.service
+      destinations:
+        cidrs:
+          - 10.20.0.0/16
+          - 2001:db8:20::/48
+        ports:
+          - 22
+          - 3389
+        protocols:
+          - tcp
+
+detections:
+  # Alert after three metadata connection attempts by the same cgroup and
+  # executable within one minute. Root-owned activity is excluded.
+  - id: repeated-metadata-access
+    severity: warning
+    events:
+      - connection
+    match:
+      directions:
+        - outbound
+      destination_cidrs:
+        - 169.254.169.254/32
+      ports:
+        - 80
+    exclude:
+      uids:
+        - 0
+    threshold:
+      count: 3
+      within: 1m
+      group_by:
+        - cgroup
+        - executable
+    cooldown: 5m
+    message: repeated access to the cloud metadata endpoint
+    tags:
+      - cloud
+      - credential-access
+
+  # Immediate alert for execution from common temporary directories.
+  - id: execution-from-temporary-directory
+    severity: warning
+    events:
+      - exec
+    match:
+      executable_globs:
+        - /tmp/**
+        - /var/tmp/**
+    cooldown: 5m
+    message: process executed from a temporary directory
+    tags:
+      - execution
+      - suspicious-path
+
+  # Detect egress denials generated in either enforcement or dry-run mode.
+  - id: batch-egress-denied
+    severity: notice
+    events:
+      - egress_blocked
+      - egress_would_block
+    match:
+      directions:
+        - outbound
+      cgroup_prefixes:
+        - /system.slice/traceguard-batch
+    threshold:
+      count: 5
+      within: 2m
+      group_by:
+        - cgroup
+        - destination
+    cooldown: 10m
+    message: batch workload repeatedly attempted disallowed egress
+    tags:
+      - egress
+      - policy
+
+  # Kubernetes match fields require Kubernetes enrichment to be enabled.
+  - id: production-download-tool
+    severity: warning
+    events:
+      - exec
+    match:
+      command_globs:
+        - "*curl*"
+        - "*wget*"
+      k8s_namespaces:
+        - production
+    exclude:
+      k8s_service_accounts:
+        - approved-deployer
+    cooldown: 5m
+    message: download utility executed in the production namespace
+    tags:
+      - kubernetes
+      - execution
+
+  # File audit detections require file auditing to be enabled.
+  - id: ssh-configuration-write
+    severity: error
+    events:
+      - file_access
+      - file_created
+    match:
+      file_path_globs:
+        - /etc/ssh/**
+      file_access:
+        - write
+    cooldown: 5m
+    message: SSH configuration was opened for writing
+    tags:
+      - persistence
+      - configuration
+
+  # A disabled rule only needs an ID and enabled: false. This is useful when a
+  # local overlay temporarily turns off a remote custom detection by ID.
+  - id: experimental-disabled-rule
+    enabled: false

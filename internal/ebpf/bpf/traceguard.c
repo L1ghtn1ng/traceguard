@@ -10,9 +10,12 @@
 #define DNS_PORT 53
 #define DOT_PORT 853
 #define HTTPS_PORT 443
+#define POLICY_SLOT_COUNT 2
+#define POLICY_MAX_ENTRIES_PER_SLOT 16384
+#define POLICY_MAP_MAX_ENTRIES (POLICY_SLOT_COUNT * POLICY_MAX_ENTRIES_PER_SLOT)
 #define MAX_DOMAIN_LEN 255
 #define DOMAIN_KEY_SIZE (MAX_DOMAIN_LEN + 1)
-#define MAX_SUFFIX_LABELS 16
+#define MAX_SUFFIX_LABELS 128
 #define MAX_SUFFIX_WIRE_LEN 64
 #define MAX_FILENAME_LEN 256
 #define EVENT_DNS 1
@@ -22,6 +25,8 @@
 #define EVENT_RESOLVER_BLOCKED 5
 #define EVENT_CONNECTION 6
 #define EVENT_FILE_ACCESS 7
+#define EVENT_EGRESS_BLOCKED 8
+#define EVENT_EGRESS_WOULD_BLOCK 9
 #define TRANSPORT_UDP 1
 #define TRANSPORT_TCP 2
 #define TRANSPORT_DOT 3
@@ -62,6 +67,11 @@
 #define LISTENER_INFO_MAX_ENTRIES 16384
 #define CONNECTION_DEDUPE_MAX_ENTRIES 32768
 #define CONNECTION_DEDUPE_WINDOW_NS 60000000000ULL
+#define EGRESS_IDENTITY_BYTES 17
+#define EGRESS_IDENTITY_GLOBAL 0
+#define EGRESS_IDENTITY_UID 1
+#define EGRESS_IDENTITY_CGROUP 2
+#define EGRESS_IDENTITY_UID_CGROUP 3
 #define FILE_ACCESS_FLAG_UNKNOWN (1U << 31)
 #define TRACEGUARD_O_WRONLY 01
 #define TRACEGUARD_O_CREAT 0100
@@ -118,6 +128,18 @@ struct endpoint6_cidr_key {
 	__u8 _pad;
 };
 
+struct egress4_key {
+	__u32 prefixlen;
+	__u8 data[21];
+	__u8 _pad[3];
+};
+
+struct egress6_key {
+	__u32 prefixlen;
+	__u8 data[33];
+	__u8 _pad[3];
+};
+
 struct domain_key {
 	__u8 domain[DOMAIN_KEY_SIZE];
 };
@@ -136,7 +158,11 @@ struct settings {
 	__u8 block_all_resolvers;
 	__u8 allow_suffixes_enabled;
 	__u8 active_policy_slot;
-	__u8 _pad[3];
+	__u8 block_suffixes_enabled;
+	__u8 egress_enabled;
+	__u8 egress_enforce;
+	__u8 egress_default_block;
+	__u8 _pad[7];
 };
 
 struct policy_snapshot {
@@ -144,6 +170,7 @@ struct policy_snapshot {
 	__u8 block_all_domains;
 	__u8 block_all_resolvers;
 	__u8 allow_suffix_rules_enabled;
+	__u8 block_suffix_rules_enabled;
 	__u8 policy_mask;
 };
 
@@ -151,7 +178,8 @@ struct dns_parse_result {
 	struct domain_key key;
 	__u16 qname_length;
 	__u8 allow_suffix_match;
-	__u8 _pad[5];
+	__u8 block_suffix_match;
+	__u8 _pad[4];
 };
 
 struct socket_info_key {
@@ -210,6 +238,15 @@ struct connection_event_params {
 	__u8 local_addr[16];
 };
 
+struct egress_lookup {
+	__u32 uid;
+	__u64 cgroup_id;
+	__u16 port;
+	__u8 policy_slot;
+	__u8 protocol;
+	__u8 addr[16];
+};
+
 struct event {
 	__u64 timestamp_ns;
 	__u32 kind;
@@ -231,6 +268,7 @@ struct event {
 	__u32 event_source;
 	__u32 kernel_feature_set;
 	__u32 uid_source;
+	__u32 rule_id;
 	__u64 cgroup_id;
 	__u64 socket_cookie;
 	__u8 addr[16];
@@ -280,24 +318,31 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct domain_key);
 	__type(value, __u8);
 } blocklist SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct domain_key);
 	__type(value, __u8);
 } allowlist SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct domain_suffix_key);
 	__type(value, __u8);
 } allow_suffixes SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
+	__type(key, struct domain_suffix_key);
+	__type(value, __u8);
+} block_suffixes SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -336,14 +381,14 @@ struct {
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint4_key);
 	__type(value, __u8);
 } endpoint4_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint4_key);
 	__type(value, __u8);
 } endpoint4_allow_rules SEC(".maps");
@@ -351,7 +396,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint4_cidr_key);
 	__type(value, __u8);
 } endpoint4_cidr_rules SEC(".maps");
@@ -359,21 +404,21 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint4_cidr_key);
 	__type(value, __u8);
 } endpoint4_cidr_allow_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint6_key);
 	__type(value, __u8);
 } endpoint6_rules SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint6_key);
 	__type(value, __u8);
 } endpoint6_allow_rules SEC(".maps");
@@ -381,7 +426,7 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint6_cidr_key);
 	__type(value, __u8);
 } endpoint6_cidr_rules SEC(".maps");
@@ -389,10 +434,42 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__uint(max_entries, 16384);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
 	__type(key, struct endpoint6_cidr_key);
 	__type(value, __u8);
 } endpoint6_cidr_allow_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
+	__type(key, struct egress4_key);
+	__type(value, __u32);
+} egress4_allow_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
+	__type(key, struct egress4_key);
+	__type(value, __u32);
+} egress4_block_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
+	__type(key, struct egress6_key);
+	__type(value, __u32);
+} egress6_allow_rules SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
+	__type(key, struct egress6_key);
+	__type(value, __u32);
+} egress6_block_rules SEC(".maps");
 
 static __always_inline __u32 active_kernel_feature_set(void)
 {
@@ -633,6 +710,203 @@ static __always_inline int emit_connection_event_current(const struct connection
 	return 1;
 }
 
+static __always_inline void encode_egress_identity(__u8 *data, __u8 policy_slot, __u8 kind, __u32 uid, __u64 cgroup_id, __u8 protocol, __u16 port)
+{
+	__be16 network_port = bpf_htons(port);
+
+	data[0] = policy_slot;
+	data[1] = kind;
+	__builtin_memcpy(&data[2], &uid, sizeof(uid));
+	__builtin_memcpy(&data[6], &cgroup_id, sizeof(cgroup_id));
+	data[14] = protocol;
+	__builtin_memcpy(&data[15], &network_port, sizeof(network_port));
+}
+
+static __always_inline __u32 lookup_egress4_kind(__u8 allow, __u8 kind, const struct egress_lookup *lookup)
+{
+	struct egress4_key key = {
+		.prefixlen = sizeof(key.data) * 8,
+	};
+	__u32 *rule;
+	__u32 uid = kind == EGRESS_IDENTITY_UID || kind == EGRESS_IDENTITY_UID_CGROUP ? lookup->uid : 0;
+	__u64 cgroup_id = kind == EGRESS_IDENTITY_CGROUP || kind == EGRESS_IDENTITY_UID_CGROUP ? lookup->cgroup_id : 0;
+
+	encode_egress_identity(key.data, lookup->policy_slot, kind, uid, cgroup_id, lookup->protocol, lookup->port);
+	__builtin_memcpy(&key.data[EGRESS_IDENTITY_BYTES], lookup->addr, 4);
+	if (allow) {
+		rule = bpf_map_lookup_elem(&egress4_allow_rules, &key);
+	} else {
+		rule = bpf_map_lookup_elem(&egress4_block_rules, &key);
+	}
+	if (rule) {
+		return *rule;
+	}
+	if (lookup->port == 0) {
+		return 0;
+	}
+	encode_egress_identity(key.data, lookup->policy_slot, kind, uid, cgroup_id, lookup->protocol, 0);
+	if (allow) {
+		rule = bpf_map_lookup_elem(&egress4_allow_rules, &key);
+	} else {
+		rule = bpf_map_lookup_elem(&egress4_block_rules, &key);
+	}
+	return rule ? *rule : 0;
+}
+
+static __always_inline __u32 lookup_egress6_kind(__u8 allow, __u8 kind, const struct egress_lookup *lookup)
+{
+	struct egress6_key key = {
+		.prefixlen = sizeof(key.data) * 8,
+	};
+	__u32 *rule;
+	__u32 uid = kind == EGRESS_IDENTITY_UID || kind == EGRESS_IDENTITY_UID_CGROUP ? lookup->uid : 0;
+	__u64 cgroup_id = kind == EGRESS_IDENTITY_CGROUP || kind == EGRESS_IDENTITY_UID_CGROUP ? lookup->cgroup_id : 0;
+
+	encode_egress_identity(key.data, lookup->policy_slot, kind, uid, cgroup_id, lookup->protocol, lookup->port);
+	__builtin_memcpy(&key.data[EGRESS_IDENTITY_BYTES], lookup->addr, 16);
+	if (allow) {
+		rule = bpf_map_lookup_elem(&egress6_allow_rules, &key);
+	} else {
+		rule = bpf_map_lookup_elem(&egress6_block_rules, &key);
+	}
+	if (rule) {
+		return *rule;
+	}
+	if (lookup->port == 0) {
+		return 0;
+	}
+	encode_egress_identity(key.data, lookup->policy_slot, kind, uid, cgroup_id, lookup->protocol, 0);
+	if (allow) {
+		rule = bpf_map_lookup_elem(&egress6_allow_rules, &key);
+	} else {
+		rule = bpf_map_lookup_elem(&egress6_block_rules, &key);
+	}
+	return rule ? *rule : 0;
+}
+
+static __always_inline __u32 lookup_egress4(__u8 allow, const struct egress_lookup *lookup)
+{
+	__u32 rule;
+
+	rule = lookup_egress4_kind(allow, EGRESS_IDENTITY_UID_CGROUP, lookup);
+	if (rule) {
+		return rule;
+	}
+	rule = lookup_egress4_kind(allow, EGRESS_IDENTITY_UID, lookup);
+	if (rule) {
+		return rule;
+	}
+	rule = lookup_egress4_kind(allow, EGRESS_IDENTITY_CGROUP, lookup);
+	if (rule) {
+		return rule;
+	}
+	return lookup_egress4_kind(allow, EGRESS_IDENTITY_GLOBAL, lookup);
+}
+
+static __always_inline __u32 lookup_egress6(__u8 allow, const struct egress_lookup *lookup)
+{
+	__u32 rule;
+
+	rule = lookup_egress6_kind(allow, EGRESS_IDENTITY_UID_CGROUP, lookup);
+	if (rule) {
+		return rule;
+	}
+	rule = lookup_egress6_kind(allow, EGRESS_IDENTITY_UID, lookup);
+	if (rule) {
+		return rule;
+	}
+	rule = lookup_egress6_kind(allow, EGRESS_IDENTITY_CGROUP, lookup);
+	if (rule) {
+		return rule;
+	}
+	return lookup_egress6_kind(allow, EGRESS_IDENTITY_GLOBAL, lookup);
+}
+
+static __always_inline int emit_egress_decision(struct bpf_sock_addr *ctx, const struct connection_event_params *params, const struct settings *cfg, __u32 rule_id, const struct egress_lookup *lookup)
+{
+	__u32 kind = cfg->egress_enforce ? EVENT_EGRESS_BLOCKED : EVENT_EGRESS_WOULD_BLOCK;
+	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+
+	if (!event) {
+		return cfg->egress_enforce ? 0 : 1;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, kind, transport_for_socket_protocol(params->protocol), EVENT_SOURCE_CGROUP_SOCK_ADDR);
+	event->kernel_uid = lookup->uid;
+	event->uid_source = UID_SOURCE_KERNEL;
+	event->cgroup_id = lookup->cgroup_id;
+	event->rule_id = rule_id;
+#if TRACEGUARD_KERNEL_HELPER_TELEMETRY
+	event->socket_cookie = bpf_get_socket_cookie(ctx);
+#else
+	(void)ctx;
+#endif
+	set_event_socket_meta(event, params->family, params->protocol, params->hook, params->attribution);
+	event->direction = params->direction;
+	set_event_peer(event, params->family, params->port, params->addr);
+	set_event_local(event, params->family, params->local_port, params->local_addr);
+	bpf_ringbuf_submit(event, 0);
+	return cfg->egress_enforce ? 0 : 1;
+}
+
+static __always_inline int evaluate_egress4(struct bpf_sock_addr *ctx, const struct connection_event_params *params, __u32 addr)
+{
+	__u32 zero = 0;
+	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+	struct egress_lookup lookup = {0};
+	__u32 rule;
+
+	if (!cfg || !cfg->egress_enabled) {
+		return 1;
+	}
+	lookup.uid = (__u32)bpf_get_current_uid_gid();
+	lookup.cgroup_id = bpf_get_current_cgroup_id();
+	lookup.policy_slot = cfg->active_policy_slot;
+	lookup.protocol = params->protocol;
+	lookup.port = params->port;
+	__builtin_memcpy(lookup.addr, &addr, sizeof(addr));
+	if (lookup_egress4(1, &lookup)) {
+		return 1;
+	}
+	rule = lookup_egress4(0, &lookup);
+	if (!rule && !cfg->egress_default_block) {
+		return 1;
+	}
+	return emit_egress_decision(ctx, params, cfg, rule, &lookup);
+}
+
+static __always_inline int evaluate_egress6(struct bpf_sock_addr *ctx, const struct connection_event_params *params, const __u8 addr[16])
+{
+	__u32 zero = 0;
+	__u32 mapped_ipv4 = 0;
+	struct settings *cfg = bpf_map_lookup_elem(&settings, &zero);
+	struct egress_lookup lookup = {0};
+	__u32 rule;
+
+	if (!cfg || !cfg->egress_enabled) {
+		return 1;
+	}
+	if (!addr[0] && !addr[1] && !addr[2] && !addr[3] && !addr[4] && !addr[5] &&
+	    !addr[6] && !addr[7] && !addr[8] && !addr[9] && addr[10] == 0xff && addr[11] == 0xff) {
+		__builtin_memcpy(&mapped_ipv4, &addr[12], sizeof(mapped_ipv4));
+		return evaluate_egress4(ctx, params, mapped_ipv4);
+	}
+	lookup.uid = (__u32)bpf_get_current_uid_gid();
+	lookup.cgroup_id = bpf_get_current_cgroup_id();
+	lookup.policy_slot = cfg->active_policy_slot;
+	lookup.protocol = params->protocol;
+	lookup.port = params->port;
+	__builtin_memcpy(lookup.addr, addr, sizeof(lookup.addr));
+	if (lookup_egress6(1, &lookup)) {
+		return 1;
+	}
+	rule = lookup_egress6(0, &lookup);
+	if (!rule && !cfg->egress_default_block) {
+		return 1;
+	}
+	return emit_egress_decision(ctx, params, cfg, rule, &lookup);
+}
+
 static __always_inline int load_sock_local4(struct bpf_sock *sk, __u32 *addr, __u16 *port)
 {
 	if (!sk || sk->family != AF_INET) {
@@ -848,6 +1122,9 @@ static __always_inline __u32 dns_event_kind(const struct dns_parse_result *parse
 	if (policy_rule_active(present, policy->policy_mask) && policy->block_enabled) {
 		return EVENT_BLOCKED;
 	}
+	if (parsed->block_suffix_match && policy->block_enabled) {
+		return EVENT_BLOCKED;
+	}
 	return EVENT_DNS;
 }
 
@@ -879,57 +1156,91 @@ static long hash_suffix_byte(__u64 index, void *data)
 	return 0;
 }
 
-static __noinline __u8 qname_matches_allow_suffix(const struct dns_parse_result *parsed, __u8 policy_slot)
+struct suffix_match_context {
+	__u8 offset;
+	__u8 policy_slot;
+	__u8 allow;
+	__u8 matched;
+	__u8 failed;
+};
+
+static long match_qname_suffix(__u64 index, void *data)
 {
-	__u8 offset = 0;
+	struct suffix_match_context *ctx = data;
+	struct suffix_hash_context hash = {
+		.hash = 14695981039346656037ULL,
+		.cursor = ctx->offset,
+	};
+	struct domain_suffix_key suffix;
+	__u32 zero = 0;
+	const struct dns_parse_result *parsed;
+	__u8 *present;
+	__u8 label_len;
+	__u16 suffix_length;
+	__u16 next_offset;
 
-#pragma clang loop unroll(disable)
-	for (int i = 0; i < MAX_SUFFIX_LABELS; i++) {
-		struct suffix_hash_context hash = {
-			.hash = 14695981039346656037ULL,
-			.cursor = offset,
-		};
-		struct domain_suffix_key suffix;
-		__u8 *present;
-		__u8 label_len;
-		__u16 suffix_length;
-		__u16 next_offset;
-
-		if (offset >= MAX_DOMAIN_LEN) {
-			break;
-		}
-		label_len = parsed->key.domain[offset];
-		if (label_len == 0) {
-			break;
-		}
-		next_offset = (__u16)offset + 1 + (__u16)label_len;
-		if (label_len > 63 || next_offset >= MAX_DOMAIN_LEN) {
-			break;
-		}
-		if (parsed->qname_length <= offset) {
-			break;
-		}
-		suffix_length = parsed->qname_length - offset;
-		if (suffix_length > MAX_SUFFIX_WIRE_LEN) {
-			offset = (__u8)next_offset;
-			continue;
-		}
-		if (bpf_loop(suffix_length, hash_suffix_byte, &hash, 0) < 0 || hash.failed) {
-			return 0;
-		}
-		suffix = (struct domain_suffix_key){
-			.hash = hash.hash,
-			.length = hash.length,
-			.policy_slot = policy_slot,
-		};
-		present = bpf_map_lookup_elem(&allow_suffixes, &suffix);
-		if (present) {
-			return 1;
-		}
-		offset = (__u8)next_offset;
+	(void)index;
+	parsed = bpf_map_lookup_elem(&dns_scratch, &zero);
+	if (!parsed) {
+		ctx->failed = 1;
+		return 1;
 	}
-
+	if (ctx->offset >= MAX_DOMAIN_LEN) {
+		return 1;
+	}
+	label_len = parsed->key.domain[ctx->offset];
+	if (label_len == 0) {
+		return 1;
+	}
+	next_offset = (__u16)ctx->offset + 1 + (__u16)label_len;
+	if (label_len > 63 || next_offset >= MAX_DOMAIN_LEN) {
+		return 1;
+	}
+	if (parsed->qname_length <= ctx->offset) {
+		return 1;
+	}
+	suffix_length = parsed->qname_length - ctx->offset;
+	if (suffix_length > MAX_SUFFIX_WIRE_LEN) {
+		ctx->offset = (__u8)next_offset;
+		return 0;
+	}
+	if (bpf_loop(suffix_length, hash_suffix_byte, &hash, 0) < 0 || hash.failed) {
+		ctx->failed = 1;
+		return 1;
+	}
+	suffix = (struct domain_suffix_key){
+		.hash = hash.hash,
+		.length = hash.length,
+		.policy_slot = ctx->policy_slot,
+	};
+	if (ctx->allow) {
+		present = bpf_map_lookup_elem(&allow_suffixes, &suffix);
+	} else {
+		present = bpf_map_lookup_elem(&block_suffixes, &suffix);
+	}
+	if (present) {
+		ctx->matched = 1;
+		return 1;
+	}
+	ctx->offset = (__u8)next_offset;
 	return 0;
+}
+
+static __noinline __u8 qname_matches_suffix(__u8 policy_slot, __u8 allow)
+{
+	struct suffix_match_context ctx = {
+		.policy_slot = policy_slot,
+		.allow = allow,
+	};
+
+	/* Keep the label walk behind bpf_loop. A bounded C loop over every
+	 * possible DNS label makes the verifier explore too many states and can
+	 * exceed its one-million-instruction processing limit.
+	 */
+	if (bpf_loop(MAX_SUFFIX_LABELS, match_qname_suffix, &ctx, 0) < 0 || ctx.failed) {
+		return 0;
+	}
+	return ctx.matched;
 }
 
 static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payload_offset, __u32 packet_len, struct dns_parse_result *parsed, const struct policy_snapshot *policy)
@@ -941,6 +1252,7 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 	int parse_status;
 
 	parsed->allow_suffix_match = 0;
+	parsed->block_suffix_match = 0;
 	if (payload_offset + sizeof(dns) > packet_len) {
 		return -1;
 	}
@@ -960,7 +1272,10 @@ static __always_inline int parse_dns_payload(struct __sk_buff *skb, __u32 payloa
 		return -1;
 	}
 	if (policy->allow_suffix_rules_enabled) {
-		parsed->allow_suffix_match = qname_matches_allow_suffix(parsed, policy->policy_mask >> 1);
+		parsed->allow_suffix_match = qname_matches_suffix(policy->policy_mask >> 1, 1);
+	}
+	if (policy->block_suffix_rules_enabled) {
+		parsed->block_suffix_match = qname_matches_suffix(policy->policy_mask >> 1, 0);
 	}
 
 	return 0;
@@ -1271,6 +1586,7 @@ int trace_dns(struct __sk_buff *skb)
 		.block_all_domains = cfg && cfg->block_all_domains,
 		.block_all_resolvers = cfg && cfg->block_all_resolvers,
 		.allow_suffix_rules_enabled = cfg && cfg->allow_suffixes_enabled,
+		.block_suffix_rules_enabled = cfg && cfg->block_suffixes_enabled,
 		.policy_mask = cfg && cfg->active_policy_slot ? 2 : 1,
 	};
 	__u8 version_ihl;
@@ -1589,6 +1905,9 @@ int trace_sendmsg4(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV4, &user_ip4);
 	copy_socket_addr(params.local_addr, FAMILY_IPV4, have_local ? &local_addr : 0);
+	if (!evaluate_egress4(ctx, &params, user_ip4)) {
+		return 0;
+	}
 	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
 #if TRACEGUARD_KERNEL_HELPER_TELEMETRY
 		bpf_get_socket_cookie(ctx)
@@ -1645,6 +1964,9 @@ int trace_sendmsg6(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV6, addr);
 	copy_socket_addr(params.local_addr, FAMILY_IPV6, have_local ? local_addr : 0);
+	if (!evaluate_egress6(ctx, &params, addr)) {
+		return 0;
+	}
 	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
 #if TRACEGUARD_KERNEL_HELPER_TELEMETRY
 		bpf_get_socket_cookie(ctx)
@@ -1699,6 +2021,9 @@ int trace_connect4(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV4, &user_ip4);
 	copy_socket_addr(params.local_addr, FAMILY_IPV4, have_local ? &local_addr : 0);
+	if (!evaluate_egress4(ctx, &params, user_ip4)) {
+		return 0;
+	}
 	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
 #if TRACEGUARD_KERNEL_HELPER_TELEMETRY
 		bpf_get_socket_cookie(ctx)
@@ -1774,6 +2099,9 @@ int trace_connect6(struct bpf_sock_addr *ctx)
 	params.local_port = local_port;
 	copy_socket_addr(params.addr, FAMILY_IPV6, addr);
 	copy_socket_addr(params.local_addr, FAMILY_IPV6, have_local ? local_addr : 0);
+	if (!evaluate_egress6(ctx, &params, addr)) {
+		return 0;
+	}
 	emit_connection_event_current(&params, EVENT_SOURCE_CGROUP_SOCK_ADDR,
 #if TRACEGUARD_KERNEL_HELPER_TELEMETRY
 		bpf_get_socket_cookie(ctx)
