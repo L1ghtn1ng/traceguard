@@ -5,7 +5,7 @@ import (
 	"runtime/debug"
 )
 
-const Program = "1.5.2"
+const Program = "1.6.0"
 
 func String() string {
 	info, ok := debug.ReadBuildInfo()
