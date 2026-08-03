@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://traceguard.dev/schema/policy-v1.json",
+  "$id": "https://github.com/L1ghtn1ng/traceguard/docs/policy.schema.json",
   "title": "TraceGuard policy v1",
   "type": "object",
   "additionalProperties": false,
