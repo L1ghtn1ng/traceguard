@@ -1,7 +1,7 @@
 # TraceGuard
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/L1ghtn1ng/traceguard)
 
-TraceGuard is a Go 1.26 Linux security utility that uses the kernel eBPF subsystem to:
+TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsystem to:
 
 - observe outbound DNS queries on UDP and TCP port 53
 - report the process that issued the DNS request
@@ -64,7 +64,7 @@ The user-space service:
 - eBPF support for cgroup egress and tracepoints
 - privileges equivalent to `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_PERFMON`, `CAP_SYS_ADMIN` and `CAP_SYS_RESOURCE`
 - tracepoint perf-event access for syscall probes, which may require lowering `kernel.perf_event_paranoid` when `CAP_PERFMON` is unavailable
-- Go 1.26
+- Go 1.27.x
 - `clang` for `go generate`
 
 Notes:

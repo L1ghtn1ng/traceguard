@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/cilium/ebpf"
@@ -232,12 +233,8 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 		settings.EgressDefaultBlock = 1
 	}
 	ruleIDs := make(map[uint32]string, len(egress.ruleIDs)+len(m.currentRuleIDs))
-	for ruleNumber, ruleID := range m.currentRuleIDs {
-		ruleIDs[ruleNumber] = ruleID
-	}
-	for ruleNumber, ruleID := range egress.ruleIDs {
-		ruleIDs[ruleNumber] = ruleID
-	}
+	maps.Copy(ruleIDs, m.currentRuleIDs)
+	maps.Copy(ruleIDs, egress.ruleIDs)
 	m.egressRuleIDs.Store(&ruleIDs)
 	if err := m.objects.Settings.Put(uint32(0), settings); err != nil {
 		return fmt.Errorf("commit policy settings: %w", err)

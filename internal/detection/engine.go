@@ -2,6 +2,7 @@ package detection
 
 import (
 	"fmt"
+	"maps"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -403,8 +404,6 @@ func emptyMatch(match policy.DetectionMatch) bool {
 
 func cloneFields(fields map[string]any) map[string]any {
 	cloned := make(map[string]any, len(fields))
-	for key, value := range fields {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, fields)
 	return cloned
 }

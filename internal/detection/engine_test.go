@@ -75,7 +75,7 @@ func TestThresholdGroupingCooldownAndExclusion(t *testing.T) {
 		"uid":          uint32(1000),
 		"cgroup":       "/workloads/a",
 	}
-	for index := 0; index < 2; index++ {
+	for index := range 2 {
 		if alerts := engine.Evaluate(Event{Timestamp: base.Add(time.Duration(index) * time.Second), Name: "connection", Fields: fields}); len(alerts) != 0 {
 			t.Fatalf("event %d emitted early alert", index)
 		}
@@ -118,7 +118,7 @@ func TestEngineBoundsThresholdState(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine.maxGroups = 4
-	for index := 0; index < 20; index++ {
+	for index := range 20 {
 		engine.Evaluate(Event{
 			Timestamp: time.Unix(int64(index), 0),
 			Name:      "exec",

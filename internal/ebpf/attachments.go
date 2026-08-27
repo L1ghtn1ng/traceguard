@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -31,9 +32,9 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 	links := make([]io.Closer, 0, 16)
 	rollback := func(cause error) error {
 		errs := []error{cause}
-		for index := len(links) - 1; index >= 0; index-- {
-			if links[index] != nil {
-				errs = append(errs, links[index].Close())
+		for _, link := range slices.Backward(links) {
+			if link != nil {
+				errs = append(errs, link.Close())
 			}
 		}
 		return errors.Join(errs...)
