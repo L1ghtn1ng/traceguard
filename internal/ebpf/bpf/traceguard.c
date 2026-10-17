@@ -839,13 +839,18 @@ static __always_inline __u32 lookup_path_kind(const struct path_lookup_context *
 	__u8 kind, __u64 cgroup_id)
 {
 	struct path_lpm_key key = {0};
-	__u32 copy_len = ctx->path_len + 1;
+	/* 64-bit so the bounds check below applies to the size register itself. */
+	__u64 copy_len = (__u64)ctx->path_len + 1;
 	__u32 rule;
 
 	if (copy_len > PATH_LPM_MAX || copy_len == 0) {
 		copy_len = PATH_LPM_MAX;
 	}
-	key.prefixlen = (PATH_LPM_FIXED + copy_len) * 8;
+	barrier_var(copy_len);
+	if (copy_len > PATH_LPM_MAX) {
+		return 0;
+	}
+	key.prefixlen = (__u32)((PATH_LPM_FIXED + copy_len) * 8);
 	key.data[0] = ctx->policy_slot;
 	key.data[1] = kind;
 	if (identity_has_uid(kind)) {
@@ -855,7 +860,7 @@ static __always_inline __u32 lookup_path_kind(const struct path_lookup_context *
 		__builtin_memcpy(&key.data[6], &cgroup_id, sizeof(cgroup_id));
 	}
 	key.data[14] = ctx->access_or_op;
-	if (bpf_probe_read_kernel(&key.data[PATH_LPM_FIXED], copy_len, ctx->path) < 0) {
+	if (bpf_probe_read_kernel(&key.data[PATH_LPM_FIXED], (__u32)copy_len, ctx->path) < 0) {
 		return 0;
 	}
 	rule = lookup_path_map(ctx->domain, allow, &key);
@@ -955,7 +960,7 @@ static __always_inline void emit_path_decision(__u32 kind, __u32 source,
 	const struct path_decision_context *decision)
 {
 	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
-	__u32 copy_len = decision->path_len + 1;
+	__u64 copy_len = (__u64)decision->path_len + 1;
 
 	if (!event) {
 		return;
@@ -976,8 +981,10 @@ static __always_inline void emit_path_decision(__u32 kind, __u32 source,
 	if (decision->path_truncated) {
 		event->file_mode |= PATH_EVENT_FLAG_TRUNCATED;
 	}
-	if (decision->path && copy_len > 0) {
-		bpf_probe_read_kernel(event->filename, copy_len, decision->path);
+	/* copy_len is at least 1, so only the upper bound needs checking. */
+	barrier_var(copy_len);
+	if (decision->path && copy_len <= sizeof(event->filename)) {
+		bpf_probe_read_kernel(event->filename, (__u32)copy_len, decision->path);
 	}
 	bpf_ringbuf_submit(event, 0);
 }
@@ -2137,12 +2144,21 @@ static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
 		event->file_mode = ctx->args[1];
 	}
 	event->socket_cookie = bpf_get_socket_cookie(ctx);
+	/* bpf_sock_ops address fields only allow full 4-byte context loads, so
+	 * copy them into locals before the byte-wise event copy.
+	 */
 	if (family == FAMILY_IPV4) {
-		set_event_peer(event, family, (__u16)bpf_ntohl(ctx->remote_port), &ctx->remote_ip4);
-		set_event_local(event, family, (__u16)ctx->local_port, &ctx->local_ip4);
+		__u32 remote4 = ctx->remote_ip4;
+		__u32 local4 = ctx->local_ip4;
+
+		set_event_peer(event, family, (__u16)bpf_ntohl(ctx->remote_port), &remote4);
+		set_event_local(event, family, (__u16)ctx->local_port, &local4);
 	} else if (family == FAMILY_IPV6) {
-		set_event_peer(event, family, (__u16)bpf_ntohl(ctx->remote_port), ctx->remote_ip6);
-		set_event_local(event, family, (__u16)ctx->local_port, ctx->local_ip6);
+		__u32 remote6[4] = {ctx->remote_ip6[0], ctx->remote_ip6[1], ctx->remote_ip6[2], ctx->remote_ip6[3]};
+		__u32 local6[4] = {ctx->local_ip6[0], ctx->local_ip6[1], ctx->local_ip6[2], ctx->local_ip6[3]};
+
+		set_event_peer(event, family, (__u16)bpf_ntohl(ctx->remote_port), remote6);
+		set_event_local(event, family, (__u16)ctx->local_port, local6);
 	}
 	bpf_ringbuf_submit(event, 0);
 }

@@ -471,6 +471,21 @@ func fatalVerifierError(t *testing.T, operation string, err error) {
 	t.Fatalf("%s returned error: %v", operation, err)
 }
 
+// withEthernetHeader prefixes an IP packet with the Ethernet header that
+// BPF_PROG_TEST_RUN consumes for skb programs; cgroup_skb programs then see
+// the IP header at offset 0, as they do when attached.
+func withEthernetHeader(packet []byte) []byte {
+	const ethernetHeaderLen = 14
+	frame := make([]byte, ethernetHeaderLen+len(packet))
+	etherType := uint16(0x0800)
+	if len(packet) > 0 && packet[0]>>4 == 6 {
+		etherType = 0x86dd
+	}
+	binary.BigEndian.PutUint16(frame[12:14], etherType)
+	copy(frame[ethernetHeaderLen:], packet)
+	return frame
+}
+
 func malformedIPv6UDPDNSPacket() []byte {
 	packet := make([]byte, 40+8+1)
 	ip := packet
@@ -482,7 +497,7 @@ func malformedIPv6UDPDNSPacket() []byte {
 	binary.BigEndian.PutUint16(ip[40:42], 12345)
 	binary.BigEndian.PutUint16(ip[42:44], 53)
 	binary.BigEndian.PutUint16(ip[44:46], 9)
-	return packet
+	return withEthernetHeader(packet)
 }
 
 func ipv4TCPDNSPacket(batched bool) []byte {
@@ -509,7 +524,7 @@ func ipv4TCPDNSPacket(batched bool) []byte {
 	binary.BigEndian.PutUint16(packet[22:24], 53)
 	packet[32] = 5 << 4
 	copy(packet[40:], payload)
-	return packet
+	return withEthernetHeader(packet)
 }
 
 func ipv4DNSQuestionPacket(question []byte, tcp bool) []byte {
@@ -540,7 +555,7 @@ func ipv4DNSQuestionPacket(question []byte, tcp bool) []byte {
 		binary.BigEndian.PutUint16(packet[24:26], uint16(transportLength+len(payload)))
 	}
 	copy(packet[20+transportLength:], payload)
-	return packet
+	return withEthernetHeader(packet)
 }
 
 func multiQuestionDNSPacket(ipv6, tcp bool) []byte {
@@ -592,5 +607,5 @@ func multiQuestionDNSPacket(ipv6, tcp bool) []byte {
 		binary.BigEndian.PutUint16(packet[ipLength+4:ipLength+6], uint16(transportLength+len(payload)))
 	}
 	copy(packet[ipLength+transportLength:], payload)
-	return packet
+	return withEthernetHeader(packet)
 }

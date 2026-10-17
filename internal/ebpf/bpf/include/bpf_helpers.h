@@ -12,6 +12,12 @@ struct path;
 #define __array(name, val) val *name[]
 #define __ksym __attribute__((section(".ksyms")))
 #define bpf_core_type_id_kernel(type) ((__u32)__builtin_btf_type_id(*(type *)0, 1))
+/*
+ * Hide a value's known range from the compiler so a following bounds check is
+ * emitted as a branch the verifier can use, instead of being folded into a
+ * select whose result the verifier treats as unbounded.
+ */
+#define barrier_var(var) asm volatile("" : "+r"(var))
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
 #endif

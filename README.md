@@ -154,7 +154,7 @@ make snapshot
 toolchain configured for link-time optimization, stack protection on all C
 functions, `_FORTIFY_SOURCE=2`, RELRO, BIND_NOW, and a non-executable stack.
 `make fmt-check` and `make lint` use the repository's golangci-lint v2
-configuration; CI pins golangci-lint 2.13.2 and runs it as a separate gate.
+configuration; CI pins golangci-lint 2.15.0, builds it with the Go 1.27 toolchain, and runs it as a separate gate.
 
 ## Usage
 
