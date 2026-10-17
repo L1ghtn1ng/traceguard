@@ -55,7 +55,10 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 		if isRecvmsgContextVerifierError(err) {
 			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
 			if compatErr != nil {
-				return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: dns compat load failed: %v; dns+recvmsg compat retry failed: %w", release, err, compatErr)
+				return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: %w", release, errors.Join(
+					fmt.Errorf("dns compat load failed: %w", err),
+					fmt.Errorf("dns+recvmsg compat retry failed: %w", compatErr),
+				))
 			}
 			features.SelectedObject = "traceguardDNSRecvmsgCompat"
 			return compatObjects, features, nil
@@ -123,15 +126,16 @@ const (
 
 func (variant monitorVariant) suffix() string {
 	switch variant {
+	case monitorVariantDefault:
+		return ""
 	case monitorVariantDNSCompat:
 		return "DNSCompat"
 	case monitorVariantRecvmsgCompat:
 		return "RecvmsgCompat"
 	case monitorVariantDNSRecvmsgCompat:
 		return "DNSRecvmsgCompat"
-	default:
-		return ""
 	}
+	return ""
 }
 
 func variantLoader(loadSpec func() (*ebpf.CollectionSpec, error)) func(*ebpf.CollectionOptions) (monitorObjects, error) {
@@ -156,9 +160,16 @@ func loadCompatibleMonitorObjects(loadOptions *ebpf.CollectionOptions, loaders m
 			if combinedErr == nil {
 				return objects, monitorVariantDNSRecvmsgCompat, nil
 			}
-			return monitorObjects{}, monitorVariantDefault, fmt.Errorf("default load failed: %v; recvmsg compat retry failed: %v; dns+recvmsg compat retry failed: %w", defaultErr, recvmsgErr, combinedErr)
+			return monitorObjects{}, monitorVariantDefault, errors.Join(
+				fmt.Errorf("default load failed: %w", defaultErr),
+				fmt.Errorf("recvmsg compat retry failed: %w", recvmsgErr),
+				fmt.Errorf("dns+recvmsg compat retry failed: %w", combinedErr),
+			)
 		}
-		return monitorObjects{}, monitorVariantDefault, fmt.Errorf("default load failed: %v; recvmsg compat retry failed: %w", defaultErr, recvmsgErr)
+		return monitorObjects{}, monitorVariantDefault, errors.Join(
+			fmt.Errorf("default load failed: %w", defaultErr),
+			fmt.Errorf("recvmsg compat retry failed: %w", recvmsgErr),
+		)
 	}
 	if !isDNSHelperVerifierError(defaultErr) {
 		return monitorObjects{}, monitorVariantDefault, defaultErr
@@ -173,9 +184,15 @@ func loadCompatibleMonitorObjects(loadOptions *ebpf.CollectionOptions, loaders m
 		if combinedErr == nil {
 			return objects, monitorVariantDNSRecvmsgCompat, nil
 		}
-		return monitorObjects{}, monitorVariantDefault, fmt.Errorf("dns compat retry failed: %v; dns+recvmsg compat retry failed: %w", dnsErr, combinedErr)
+		return monitorObjects{}, monitorVariantDefault, errors.Join(
+			fmt.Errorf("dns compat retry failed: %w", dnsErr),
+			fmt.Errorf("dns+recvmsg compat retry failed: %w", combinedErr),
+		)
 	}
-	return monitorObjects{}, monitorVariantDefault, fmt.Errorf("default load failed: %v; dns compat retry failed: %w", defaultErr, dnsErr)
+	return monitorObjects{}, monitorVariantDefault, errors.Join(
+		fmt.Errorf("default load failed: %w", defaultErr),
+		fmt.Errorf("dns compat retry failed: %w", dnsErr),
+	)
 }
 
 func shouldTryDNSRecvmsgCompat(errs ...error) bool {

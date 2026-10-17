@@ -19,6 +19,11 @@
     },
     "dns": {"$ref": "#/$defs/dns"},
     "egress": {"$ref": "#/$defs/egress"},
+    "exec": {"$ref": "#/$defs/path_policy"},
+    "file": {"$ref": "#/$defs/file_policy"},
+    "bind": {"$ref": "#/$defs/bind_policy"},
+    "unix": {"$ref": "#/$defs/unix_policy"},
+    "sockopt": {"$ref": "#/$defs/sockopt_policy"},
     "detections": {
       "type": "array",
       "maxItems": 256,
@@ -35,6 +40,18 @@
       "maxItems": 256,
       "items": {"type": "string"}
     },
+    "unique_string_list": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "dns_list": {
+      "type": "array",
+      "maxItems": 4096,
+      "description": "The parser limits dns.block and dns.allow to 4096 entries combined, and the merged remote plus local policy to 4096 DNS rules.",
+      "items": {"type": "string"}
+    },
     "uid_list": {
       "type": "array",
       "maxItems": 256,
@@ -49,14 +66,14 @@
     },
     "duration": {
       "type": "string",
-      "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*$"
+      "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$"
     },
     "dns": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "block": {"$ref": "#/$defs/string_list"},
-        "allow": {"$ref": "#/$defs/string_list"}
+        "block": {"$ref": "#/$defs/dns_list"},
+        "allow": {"$ref": "#/$defs/dns_list"}
       }
     },
     "egress": {
@@ -83,21 +100,182 @@
           "additionalProperties": false,
           "properties": {
             "uids": {"$ref": "#/$defs/uid_list"},
-            "cgroup_paths": {"$ref": "#/$defs/string_list"},
-            "cgroup_prefixes": {"$ref": "#/$defs/string_list"}
+            "cgroup_paths": {"$ref": "#/$defs/unique_string_list"},
+            "cgroup_prefixes": {"$ref": "#/$defs/unique_string_list"}
           }
         },
         "destinations": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "cidrs": {"$ref": "#/$defs/string_list"},
+            "cidrs": {"$ref": "#/$defs/unique_string_list"},
             "ports": {"$ref": "#/$defs/port_list"},
             "protocols": {
               "type": "array",
               "uniqueItems": true,
               "items": {"enum": ["tcp", "udp"]}
             }
+          }
+        }
+      }
+    },
+    "selectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "uids": {"$ref": "#/$defs/uid_list"},
+        "cgroup_paths": {"$ref": "#/$defs/unique_string_list"},
+        "cgroup_prefixes": {"$ref": "#/$defs/unique_string_list"}
+      }
+    },
+    "endpoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cidrs": {"$ref": "#/$defs/unique_string_list"},
+        "ports": {"$ref": "#/$defs/port_list"},
+        "protocols": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["tcp", "udp"]}
+        }
+      }
+    },
+    "path_globs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 243}
+    },
+    "path_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"const": "allow"},
+        "rules": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/path_rule"}
+        }
+      }
+    },
+    "path_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {"$ref": "#/$defs/selectors"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path_globs"],
+          "properties": {"path_globs": {"$ref": "#/$defs/path_globs"}}
+        }
+      }
+    },
+    "file_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"const": "allow"},
+        "rules": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/file_rule"}
+        }
+      }
+    },
+    "file_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {"$ref": "#/$defs/selectors"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path_globs"],
+          "properties": {
+            "path_globs": {"$ref": "#/$defs/path_globs"},
+            "access": {"type": "array", "uniqueItems": true, "items": {"enum": ["read", "write"]}}
+          }
+        }
+      }
+    },
+    "bind_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["allow", "block"]},
+        "rules": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/bind_rule"}}
+      }
+    },
+    "bind_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {"$ref": "#/$defs/selectors"},
+        "endpoints": {"$ref": "#/$defs/endpoints"}
+      }
+    },
+    "unix_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["allow", "block"]},
+        "rules": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/unix_rule"}}
+      }
+    },
+    "unix_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {"$ref": "#/$defs/selectors"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path_globs"],
+          "properties": {
+            "path_globs": {"$ref": "#/$defs/path_globs"},
+            "operations": {"type": "array", "uniqueItems": true, "items": {"enum": ["connect", "sendmsg", "recvmsg"]}}
+          }
+        }
+      }
+    },
+    "sockopt_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["allow", "block"]},
+        "rules": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/sockopt_rule"}}
+      }
+    },
+    "sockopt_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "action": {"enum": ["allow", "block"]},
+        "selectors": {"$ref": "#/$defs/selectors"},
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["levels", "optnames"],
+          "properties": {
+            "levels": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["socket", "sol_socket", "ip", "sol_ip", "ipv6", "sol_ipv6"]}},
+            "optnames": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["so_mark", "so_reuseport", "ip_transparent", "ipv6_transparent"]}}
           }
         }
       }
@@ -128,7 +306,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block"]
+            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops"]
           }
         },
         "match": {"$ref": "#/$defs/detection_match"},
@@ -136,20 +314,33 @@
         "threshold": {
           "type": "object",
           "additionalProperties": false,
+          "if": {"required": ["count"], "properties": {"count": {"minimum": 2}}},
+          "then": {
+            "required": ["within", "group_by"],
+            "properties": {
+              "within": {
+                "description": "Required and positive when count exceeds 1; the parser also caps it at 1h.",
+                "not": {"pattern": "^(0|(0+(\\.0+)?(ns|us|µs|ms|s|m|h))+)$"}
+              },
+              "group_by": {"minItems": 1}
+            }
+          },
           "properties": {
-            "count": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "count": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "0 or omitted is treated as 1."},
             "within": {"$ref": "#/$defs/duration"},
             "group_by": {
               "type": "array",
+              "maxItems": 7,
               "uniqueItems": true,
+              "description": "Process-identity fields require contemporaneous identity on every selected event; DNS, blocked DNS, sockops, and inbound TCP connection cache attribution are not eligible.",
               "items": {
-                "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "path", "service", "container", "pod", "k8s_namespace"]
+                "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "path"]
               }
             }
           }
         },
         "cooldown": {"$ref": "#/$defs/duration"},
-        "message": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4096},
         "tags": {
           "type": "array",
           "maxItems": 16,
@@ -165,26 +356,17 @@
         "directions": {"type": "array", "items": {"enum": ["inbound", "outbound"]}},
         "transports": {"$ref": "#/$defs/string_list"},
         "protocols": {"type": "array", "items": {"enum": ["tcp", "udp"]}},
-        "uids": {"$ref": "#/$defs/uid_list"},
+        "uids": {
+          "$ref": "#/$defs/uid_list",
+          "description": "Requires contemporaneous event-time identity; unavailable for DNS, blocked DNS, sockops, and inbound TCP connection cache attribution."
+        },
         "domains": {"$ref": "#/$defs/string_list"},
         "domain_suffixes": {"$ref": "#/$defs/string_list"},
         "destination_cidrs": {"$ref": "#/$defs/string_list"},
         "ports": {"$ref": "#/$defs/port_list"},
         "executable_globs": {"$ref": "#/$defs/string_list"},
-        "command_globs": {"$ref": "#/$defs/string_list"},
         "file_path_globs": {"$ref": "#/$defs/string_list"},
-        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}},
-        "cgroup_prefixes": {"$ref": "#/$defs/string_list"},
-        "services": {"$ref": "#/$defs/string_list"},
-        "container_ids": {"$ref": "#/$defs/string_list"},
-        "pod_uids": {"$ref": "#/$defs/string_list"},
-        "k8s_namespaces": {"$ref": "#/$defs/string_list"},
-        "k8s_pods": {"$ref": "#/$defs/string_list"},
-        "k8s_service_accounts": {"$ref": "#/$defs/string_list"},
-        "k8s_owners": {"$ref": "#/$defs/string_list"},
-        "k8s_apps": {"$ref": "#/$defs/string_list"},
-        "lsm_sources": {"$ref": "#/$defs/string_list"},
-        "lsm_labels": {"$ref": "#/$defs/string_list"}
+        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}}
       }
     }
   }

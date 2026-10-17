@@ -31,6 +31,13 @@ type traceguardConnectionDedupeValue struct {
 	LastSeenNs uint64
 }
 
+type traceguardDaemonProcessIdentity struct {
+	_          structs.HostLayout
+	Tgid       uint32
+	Pad        uint32
+	StartTicks uint64
+}
+
 type traceguardDnsParseResult struct {
 	_                structs.HostLayout
 	Key              traceguardDomainKey
@@ -107,9 +114,35 @@ type traceguardListenerInfoKey struct {
 }
 
 type traceguardListenerInfoValue struct {
+	_                structs.HostLayout
+	ProcessStartTime uint64
+	CgroupId         uint64
+	Pid              uint32
+	Uid              uint32
+	Comm             [16]int8
+}
+
+type traceguardLsmPathValue struct {
 	_    structs.HostLayout
-	Pid  uint32
-	Comm [16]int8
+	Path [4096]int8
+}
+
+type traceguardPathLpmKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [256]uint8
+}
+
+type traceguardRuleNameKey struct {
+	_          structs.HostLayout
+	PolicySlot uint8
+	Pad        [3]uint8
+	RuleId     uint32
+}
+
+type traceguardRuleNameValue struct {
+	_    structs.HostLayout
+	Name [65]int8
 }
 
 type traceguardSettings struct {
@@ -123,7 +156,23 @@ type traceguardSettings struct {
 	EgressEnabled        uint8
 	EgressEnforce        uint8
 	EgressDefaultBlock   uint8
-	Pad                  [7]uint8
+	ExecEnabled          uint8
+	ExecEnforce          uint8
+	ExecDefaultBlock     uint8
+	FileEnabled          uint8
+	FileEnforce          uint8
+	FileDefaultBlock     uint8
+	BindEnabled          uint8
+	BindEnforce          uint8
+	BindDefaultBlock     uint8
+	UnixEnabled          uint8
+	UnixEnforce          uint8
+	UnixDefaultBlock     uint8
+	SockoptEnabled       uint8
+	SockoptEnforce       uint8
+	SockoptDefaultBlock  uint8
+	PolicyGeneration     uint32
+	Pad                  uint32
 }
 
 type traceguardSocketInfoKey struct {
@@ -136,12 +185,26 @@ type traceguardSocketInfoKey struct {
 }
 
 type traceguardSocketInfoValue struct {
+	_                structs.HostLayout
+	ProcessStartTime uint64
+	CgroupId         uint64
+	Uid              uint32
+	Comm             [16]int8
+	Hook             uint8
+	Family           uint8
+	Protocol         uint8
+	Pad              uint8
+}
+
+type traceguardSockoptKey struct {
 	_        structs.HostLayout
-	Comm     [16]int8
-	Hook     uint8
-	Family   uint8
-	Protocol uint8
-	Pad      uint8
+	Slot     uint8
+	Kind     uint8
+	Pad      [2]uint8
+	Uid      uint32
+	CgroupId uint64
+	Level    uint32
+	Optname  uint32
 }
 
 // Names of all BPF objects in the ELF.
@@ -150,9 +213,14 @@ type traceguardSocketInfoValue struct {
 const (
 	traceguardMapAllowSuffixes           = "allow_suffixes"
 	traceguardMapAllowlist               = "allowlist"
+	traceguardMapBind4AllowRules         = "bind4_allow_rules"
+	traceguardMapBind4BlockRules         = "bind4_block_rules"
+	traceguardMapBind6AllowRules         = "bind6_allow_rules"
+	traceguardMapBind6BlockRules         = "bind6_block_rules"
 	traceguardMapBlockSuffixes           = "block_suffixes"
 	traceguardMapBlocklist               = "blocklist"
 	traceguardMapConnectionDedupe        = "connection_dedupe"
+	traceguardMapDaemonIdentity          = "daemon_identity"
 	traceguardMapDnsScratch              = "dns_scratch"
 	traceguardMapEgress4AllowRules       = "egress4_allow_rules"
 	traceguardMapEgress4BlockRules       = "egress4_block_rules"
@@ -167,11 +235,28 @@ const (
 	traceguardMapEndpoint6CidrRules      = "endpoint6_cidr_rules"
 	traceguardMapEndpoint6Rules          = "endpoint6_rules"
 	traceguardMapEvents                  = "events"
+	traceguardMapExecAllowPaths          = "exec_allow_paths"
+	traceguardMapExecBlockPaths          = "exec_block_paths"
+	traceguardMapFileAllowPaths          = "file_allow_paths"
+	traceguardMapFileBlockPaths          = "file_block_paths"
 	traceguardMapListenerInfo            = "listener_info"
+	traceguardMapLsmPathBuf              = "lsm_path_buf"
+	traceguardMapPolicyReaders           = "policy_readers"
+	traceguardMapPolicySelector          = "policy_selector"
+	traceguardMapRuleNames               = "rule_names"
 	traceguardMapSettings                = "settings"
 	traceguardMapSocketInfo              = "socket_info"
+	traceguardMapSockoptAllow            = "sockopt_allow"
+	traceguardMapSockoptBlock            = "sockopt_block"
+	traceguardMapUnixAllowPaths          = "unix_allow_paths"
+	traceguardMapUnixBlockPaths          = "unix_block_paths"
+	traceguardProgLsmBprmCheckSecurity   = "lsm_bprm_check_security"
+	traceguardProgLsmFileOpen            = "lsm_file_open"
+	traceguardProgTraceBind4             = "trace_bind4"
+	traceguardProgTraceBind6             = "trace_bind6"
 	traceguardProgTraceConnect4          = "trace_connect4"
 	traceguardProgTraceConnect6          = "trace_connect6"
+	traceguardProgTraceConnectUnix       = "trace_connect_unix"
 	traceguardProgTraceConnectionIngress = "trace_connection_ingress"
 	traceguardProgTraceCreat             = "trace_creat"
 	traceguardProgTraceDns               = "trace_dns"
@@ -184,8 +269,12 @@ const (
 	traceguardProgTracePostBind6         = "trace_post_bind6"
 	traceguardProgTraceRecvmsg4          = "trace_recvmsg4"
 	traceguardProgTraceRecvmsg6          = "trace_recvmsg6"
+	traceguardProgTraceRecvmsgUnix       = "trace_recvmsg_unix"
 	traceguardProgTraceSendmsg4          = "trace_sendmsg4"
 	traceguardProgTraceSendmsg6          = "trace_sendmsg6"
+	traceguardProgTraceSendmsgUnix       = "trace_sendmsg_unix"
+	traceguardProgTraceSetsockopt        = "trace_setsockopt"
+	traceguardProgTraceSockops           = "trace_sockops"
 )
 
 // loadTraceguard returns the embedded CollectionSpec for traceguard.
@@ -230,8 +319,13 @@ type traceguardSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardProgramSpecs struct {
+	LsmBprmCheckSecurity   *ebpf.ProgramSpec `ebpf:"lsm_bprm_check_security"`
+	LsmFileOpen            *ebpf.ProgramSpec `ebpf:"lsm_file_open"`
+	TraceBind4             *ebpf.ProgramSpec `ebpf:"trace_bind4"`
+	TraceBind6             *ebpf.ProgramSpec `ebpf:"trace_bind6"`
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
+	TraceConnectUnix       *ebpf.ProgramSpec `ebpf:"trace_connect_unix"`
 	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
 	TraceCreat             *ebpf.ProgramSpec `ebpf:"trace_creat"`
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
@@ -244,8 +338,12 @@ type traceguardProgramSpecs struct {
 	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
+	TraceRecvmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
+	TraceSendmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_sendmsg_unix"`
+	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
+	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
 }
 
 // traceguardMapSpecs contains maps before they are loaded into the kernel.
@@ -254,9 +352,14 @@ type traceguardProgramSpecs struct {
 type traceguardMapSpecs struct {
 	AllowSuffixes           *ebpf.MapSpec `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
+	Bind4AllowRules         *ebpf.MapSpec `ebpf:"bind4_allow_rules"`
+	Bind4BlockRules         *ebpf.MapSpec `ebpf:"bind4_block_rules"`
+	Bind6AllowRules         *ebpf.MapSpec `ebpf:"bind6_allow_rules"`
+	Bind6BlockRules         *ebpf.MapSpec `ebpf:"bind6_block_rules"`
 	BlockSuffixes           *ebpf.MapSpec `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
+	DaemonIdentity          *ebpf.MapSpec `ebpf:"daemon_identity"`
 	DnsScratch              *ebpf.MapSpec `ebpf:"dns_scratch"`
 	Egress4AllowRules       *ebpf.MapSpec `ebpf:"egress4_allow_rules"`
 	Egress4BlockRules       *ebpf.MapSpec `ebpf:"egress4_block_rules"`
@@ -271,9 +374,21 @@ type traceguardMapSpecs struct {
 	Endpoint6CidrRules      *ebpf.MapSpec `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
+	ExecAllowPaths          *ebpf.MapSpec `ebpf:"exec_allow_paths"`
+	ExecBlockPaths          *ebpf.MapSpec `ebpf:"exec_block_paths"`
+	FileAllowPaths          *ebpf.MapSpec `ebpf:"file_allow_paths"`
+	FileBlockPaths          *ebpf.MapSpec `ebpf:"file_block_paths"`
 	ListenerInfo            *ebpf.MapSpec `ebpf:"listener_info"`
+	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
+	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
+	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
+	SockoptAllow            *ebpf.MapSpec `ebpf:"sockopt_allow"`
+	SockoptBlock            *ebpf.MapSpec `ebpf:"sockopt_block"`
+	UnixAllowPaths          *ebpf.MapSpec `ebpf:"unix_allow_paths"`
+	UnixBlockPaths          *ebpf.MapSpec `ebpf:"unix_block_paths"`
 }
 
 // traceguardVariableSpecs contains global variables before they are loaded into the kernel.
@@ -304,9 +419,14 @@ func (o *traceguardObjects) Close() error {
 type traceguardMaps struct {
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	Bind4AllowRules         *ebpf.Map `ebpf:"bind4_allow_rules"`
+	Bind4BlockRules         *ebpf.Map `ebpf:"bind4_block_rules"`
+	Bind6AllowRules         *ebpf.Map `ebpf:"bind6_allow_rules"`
+	Bind6BlockRules         *ebpf.Map `ebpf:"bind6_block_rules"`
 	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
+	DaemonIdentity          *ebpf.Map `ebpf:"daemon_identity"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Egress4AllowRules       *ebpf.Map `ebpf:"egress4_allow_rules"`
 	Egress4BlockRules       *ebpf.Map `ebpf:"egress4_block_rules"`
@@ -321,18 +441,35 @@ type traceguardMaps struct {
 	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
+	ExecAllowPaths          *ebpf.Map `ebpf:"exec_allow_paths"`
+	ExecBlockPaths          *ebpf.Map `ebpf:"exec_block_paths"`
+	FileAllowPaths          *ebpf.Map `ebpf:"file_allow_paths"`
+	FileBlockPaths          *ebpf.Map `ebpf:"file_block_paths"`
 	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
+	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
+	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
+	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
+	SockoptAllow            *ebpf.Map `ebpf:"sockopt_allow"`
+	SockoptBlock            *ebpf.Map `ebpf:"sockopt_block"`
+	UnixAllowPaths          *ebpf.Map `ebpf:"unix_allow_paths"`
+	UnixBlockPaths          *ebpf.Map `ebpf:"unix_block_paths"`
 }
 
 func (m *traceguardMaps) Close() error {
 	return _TraceguardClose(
 		m.AllowSuffixes,
 		m.Allowlist,
+		m.Bind4AllowRules,
+		m.Bind4BlockRules,
+		m.Bind6AllowRules,
+		m.Bind6BlockRules,
 		m.BlockSuffixes,
 		m.Blocklist,
 		m.ConnectionDedupe,
+		m.DaemonIdentity,
 		m.DnsScratch,
 		m.Egress4AllowRules,
 		m.Egress4BlockRules,
@@ -347,9 +484,21 @@ func (m *traceguardMaps) Close() error {
 		m.Endpoint6CidrRules,
 		m.Endpoint6Rules,
 		m.Events,
+		m.ExecAllowPaths,
+		m.ExecBlockPaths,
+		m.FileAllowPaths,
+		m.FileBlockPaths,
 		m.ListenerInfo,
+		m.LsmPathBuf,
+		m.PolicyReaders,
+		m.PolicySelector,
+		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,
+		m.SockoptAllow,
+		m.SockoptBlock,
+		m.UnixAllowPaths,
+		m.UnixBlockPaths,
 	)
 }
 
@@ -363,8 +512,13 @@ type traceguardVariables struct {
 //
 // It can be passed to loadTraceguardObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardPrograms struct {
+	LsmBprmCheckSecurity   *ebpf.Program `ebpf:"lsm_bprm_check_security"`
+	LsmFileOpen            *ebpf.Program `ebpf:"lsm_file_open"`
+	TraceBind4             *ebpf.Program `ebpf:"trace_bind4"`
+	TraceBind6             *ebpf.Program `ebpf:"trace_bind6"`
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
+	TraceConnectUnix       *ebpf.Program `ebpf:"trace_connect_unix"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
 	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
@@ -377,14 +531,23 @@ type traceguardPrograms struct {
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
+	TraceRecvmsgUnix       *ebpf.Program `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceSendmsgUnix       *ebpf.Program `ebpf:"trace_sendmsg_unix"`
+	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
+	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
 }
 
 func (p *traceguardPrograms) Close() error {
 	return _TraceguardClose(
+		p.LsmBprmCheckSecurity,
+		p.LsmFileOpen,
+		p.TraceBind4,
+		p.TraceBind6,
 		p.TraceConnect4,
 		p.TraceConnect6,
+		p.TraceConnectUnix,
 		p.TraceConnectionIngress,
 		p.TraceCreat,
 		p.TraceDns,
@@ -397,8 +560,12 @@ func (p *traceguardPrograms) Close() error {
 		p.TracePostBind6,
 		p.TraceRecvmsg4,
 		p.TraceRecvmsg6,
+		p.TraceRecvmsgUnix,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
+		p.TraceSendmsgUnix,
+		p.TraceSetsockopt,
+		p.TraceSockops,
 	)
 }
 

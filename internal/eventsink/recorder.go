@@ -2,6 +2,7 @@ package eventsink
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +52,7 @@ type Config struct {
 type Recorder struct {
 	mu       sync.RWMutex
 	closed   bool
+	hostname string
 	logger   *logging.Logger
 	archive  *archiveSink
 	blocked  *blockedSink
@@ -61,16 +63,19 @@ type Recorder struct {
 	metrics  *telemetry.Registry
 
 	dedupeMu     sync.Mutex
-	errorStates  map[string]errorDedupeState
-	infoStates   map[string]errorDedupeState
-	changeStates map[string]string
+	errorStates  map[recordFingerprint]errorDedupeState
+	infoStates   map[recordFingerprint]errorDedupeState
+	changeStates map[recordFingerprint]recordFingerprint
 	nextPruneAt  time.Time
 }
+
+type recordFingerprint [sha256.Size]byte
 
 type record struct {
 	Timestamp string         `json:"timestamp"`
 	Level     string         `json:"level"`
 	Message   string         `json:"message"`
+	Hostname  string         `json:"hostname"`
 	Fields    map[string]any `json:"-"`
 }
 
@@ -83,11 +88,12 @@ type errorDedupeState struct {
 func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry.Registry, cfg Config) (*Recorder, error) {
 	recorder := &Recorder{
 		logger:       logger,
+		hostname:     logger.Hostname(),
 		metrics:      metrics,
 		now:          time.Now,
-		errorStates:  make(map[string]errorDedupeState),
-		infoStates:   make(map[string]errorDedupeState),
-		changeStates: make(map[string]string),
+		errorStates:  make(map[recordFingerprint]errorDedupeState),
+		infoStates:   make(map[recordFingerprint]errorDedupeState),
+		changeStates: make(map[recordFingerprint]recordFingerprint),
 	}
 	if strings.TrimSpace(cfg.ArchivePath) != "" {
 		archive, err := newArchiveSink(cfg.ArchivePath, metrics)
@@ -121,7 +127,7 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 		recorder.exporter = exporter
 	}
 	if strings.TrimSpace(cfg.SyslogURL) != "" {
-		syslog, err := newSyslogSink(ctx, cfg, metrics)
+		syslog, err := newSyslogSink(ctx, cfg, metrics, recorder.hostname)
 		if err != nil {
 			_ = recorder.Close()
 			return nil, err
@@ -177,7 +183,7 @@ func (r *Recorder) InfoDedupFileAuditAt(timestamp time.Time, msg string, fields 
 	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields), timestamp.UTC())
 }
 
-func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key string, timestamp time.Time) {
+func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key recordFingerprint, timestamp time.Time) {
 	if ttl <= 0 {
 		r.emitAt("info", msg, fields, timestamp)
 		return
@@ -229,7 +235,7 @@ func (r *Recorder) ErrorDedup(msg string, err error, fields map[string]any, ttl 
 	}
 
 	now := r.now().UTC()
-	key := msg + "\x00" + fmt.Sprint(merged["error"])
+	key := fingerprintRecord("error", msg, merged)
 
 	r.dedupeMu.Lock()
 	state := r.errorStates[key]
@@ -262,7 +268,7 @@ func (r *Recorder) pruneDedupeStatesLocked(now time.Time) {
 	r.nextPruneAt = now.Add(dedupePruneInterval)
 }
 
-func pruneExpiredDedupeStates(states map[string]errorDedupeState, now time.Time) {
+func pruneExpiredDedupeStates(states map[recordFingerprint]errorDedupeState, now time.Time) {
 	for key, state := range states {
 		if !state.expiresAt.After(now) {
 			delete(states, key)
@@ -270,7 +276,7 @@ func pruneExpiredDedupeStates(states map[string]errorDedupeState, now time.Time)
 	}
 }
 
-func limitDedupeStates(states map[string]errorDedupeState, preserve string) {
+func limitDedupeStates(states map[recordFingerprint]errorDedupeState, preserve recordFingerprint) {
 	for len(states) > maxDedupeStates {
 		for key := range states {
 			if key == preserve {
@@ -282,7 +288,7 @@ func limitDedupeStates(states map[string]errorDedupeState, preserve string) {
 	}
 }
 
-func limitChangeStates(states map[string]string, preserve string) {
+func limitChangeStates(states map[recordFingerprint]recordFingerprint, preserve recordFingerprint) {
 	for len(states) > maxDedupeStates {
 		for key := range states {
 			if key == preserve {
@@ -296,14 +302,15 @@ func limitChangeStates(states map[string]string, preserve string) {
 
 func (r *Recorder) InfoIfChanged(msg string, fields map[string]any) bool {
 	fingerprint := fingerprintRecord("info", msg, fields)
+	messageKey := fingerprintBytes([]byte(msg))
 
 	r.dedupeMu.Lock()
-	if r.changeStates[msg] == fingerprint {
+	if r.changeStates[messageKey] == fingerprint {
 		r.dedupeMu.Unlock()
 		return false
 	}
-	r.changeStates[msg] = fingerprint
-	limitChangeStates(r.changeStates, msg)
+	r.changeStates[messageKey] = fingerprint
+	limitChangeStates(r.changeStates, messageKey)
 	r.dedupeMu.Unlock()
 
 	r.emit("info", msg, fields)
@@ -323,6 +330,7 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 	if fields == nil {
 		fields = map[string]any{}
 	}
+	msg, fields = boundTelemetry(msg, fields, maxRecordFieldBytes)
 	if err := r.logger.LogAt(timestamp, level, msg, fields); err != nil {
 		r.metrics.SetEventSinkHealthy("primary", false)
 	} else {
@@ -333,6 +341,7 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 		Timestamp: timestamp.Format(time.RFC3339Nano),
 		Level:     level,
 		Message:   msg,
+		Hostname:  r.hostname,
 		Fields:    cloneFields(fields),
 	}
 	if r.archive != nil {
@@ -364,7 +373,7 @@ func (r *Recorder) emitAt(level, msg string, fields map[string]any, timestamp ti
 	}
 }
 
-func fingerprintRecord(level, msg string, fields map[string]any) string {
+func fingerprintRecord(level, msg string, fields map[string]any) recordFingerprint {
 	payload, err := json.Marshal(struct {
 		Level   string         `json:"level"`
 		Message string         `json:"message"`
@@ -375,16 +384,22 @@ func fingerprintRecord(level, msg string, fields map[string]any) string {
 		Fields:  cloneFields(fields),
 	})
 	if err != nil {
-		return fmt.Sprintf("%s|%s|%v", level, msg, fields)
+		return fingerprintBytes([]byte(fmt.Sprintf("%s|%s|%T", level, msg, fields)))
 	}
-	return string(payload)
+	return fingerprintBytes(payload)
 }
 
-func fingerprintFileAuditRecord(msg string, fields map[string]any) string {
-	stable := make(map[string]any, 20)
+func fingerprintBytes(payload []byte) recordFingerprint {
+	return sha256.Sum256(payload)
+}
+
+func fingerprintFileAuditRecord(msg string, fields map[string]any) recordFingerprint {
+	stable := make(map[string]any, 24)
 	for _, key := range []string{
 		"event",
+		"requested_path",
 		"path",
+		"path_source",
 		"file_access",
 		"file_flags",
 		"file_mode",
@@ -409,6 +424,26 @@ func fingerprintFileAuditRecord(msg string, fields map[string]any) string {
 		"k8s_owner_kind",
 		"k8s_owner",
 		"k8s_app",
+		"current_exe",
+		"current_cmdline",
+		"current_uid",
+		"current_cgroup",
+		"current_service",
+		"current_container_id",
+		"current_pod_uid",
+		"current_runtime",
+		"current_lsm_label",
+		"current_lsm_source",
+		"current_selinux_context",
+		"current_apparmor_profile",
+		"current_apparmor_mode",
+		"current_k8s_namespace",
+		"current_k8s_pod",
+		"current_k8s_node",
+		"current_k8s_service_account",
+		"current_k8s_owner_kind",
+		"current_k8s_owner",
+		"current_k8s_app",
 	} {
 		if value, ok := fields[key]; ok {
 			stable[key] = value
@@ -425,7 +460,8 @@ func fingerprintFileAuditRecord(msg string, fields map[string]any) string {
 }
 
 func fileAuditProcessAttributionIncomplete(fields map[string]any) bool {
-	return !hasNonEmptyField(fields, "exe") && !hasNonEmptyField(fields, "cmdline")
+	return !hasNonEmptyField(fields, "exe") && !hasNonEmptyField(fields, "cmdline") &&
+		!hasNonEmptyField(fields, "current_exe") && !hasNonEmptyField(fields, "current_cmdline")
 }
 
 func hasNonEmptyField(fields map[string]any, key string) bool {

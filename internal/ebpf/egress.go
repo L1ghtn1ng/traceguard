@@ -17,6 +17,8 @@ const (
 	egressIdentityUID
 	egressIdentityCgroup
 	egressIdentityUIDCgroup
+	egressIdentityCgroupAncestor
+	egressIdentityUIDCgroupAncestor
 
 	egressProtocolTCP = 2
 	egressProtocolUDP = 1
@@ -46,6 +48,12 @@ func compileEgressPolicy(policy EgressPolicyConfig) (egressCompiledPolicy, error
 		block6:  make(map[egress6Key]uint32),
 		ruleIDs: make(map[uint32]string, len(policy.Rules)),
 	}
+	planned := map[string]int{
+		"IPv4 allow": 0,
+		"IPv4 block": 0,
+		"IPv6 allow": 0,
+		"IPv6 block": 0,
+	}
 	for _, rule := range policy.Rules {
 		ruleNumber := egressRuleNumber(rule.ID)
 		if previous, exists := compiled.ruleIDs[ruleNumber]; exists && previous != rule.ID {
@@ -58,6 +66,13 @@ func compileEgressPolicy(policy EgressPolicyConfig) (egressCompiledPolicy, error
 				netip.PrefixFrom(netip.IPv4Unspecified(), 0),
 				netip.PrefixFrom(netip.IPv6Unspecified(), 0),
 			}
+		}
+		for index, prefix := range prefixes {
+			canonical, err := canonicalPrefix(prefix)
+			if err != nil {
+				return egressCompiledPolicy{}, fmt.Errorf("egress rule %q: %w", rule.ID, err)
+			}
+			prefixes[index] = canonical
 		}
 		ports := slices.Clone(rule.Ports)
 		if len(ports) == 0 {
@@ -87,6 +102,12 @@ func compileEgressPolicy(policy EgressPolicyConfig) (egressCompiledPolicy, error
 			if identityCount > egressMaxEntries/prefixCount/len(protocols)/len(ports) {
 				return egressCompiledPolicy{}, fmt.Errorf("egress rule %q expands beyond %d %s map entries", rule.ID, egressMaxEntries, family)
 			}
+			entries := identityCount * prefixCount * len(protocols) * len(ports)
+			bucket := family + " " + rule.Action
+			if planned[bucket] > egressMaxEntries-entries {
+				return egressCompiledPolicy{}, fmt.Errorf("%s egress entries exceed map capacity %d", bucket, egressMaxEntries)
+			}
+			planned[bucket] += entries
 		}
 		identities := expandEgressIdentities(rule)
 		for _, identity := range identities {
@@ -124,21 +145,22 @@ func compileEgressPolicy(policy EgressPolicyConfig) (egressCompiledPolicy, error
 }
 
 func egressIdentityCount(rule EgressRuleConfig) int {
+	cgroupCount := len(rule.CgroupIDs) + len(rule.CgroupAncestorIDs)
 	switch {
 	case !rule.HasUIDSelector && !rule.HasCgroupSelector:
 		return 1
 	case rule.HasUIDSelector && !rule.HasCgroupSelector:
 		return len(rule.UIDs)
 	case !rule.HasUIDSelector && rule.HasCgroupSelector:
-		return len(rule.CgroupIDs)
+		return cgroupCount
 	default:
-		if len(rule.UIDs) == 0 || len(rule.CgroupIDs) == 0 {
+		if len(rule.UIDs) == 0 || cgroupCount == 0 {
 			return 0
 		}
-		if len(rule.UIDs) > egressMaxEntries/len(rule.CgroupIDs) {
+		if len(rule.UIDs) > egressMaxEntries/cgroupCount {
 			return egressMaxEntries + 1
 		}
-		return len(rule.UIDs) * len(rule.CgroupIDs)
+		return len(rule.UIDs) * cgroupCount
 	}
 }
 
@@ -153,19 +175,27 @@ func expandEgressIdentities(rule EgressRuleConfig) []egressIdentity {
 		}
 		return identities
 	case !rule.HasUIDSelector && rule.HasCgroupSelector:
-		identities := make([]egressIdentity, 0, len(rule.CgroupIDs))
+		identities := make([]egressIdentity, 0, len(rule.CgroupIDs)+len(rule.CgroupAncestorIDs))
 		for _, cgroupID := range rule.CgroupIDs {
 			identities = append(identities, egressIdentity{kind: egressIdentityCgroup, cgroupID: cgroupID})
 		}
+		for _, cgroupID := range rule.CgroupAncestorIDs {
+			identities = append(identities, egressIdentity{kind: egressIdentityCgroupAncestor, cgroupID: cgroupID})
+		}
 		return identities
 	default:
-		identities := make([]egressIdentity, 0, len(rule.UIDs)*len(rule.CgroupIDs))
+		identities := make([]egressIdentity, 0, len(rule.UIDs)*(len(rule.CgroupIDs)+len(rule.CgroupAncestorIDs)))
 		for _, uid := range rule.UIDs {
 			for _, cgroupID := range rule.CgroupIDs {
 				identities = append(identities, egressIdentity{
 					kind:     egressIdentityUIDCgroup,
 					uid:      uid,
 					cgroupID: cgroupID,
+				})
+			}
+			for _, cgroupID := range rule.CgroupAncestorIDs {
+				identities = append(identities, egressIdentity{
+					kind: egressIdentityUIDCgroupAncestor, uid: uid, cgroupID: cgroupID,
 				})
 			}
 		}
@@ -193,7 +223,7 @@ func encodeEgressProtocols(protocols []string) ([]uint8, error) {
 
 func encodeEgress4Key(identity egressIdentity, protocol uint8, port uint16, prefix netip.Prefix) egress4Key {
 	var key egress4Key
-	key.PrefixLen = egressIdentityBytes*8 + uint32(prefix.Bits())
+	key.PrefixLen = egressIdentityBytes*8 + uint32(prefix.Bits()) //nolint:gosec // netip prefix bits are bounded to 0..32
 	encodeEgressIdentity(key.Data[:], identity, protocol, port)
 	address := prefix.Masked().Addr().As4()
 	copy(key.Data[egressIdentityBytes:], address[:])
@@ -202,7 +232,7 @@ func encodeEgress4Key(identity egressIdentity, protocol uint8, port uint16, pref
 
 func encodeEgress6Key(identity egressIdentity, protocol uint8, port uint16, prefix netip.Prefix) egress6Key {
 	var key egress6Key
-	key.PrefixLen = egressIdentityBytes*8 + uint32(prefix.Bits())
+	key.PrefixLen = egressIdentityBytes*8 + uint32(prefix.Bits()) //nolint:gosec // netip prefix bits are bounded to 0..128
 	encodeEgressIdentity(key.Data[:], identity, protocol, port)
 	address := prefix.Masked().Addr().As16()
 	copy(key.Data[egressIdentityBytes:], address[:])

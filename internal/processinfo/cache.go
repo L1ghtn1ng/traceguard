@@ -1,7 +1,9 @@
 package processinfo
 
 import (
+	"errors"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -11,26 +13,27 @@ import (
 )
 
 type Metadata struct {
-	PID          uint32
-	StartTime    uint64
-	Comm         string
-	Source       string
-	Exe          string
-	Cmdline      []string
-	UID          uint32
-	PPID         uint32
-	ParentComm   string
-	ParentExe    string
-	CgroupPath   string
-	Service      string
-	Container    string
-	PodUID       string
-	Runtime      string
-	LSMLabel     string
-	LSMSource    string
-	SELinux      string
-	AppArmor     string
-	AppArmorMode string
+	PID              uint32
+	StartTime        uint64
+	Comm             string
+	Source           string
+	Exe              string
+	Cmdline          []string
+	CmdlineTruncated bool
+	UID              uint32
+	PPID             uint32
+	ParentComm       string
+	ParentExe        string
+	CgroupPath       string
+	Service          string
+	Container        string
+	PodUID           string
+	Runtime          string
+	LSMLabel         string
+	LSMSource        string
+	SELinux          string
+	AppArmor         string
+	AppArmorMode     string
 }
 
 const (
@@ -39,7 +42,8 @@ const (
 
 	processCachePruneInterval = time.Minute
 	maxProcessCacheEntries    = 4096
-	maxProcessCmdlineBytes    = 64 << 10
+	maxProcessCmdlineBytes    = 8 << 10
+	maxProcessCmdlineArgs     = 128
 )
 
 type Cache struct {
@@ -74,11 +78,18 @@ func NewCache(root string, ttl time.Duration) *Cache {
 }
 
 func (c *Cache) Lookup(pid uint32, fallbackComm string) (Metadata, bool) {
+	return c.LookupAt(pid, fallbackComm, 0)
+}
+
+// LookupAt enriches an event only when /proc still represents the task
+// generation captured by the kernel. A zero expected start time keeps the
+// generic Lookup behavior for non-event callers.
+func (c *Cache) LookupAt(pid uint32, fallbackComm string, expectedStartTime uint64) (Metadata, bool) {
 	now := c.now()
 
 	c.mu.Lock()
 	entry, ok := c.entries[pid]
-	if ok && now.Before(entry.expiresAt) {
+	if ok && now.Before(entry.expiresAt) && (expectedStartTime == 0 || entry.metadata.StartTime == expectedStartTime) {
 		if (entry.pidfd >= 0 && pidfdAlive(entry.pidfd)) || (entry.pidfd < 0 && c.sameProcess(pid, entry.metadata.StartTime)) {
 			c.sequence++
 			entry.lastUsed = c.sequence
@@ -100,6 +111,12 @@ func (c *Cache) Lookup(pid uint32, fallbackComm string) (Metadata, bool) {
 		}
 	}
 	metadata := c.readMetadata(pid, fallbackComm)
+	if expectedStartTime != 0 && metadata.StartTime != expectedStartTime {
+		if pidfd >= 0 {
+			_ = unix.Close(pidfd)
+		}
+		return Metadata{PID: pid, Comm: fallbackComm, Source: SourceFallback}, false
+	}
 	if pidfd >= 0 && !pidfdAlive(pidfd) {
 		_ = unix.Close(pidfd)
 		pidfd = -1
@@ -182,6 +199,9 @@ func (c *Cache) closeEntry(entry cacheEntry) {
 }
 
 func pidfdAlive(fd int) bool {
+	if fd < 0 || fd > math.MaxInt32 {
+		return false
+	}
 	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	n, err := unix.Poll(poll, 0)
 	return err == nil && n == 0
@@ -210,8 +230,9 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 	if exe, err := os.Readlink(c.procPath(pid, "exe")); err == nil {
 		metadata.Exe = exe
 	}
-	if cmdline, err := readFilePrefix(c.procPath(pid, "cmdline"), maxProcessCmdlineBytes); err == nil {
-		metadata.Cmdline = parseCmdline(cmdline)
+	if cmdline, truncated, err := readFilePrefix(c.procPath(pid, "cmdline"), maxProcessCmdlineBytes); err == nil {
+		metadata.Cmdline, metadata.CmdlineTruncated = parseCmdline(cmdline)
+		metadata.CmdlineTruncated = metadata.CmdlineTruncated || truncated
 	}
 	if cgroup, err := os.ReadFile(c.procPath(pid, "cgroup")); err == nil {
 		metadata.CgroupPath, metadata.Service, metadata.Container, metadata.PodUID, metadata.Runtime = parseCgroup(cgroup)
@@ -232,13 +253,24 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 	return metadata
 }
 
-func readFilePrefix(path string, maxBytes int64) ([]byte, error) {
-	file, err := os.Open(path)
+func readFilePrefix(path string, maxBytes int64) (payload []byte, truncated bool, readErr error) {
+	// Callers construct path beneath the fixed procfs root from a numeric PID
+	// and constant component names.
+	file, err := os.Open(path) //nolint:gosec // constrained procfs path
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	defer file.Close()
-	return io.ReadAll(io.LimitReader(file, maxBytes))
+	defer func() {
+		readErr = errors.Join(readErr, file.Close())
+	}()
+	payload, err = io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return payload[:maxBytes], true, nil
+	}
+	return payload, false, nil
 }
 
 func (c *Cache) sameProcess(pid uint32, cachedStartTime uint64) bool {

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log"
 	"maps"
 	"net"
 	"net/http"
@@ -21,7 +22,8 @@ func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging
 	mux := r.httpHandler()
 
 	server := newHTTPServer(addr, mux)
-	listener, err := net.Listen("tcp", addr)
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen metrics server: %w", err)
 	}
@@ -34,13 +36,17 @@ func (r *Registry) StartServer(ctx context.Context, addr string, logger *logging
 	}()
 
 	go func() {
-		logger.Info("metrics server listening", map[string]any{
+		if err := logger.Info("metrics server listening", map[string]any{
 			"address": listener.Addr().String(),
-		})
+		}); err != nil {
+			log.Printf("log metrics server startup: %v", err)
+		}
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			logger.Error("metrics server stopped", err, map[string]any{
+			if logErr := logger.Error("metrics server stopped", err, map[string]any{
 				"address": addr,
-			})
+			}); logErr != nil {
+				log.Printf("log metrics server failure: %v", logErr)
+			}
 		}
 	}()
 
@@ -165,6 +171,20 @@ func metricKey2(name, key1, value1, key2, value2 string) string {
 	writeMetricLabel(&builder, key1, value1)
 	builder.WriteByte(',')
 	writeMetricLabel(&builder, key2, value2)
+	builder.WriteByte('}')
+	return builder.String()
+}
+
+func metricKey3(name, key1, value1, key2, value2, key3, value3 string) string {
+	var builder strings.Builder
+	builder.Grow(len(name) + len(key1) + len(value1) + len(key2) + len(value2) + len(key3) + len(value3) + 15)
+	builder.WriteString(name)
+	builder.WriteByte('{')
+	writeMetricLabel(&builder, key1, value1)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key2, value2)
+	builder.WriteByte(',')
+	writeMetricLabel(&builder, key3, value3)
 	builder.WriteByte('}')
 	return builder.String()
 }

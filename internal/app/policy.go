@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
@@ -15,6 +14,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
@@ -31,8 +31,6 @@ type policyController struct {
 	cgroups       []cgroupinfo.Entry
 	blockResolved []blocklist.ResolvedEndpoint
 	allowResolved []blocklist.ResolvedEndpoint
-	endpointIndex atomic.Pointer[map[string]string]
-	runtimePolicy atomic.Pointer[blocklist.Policy]
 }
 
 func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine) *policyController {
@@ -42,17 +40,27 @@ func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.M
 func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := validateBundleForMode(p.cfg, bundle); err != nil {
+		return err
+	}
 	bundleChanged := !reflect.DeepEqual(bundle, p.bundle)
 	refreshEndpoints := policyHasResolverEndpoints(p.bundle) || policyHasResolverEndpoints(bundle)
 	if !bundleChanged && !refreshEndpoints {
 		return nil
 	}
 	cgroups := p.cgroups
+	var detections detection.CompiledRules
 	if bundleChanged {
 		var err error
 		cgroups, err = p.scanCgroups(bundle)
 		if err != nil {
 			return err
+		}
+		// Compile detections before the kernel commit so a failure cannot
+		// leave the kernel and controller on different policies.
+		detections, err = detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs)
+		if err != nil {
+			return fmt.Errorf("compile detection policy: %w", err)
 		}
 	}
 	previous := p.cgroups
@@ -62,16 +70,31 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 		return err
 	}
 	if bundleChanged {
-		if err := p.detector.Replace(bundle.DetectionRules, bundle.DisabledRuleIDs); err != nil {
-			p.cgroups = previous
-			return fmt.Errorf("replace detection policy: %w", err)
-		}
+		p.detector.Install(detections)
 		p.metrics.SetDetectionRules(p.detector.RuleCount())
 		p.recorder.InfoIfChanged("detection policy loaded", map[string]any{
 			"rules": p.detector.RuleCount(),
 		})
 	}
 	p.bundle = bundle
+	return nil
+}
+
+// validateBundleForMode runs every check that does not touch the kernel. The
+// YAML manager uses it before committing a fetched remote document.
+func validateBundleForMode(cfg config.Config, bundle policyconfig.Bundle) error {
+	if err := bundle.Validate(); err != nil {
+		return fmt.Errorf("validate effective policy: %w", err)
+	}
+	if err := validateEnforcedCgroupSelectors(cfg, bundle); err != nil {
+		return err
+	}
+	if err := validateRulesForMode(cfg, bundle.DNS); err != nil {
+		return err
+	}
+	if _, err := detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs); err != nil {
+		return fmt.Errorf("compile detection policy: %w", err)
+	}
 	return nil
 }
 
@@ -100,28 +123,32 @@ func (p *policyController) ReconcileCgroups() error {
 }
 
 func (p *policyController) scanCgroups(bundle policyconfig.Bundle) ([]cgroupinfo.Entry, error) {
-	for _, rule := range bundle.Egress.Rules {
-		if len(rule.Selectors.CgroupPaths) > 0 || len(rule.Selectors.CgroupPrefixes) > 0 {
-			entries, err := cgroupinfo.Scan(p.cfg.CgroupPath)
-			if err != nil {
-				return nil, fmt.Errorf("resolve egress cgroup selectors: %w", err)
-			}
-			selected := make(map[uint64]struct{})
-			for _, candidate := range bundle.Egress.Rules {
-				for _, id := range cgroupinfo.Select(entries, candidate.Selectors.CgroupPaths, candidate.Selectors.CgroupPrefixes) {
-					selected[id] = struct{}{}
-				}
-			}
-			relevant := make([]cgroupinfo.Entry, 0, len(selected))
-			for _, entry := range entries {
-				if _, ok := selected[entry.ID]; ok {
-					relevant = append(relevant, entry)
-				}
-			}
-			return relevant, nil
+	selectors := enforcementSelectors(bundle)
+	if len(selectors) == 0 {
+		return nil, nil
+	}
+	entries, err := cgroupinfo.ScanContext(p.ctx, p.cfg.CgroupPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve policy cgroup selectors: %w", err)
+	}
+	index := cgroupinfo.NewIndex(entries)
+	selected := make(map[uint64]struct{})
+	for _, selector := range selectors {
+		exactIDs, ancestorIDs, err := index.Resolve(selector.CgroupPaths, selector.CgroupPrefixes)
+		if err != nil {
+			return nil, fmt.Errorf("resolve policy cgroup selectors: %w", err)
+		}
+		for _, id := range append(exactIDs, ancestorIDs...) {
+			selected[id] = struct{}{}
 		}
 	}
-	return nil, nil
+	relevant := make([]cgroupinfo.Entry, 0, len(selected))
+	for _, entry := range entries {
+		if _, ok := selected[entry.ID]; ok {
+			relevant = append(relevant, entry)
+		}
+	}
+	return relevant, nil
 }
 
 func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoints bool) error {
@@ -147,14 +174,11 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 	allowEndpoints := make([]ebpf.ResolverEndpoint, 0, len(allowResolved))
 	blockCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.BlockEndpointCIDRs))
 	allowCIDRs := make([]ebpf.ResolverCIDR, 0, len(rules.AllowEndpointCIDRs))
-	index := make(map[string]string, len(blockResolved)+len(allowResolved))
 	for _, endpoint := range blockResolved {
 		blockEndpoints = append(blockEndpoints, ebpf.ResolverEndpoint{Transport: string(endpoint.Kind), IP: endpoint.IP, Port: endpoint.Port})
-		index[resolverIndexKey(string(endpoint.Kind), endpoint.IP.String(), endpoint.Port)] = endpoint.Host
 	}
 	for _, endpoint := range allowResolved {
 		allowEndpoints = append(allowEndpoints, ebpf.ResolverEndpoint{Transport: string(endpoint.Kind), IP: endpoint.IP, Port: endpoint.Port})
-		index[resolverIndexKey(string(endpoint.Kind), endpoint.IP.String(), endpoint.Port)] = endpoint.Host
 	}
 	for _, cidr := range rules.BlockEndpointCIDRs {
 		blockCIDRs = append(blockCIDRs, ebpf.ResolverCIDR{Transport: string(cidr.Kind), Prefix: cidr.Prefix, Port: cidr.Port})
@@ -162,14 +186,33 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 	for _, cidr := range rules.AllowEndpointCIDRs {
 		allowCIDRs = append(allowCIDRs, ebpf.ResolverCIDR{Transport: string(cidr.Kind), Prefix: cidr.Prefix, Port: cidr.Port})
 	}
-	runtimePolicy := blocklist.NewPolicy(rules, blockResolved, allowResolved)
-	egress, err := compileEgressPolicy(p.cfg, bundle.Egress, p.cgroups)
+	cgroups := cgroupinfo.NewIndex(p.cgroups)
+	egress, err := compileEgressPolicy(p.cfg, bundle.Egress, cgroups)
 	if err != nil {
 		return err
 	}
-
+	execPolicy, err := compilePathPolicy(p.cfg, bundle.Exec, cgroups)
+	if err != nil {
+		return err
+	}
+	filePolicy, err := compileFilePolicy(p.cfg, bundle.File, cgroups)
+	if err != nil {
+		return err
+	}
+	bindPolicy, err := compileBindPolicy(p.cfg, bundle.Bind, cgroups)
+	if err != nil {
+		return err
+	}
+	unixPolicy, err := compileUnixPolicy(p.cfg, bundle.Unix, cgroups)
+	if err != nil {
+		return err
+	}
+	sockoptPolicy, err := compileSockoptPolicy(p.cfg, bundle.Sockopt, cgroups)
+	if err != nil {
+		return err
+	}
 	if err := p.monitor.ApplyPolicy(ebpf.PolicyConfig{
-		BlockEnabled:      p.cfg.Block && !p.cfg.DryRun,
+		BlockEnabled:      !p.cfg.EmergencyAllow && p.cfg.Block && !p.cfg.DryRun,
 		BlockAllDomains:   rules.BlockAllDomains,
 		BlockAllResolvers: rules.BlockAllResolvers,
 		BlockedDomains:    rules.BlockDomains,
@@ -181,16 +224,23 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 		BlockedCIDRs:      blockCIDRs,
 		AllowedCIDRs:      allowCIDRs,
 		Egress:            egress,
+		Exec:              execPolicy,
+		File:              filePolicy,
+		Bind:              bindPolicy,
+		Unix:              unixPolicy,
+		Sockopt:           sockoptPolicy,
 	}); err != nil {
 		return fmt.Errorf("commit kernel policy: %w", err)
 	}
+	// Report hook health only for the policy that is now active.
+	p.updateHookHealth(execPolicy, filePolicy, bindPolicy, unixPolicy, sockoptPolicy)
 
-	p.endpointIndex.Store(&index)
-	p.runtimePolicy.Store(runtimePolicy)
 	p.blockResolved = blockResolved
 	p.allowResolved = allowResolved
 	p.metrics.SetPolicyCounts(len(rules.BlockDomains)+len(rules.AllowDomains)+len(rules.BlockSuffixes)+len(rules.AllowSuffixes), len(blockResolved)+len(allowResolved)+len(rules.BlockEndpointCIDRs)+len(rules.AllowEndpointCIDRs))
-	p.metrics.SetPolicyRuleCounts(policyRuleCounts(rules, len(blockResolved), len(allowResolved)))
+	counts := policyRuleCounts(rules, len(blockResolved), len(allowResolved))
+	addEnforcementRuleCounts(counts, bundle)
+	p.metrics.SetPolicyRuleCounts(counts)
 	egressAllow := 0
 	egressBlock := 0
 	for _, rule := range bundle.Egress.Rules {
@@ -214,17 +264,28 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 		"block_endpoint_cidrs": len(rules.BlockEndpointCIDRs),
 		"allow_endpoint_cidrs": len(rules.AllowEndpointCIDRs),
 		"policy_path":          p.cfg.PolicyPath,
-		"policy_url":           p.cfg.PolicyURL,
+		"policy_url":           config.SanitizeURL(p.cfg.PolicyURL),
 		"policy_cache":         p.cfg.PolicyCachePath,
 		"dry_run":              p.cfg.DryRun,
 		"egress_default":       bundle.Egress.Default,
 		"egress_rules":         len(bundle.Egress.Rules),
+		"exec_rules":           len(bundle.Exec.Rules),
+		"file_rules":           len(bundle.File.Rules),
+		"bind_rules":           len(bundle.Bind.Rules),
+		"unix_rules":           len(bundle.Unix.Rules),
+		"sockopt_rules":        len(bundle.Sockopt.Rules),
 	})
 	return nil
 }
 
-func compileEgressPolicy(cfg config.Config, source policyconfig.EgressPolicy, cgroups []cgroupinfo.Entry) (ebpf.EgressPolicyConfig, error) {
-	enabled := (cfg.Block || cfg.DryRun) && (len(source.Rules) > 0 || source.Default == "block")
+func compileEgressPolicy(cfg config.Config, source policyconfig.EgressPolicy, cgroups cgroupinfo.Index) (ebpf.EgressPolicyConfig, error) {
+	blockRules := 0
+	for _, rule := range source.Rules {
+		if rule.Action == "block" {
+			blockRules++
+		}
+	}
+	enabled := enforcementSectionEnabled(cfg, source.Default, blockRules, true)
 	compiled := ebpf.EgressPolicyConfig{
 		Enabled:      enabled,
 		Enforce:      enabled && cfg.Block && !cfg.DryRun,
@@ -238,14 +299,23 @@ func compileEgressPolicy(cfg config.Config, source policyconfig.EgressPolicy, cg
 			if err != nil {
 				return ebpf.EgressPolicyConfig{}, fmt.Errorf("egress rule %q destination %q: %w", rule.ID, value, err)
 			}
-			cidrs = append(cidrs, prefix.Masked())
+			canonical, err := netprefix.Canonical(prefix)
+			if err != nil {
+				return ebpf.EgressPolicyConfig{}, fmt.Errorf("egress rule %q destination %q: %w", rule.ID, value, err)
+			}
+			cidrs = append(cidrs, canonical)
 		}
 		hasCgroupSelector := len(rule.Selectors.CgroupPaths) > 0 || len(rule.Selectors.CgroupPrefixes) > 0
+		exactCgroups, ancestorCgroups, err := cgroups.Resolve(rule.Selectors.CgroupPaths, rule.Selectors.CgroupPrefixes)
+		if err != nil {
+			return ebpf.EgressPolicyConfig{}, fmt.Errorf("egress rule %q: %w", rule.ID, err)
+		}
 		compiled.Rules = append(compiled.Rules, ebpf.EgressRuleConfig{
 			ID:                rule.ID,
 			Action:            rule.Action,
 			UIDs:              slices.Clone(rule.Selectors.UIDs),
-			CgroupIDs:         cgroupinfo.Select(cgroups, rule.Selectors.CgroupPaths, rule.Selectors.CgroupPrefixes),
+			CgroupIDs:         exactCgroups,
+			CgroupAncestorIDs: ancestorCgroups,
 			HasUIDSelector:    len(rule.Selectors.UIDs) > 0,
 			HasCgroupSelector: hasCgroupSelector,
 			CIDRs:             cidrs,

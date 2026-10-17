@@ -59,8 +59,9 @@ nfpms:
       - rpm
       - archlinux
     description: |
-      TraceGuard observes Linux runtime activity with eBPF and enforces DNS and
-      UID/cgroup-aware outbound policy from legacy or strict YAML sources.
+      TraceGuard observes Linux runtime activity with eBPF and enforces DNS,
+      egress, exec, file-open, bind, AF_UNIX, and socket-option policy from
+      strict YAML v1 sources.
     license: MIT
     maintainer: TraceGuard Maintainers <maintainers@example.invalid>
     section: admin

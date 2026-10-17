@@ -4,10 +4,14 @@
 #include <linux/bpf.h>
 #include <linux/types.h>
 
+struct path;
+
 #define SEC(name) __attribute__((section(name), used))
 #define __uint(name, val) int (*name)[val]
 #define __type(name, val) val *name
 #define __array(name, val) val *name[]
+#define __ksym __attribute__((section(".ksyms")))
+#define bpf_core_type_id_kernel(type) ((__u32)__builtin_btf_type_id(*(type *)0, 1))
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
 #endif
@@ -21,6 +25,8 @@ static long (*const bpf_get_current_comm)(void *buf, __u32 size_of_buf) = (void 
 static __u64 (*const bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
 static __u64 (*const bpf_get_current_uid_gid)(void) = (void *)BPF_FUNC_get_current_uid_gid;
 static __u64 (*const bpf_get_current_cgroup_id)(void) = (void *)BPF_FUNC_get_current_cgroup_id;
+static __u64 (*const bpf_get_current_ancestor_cgroup_id)(__u32 ancestor_level) = (void *)BPF_FUNC_get_current_ancestor_cgroup_id;
+static void *(*const bpf_get_current_task)(void) = (void *)BPF_FUNC_get_current_task;
 static __u64 (*const bpf_get_socket_cookie)(void *ctx) = (void *)BPF_FUNC_get_socket_cookie;
 static __u64 (*const bpf_ktime_get_ns)(void) = (void *)BPF_FUNC_ktime_get_ns;
 static __u64 (*const bpf_ktime_get_boot_ns)(void) = (void *)BPF_FUNC_ktime_get_boot_ns;
@@ -28,8 +34,20 @@ static void *(*const bpf_ringbuf_reserve)(void *ringbuf, __u64 size, __u64 flags
 static void (*const bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_FUNC_ringbuf_submit;
 static long (*const bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user;
 static long (*const bpf_probe_read_user_str)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_user_str;
+static long (*const bpf_probe_read_kernel)(void *dst, __u32 size, const void *unsafe_ptr) = (void *)BPF_FUNC_probe_read_kernel;
 static long (*const bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to, __u32 len) = (void *)BPF_FUNC_skb_load_bytes;
 static long (*const bpf_loop)(__u32 nr_loops, void *callback_fn, void *callback_ctx, __u64 flags) = (void *)BPF_FUNC_loop;
+static long (*const bpf_d_path)(struct path *path, char *buf, __u32 sz) = (void *)BPF_FUNC_d_path;
+static void *(*const bpf_get_current_task_btf)(void) = (void *)BPF_FUNC_get_current_task_btf;
+static void *(*const bpf_task_storage_get)(void *map, void *task, void *value, __u64 flags) = (void *)BPF_FUNC_task_storage_get;
+static long (*const bpf_sock_ops_cb_flags_set)(void *ctx, int flags) = (void *)BPF_FUNC_sock_ops_cb_flags_set;
+
+extern void *bpf_cast_to_kern_ctx(void *ptr) __ksym;
+extern void *bpf_rdonly_cast(void *obj, __u32 btf_id) __ksym;
+
+#ifndef BPF_LOCAL_STORAGE_GET_F_CREATE
+#define BPF_LOCAL_STORAGE_GET_F_CREATE (1ULL)
+#endif
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 

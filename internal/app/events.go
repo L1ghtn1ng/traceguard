@@ -3,8 +3,8 @@ package app
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
-	"sync/atomic"
+	"net"
+	"slices"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
@@ -17,12 +17,12 @@ import (
 )
 
 type processMetadataCache interface {
-	Lookup(uint32, string) (processinfo.Metadata, bool)
+	LookupAt(uint32, string, uint64) (processinfo.Metadata, bool)
 	Invalidate(uint32)
 }
 
 func lookupProcessForEvent(cache processMetadataCache, event ebpf.Event) (processinfo.Metadata, bool) {
-	process, hit := cache.Lookup(event.PID, event.Comm)
+	process, hit := cache.LookupAt(event.PID, event.Comm, event.ProcessStartTime)
 	if event.Kind == ebpf.EventExec {
 		// exec events are emitted at syscall entry, before the process image
 		// changes. Invalidate after enrichment so subsequent events cannot retain
@@ -34,6 +34,8 @@ func lookupProcessForEvent(cache processMetadataCache, event ebpf.Event) (proces
 
 func policyMode(cfg config.Config) string {
 	switch {
+	case cfg.EmergencyAllow:
+		return "observe"
 	case cfg.Block && !cfg.DryRun:
 		return "block"
 	case cfg.DryRun:
@@ -61,29 +63,22 @@ func IsPermissionError(err error) bool {
 }
 
 func validateRulesForMode(cfg config.Config, rules blocklist.Rules) error {
+	if cfg.EmergencyAllow || (!cfg.Block && !cfg.DryRun) {
+		return nil
+	}
+	for _, endpoint := range append(slices.Clone(rules.BlockEndpoints), rules.AllowEndpoints...) {
+		if net.ParseIP(endpoint.Host) == nil {
+			return fmt.Errorf("resolver endpoint %q uses a hostname; block and dry-run modes require authenticated literal IP or CIDR endpoints", endpoint.Host)
+		}
+	}
 	return nil
 }
 
-func resolverHost(index *atomic.Pointer[map[string]string], event ebpf.Event) string {
-	current := index.Load()
-	if current == nil {
-		return ""
-	}
-	if host, ok := (*current)[resolverIndexKey(event.Transport, event.Address, event.Port)]; ok {
-		return host
-	}
-	return ""
-}
-
-func resolverIndexKey(transport, address string, port uint16) string {
-	return fmt.Sprintf("%s|%s|%d", transport, address, port)
-}
-
-func appendSocketFields(fields map[string]any, event ebpf.Event, process processinfo.Metadata) {
+func appendSocketFields(fields map[string]any, event ebpf.Event) {
 	if !isSocketAwareEvent(event.Kind) {
 		return
 	}
-	if attribution := eventAttribution(event, process); attribution != "" {
+	if attribution := eventAttribution(event); attribution != "" {
 		fields["attribution"] = attribution
 	}
 	if event.SocketHook != "" {
@@ -97,6 +92,43 @@ func appendSocketFields(fields map[string]any, event ebpf.Event, process process
 	}
 }
 
+func appendEventIdentityFields(fields map[string]any, event ebpf.Event) {
+	switch event.UIDSource {
+	case "kernel":
+		fields["uid_source"] = event.UIDSource
+		fields["uid"] = event.KernelUID
+		fields["kernel_uid"] = event.KernelUID
+		if event.Comm != "" {
+			fields["program"] = event.Comm
+		}
+		if event.ProcessStartTime != 0 {
+			fields["process_start_ticks"] = event.ProcessStartTime
+		}
+		if event.CgroupID != 0 {
+			fields["cgroup_id"] = event.CgroupID
+		}
+	case "socket-cache":
+		fields["identity_source"] = event.UIDSource
+		fields["cached_uid"] = event.KernelUID
+		if event.Comm != "" {
+			fields["cached_program"] = event.Comm
+		}
+		if event.ProcessStartTime != 0 {
+			fields["cached_process_start_ticks"] = event.ProcessStartTime
+		}
+		if event.CgroupID != 0 {
+			fields["cached_cgroup_id"] = event.CgroupID
+		}
+	default:
+		if event.Comm != "" {
+			fields["observed_program"] = event.Comm
+		}
+		if event.ProcessStartTime != 0 {
+			fields["observed_process_start_ticks"] = event.ProcessStartTime
+		}
+	}
+}
+
 func appendKernelFeatureFields(fields map[string]any, event ebpf.Event) {
 	if event.KernelFeatureSet != "" {
 		fields["kernel_feature_set"] = event.KernelFeatureSet
@@ -104,65 +136,36 @@ func appendKernelFeatureFields(fields map[string]any, event ebpf.Event) {
 	if event.EventSource != "" {
 		fields["event_source"] = event.EventSource
 	}
-	if event.UIDSource != "" {
-		fields["uid_source"] = event.UIDSource
-		fields["kernel_uid"] = event.KernelUID
-	}
-	if event.CgroupID != 0 {
-		fields["cgroup_id"] = event.CgroupID
-	}
 	if event.SocketCookie != 0 {
 		fields["socket_cookie"] = event.SocketCookie
 	}
 }
 
-func resolveExecutablePath(event ebpf.Event, process processinfo.Metadata) string {
+func resolveExecutablePath(event ebpf.Event) string {
 	if event.PID == 0 {
 		return ""
 	}
-	if event.Kind == ebpf.EventExec && event.Filename != "" {
+	if (event.Kind == ebpf.EventExecBlocked || event.Kind == ebpf.EventExecWouldBlock) && event.Filename != "" {
 		return event.Filename
-	}
-	if process.Exe != "" {
-		return process.Exe
-	}
-	if len(process.Cmdline) > 0 && filepath.IsAbs(process.Cmdline[0]) {
-		return process.Cmdline[0]
 	}
 	return ""
 }
 
-func eventAttribution(event ebpf.Event, process processinfo.Metadata) string {
-	if isSocketAwareEvent(event.Kind) && process.Source == processinfo.SourceProc {
-		return processinfo.SourceProc
-	}
+func eventAttribution(event ebpf.Event) string {
 	return event.Attribution
 }
 
 func isSocketAwareEvent(kind uint32) bool {
 	switch kind {
 	case ebpf.EventDNS, ebpf.EventBlocked, ebpf.EventResolver, ebpf.EventResolverBlocked,
-		ebpf.EventConnection, ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
+		ebpf.EventConnection, ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock,
+		ebpf.EventBindBlocked, ebpf.EventBindWouldBlock, ebpf.EventUnixBlocked,
+		ebpf.EventUnixWouldBlock, ebpf.EventSockoptBlocked, ebpf.EventSockoptWouldBlock,
+		ebpf.EventSockOps:
 		return true
 	default:
 		return false
 	}
-}
-
-func domainDecision(policy *atomic.Pointer[blocklist.Policy], domain string) blocklist.Decision {
-	current := policy.Load()
-	if current == nil {
-		return blocklist.DecisionNone
-	}
-	return current.DomainDecision(domain)
-}
-
-func endpointDecision(policy *atomic.Pointer[blocklist.Policy], transport, address string, port uint16) blocklist.Decision {
-	current := policy.Load()
-	if current == nil {
-		return blocklist.DecisionNone
-	}
-	return current.EndpointDecision(transport, address, port)
 }
 
 func eventKindName(kind uint32) string {
@@ -185,9 +188,61 @@ func eventKindName(kind uint32) string {
 		return "egress_blocked"
 	case ebpf.EventEgressWouldBlock:
 		return "egress_would_block"
+	case ebpf.EventExecBlocked:
+		return "exec_blocked"
+	case ebpf.EventExecWouldBlock:
+		return "exec_would_block"
+	case ebpf.EventFileBlocked:
+		return "file_blocked"
+	case ebpf.EventFileWouldBlock:
+		return "file_would_block"
+	case ebpf.EventBindBlocked:
+		return "bind_blocked"
+	case ebpf.EventBindWouldBlock:
+		return "bind_would_block"
+	case ebpf.EventUnixBlocked:
+		return "unix_blocked"
+	case ebpf.EventUnixWouldBlock:
+		return "unix_would_block"
+	case ebpf.EventSockoptBlocked:
+		return "sockopt_blocked"
+	case ebpf.EventSockoptWouldBlock:
+		return "sockopt_would_block"
+	case ebpf.EventSockOps:
+		return "tcp_sockops"
 	default:
 		return "unknown"
 	}
+}
+
+func unixOperationName(operation uint32) string {
+	switch operation {
+	case 1:
+		return "connect"
+	case 2:
+		return "sendmsg"
+	case 4:
+		return "recvmsg"
+	default:
+		return "unknown"
+	}
+}
+
+func enforcementEventMode(wouldBlock bool) string {
+	if wouldBlock {
+		return "dry-run"
+	}
+	return "block"
+}
+
+func appendEnforcementDecisionFields(fields map[string]any, event ebpf.Event, mode string) {
+	fields["policy"] = string(blocklist.DecisionBlock)
+	fields["mode"] = mode
+	if event.RuleID == "" {
+		fields["policy_rule_id"] = "default"
+		return
+	}
+	fields["policy_rule_id"] = event.RuleID
 }
 
 func fileAccessName(flags uint32) string {

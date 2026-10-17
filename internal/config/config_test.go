@@ -27,6 +27,9 @@ func TestParseRejectsMalformedBooleanEnvironmentValues(t *testing.T) {
 	keys := []string{
 		"TRACEGUARD_BLOCK",
 		"TRACEGUARD_DRY_RUN",
+		"TRACEGUARD_EMERGENCY_ALLOW",
+		"TRACEGUARD_PIN_EBPF",
+		"TRACEGUARD_EBPF_STATS",
 		"TRACEGUARD_EVENT_EXPORT_SPOOL",
 		"TRACEGUARD_FILE_AUDIT",
 		"TRACEGUARD_KUBERNETES_ENRICH",
@@ -44,6 +47,35 @@ func TestParseRejectsMalformedBooleanEnvironmentValues(t *testing.T) {
 				t.Fatalf("Parse error = %v, want malformed %s boolean error", err, key)
 			}
 		})
+	}
+}
+
+func TestParseEnforcementRuntimeOptions(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-block", "-emergency-allow", "-pin-ebpf", "-ebpf-stats"}
+	clearPolicyEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.Block || !cfg.EmergencyAllow || !cfg.PinEBPF || !cfg.EBPFStats {
+		t.Fatalf("runtime options = block %t emergency %t pin %t stats %t", cfg.Block, cfg.EmergencyAllow, cfg.PinEBPF, cfg.EBPFStats)
+	}
+}
+
+func TestParseUnpinExitsBeforeServiceValidation(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-unpin", "-cgroup-path", ""}
+	clearPolicyEnv(t)
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.Unpin {
+		t.Fatal("Unpin = false")
 	}
 }
 
@@ -194,6 +226,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 
 	clearPolicyEnv(t)
 	unsetEnv(t,
+		"TRACEGUARD_EMERGENCY_ALLOW",
+		"TRACEGUARD_PIN_EBPF",
+		"TRACEGUARD_EBPF_STATS",
 		"TRACEGUARD_CGROUP_PATH",
 		"TRACEGUARD_LOG_PATH",
 		"TRACEGUARD_LOG_FORMAT",
@@ -225,8 +260,8 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	if cfg.LogPath != "/var/log/traceguard/traceguard.log" || cfg.LogFormat != "json" {
 		t.Fatalf("log defaults = path %q format %q, want packaged defaults", cfg.LogPath, cfg.LogFormat)
 	}
-	if cfg.MetricsAddr != ":9091" {
-		t.Fatalf("MetricsAddr = %q, want :9091", cfg.MetricsAddr)
+	if cfg.MetricsAddr != "127.0.0.1:9091" {
+		t.Fatalf("MetricsAddr = %q, want 127.0.0.1:9091", cfg.MetricsAddr)
 	}
 	if cfg.EventExportAuthorization != "" || !cfg.EventExportSpool {
 		t.Fatalf("export defaults = authorization %q spool %v, want packaged defaults", cfg.EventExportAuthorization, cfg.EventExportSpool)
@@ -242,6 +277,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if cfg.KubernetesEnrich {
 		t.Fatal("KubernetesEnrich = true, want packaged default false")
+	}
+	if cfg.EmergencyAllow || cfg.PinEBPF || cfg.EBPFStats || cfg.Unpin {
+		t.Fatalf("enforcement runtime defaults = emergency %t pin %t stats %t unpin %t, want disabled", cfg.EmergencyAllow, cfg.PinEBPF, cfg.EBPFStats, cfg.Unpin)
 	}
 	if cfg.KubernetesAPIURL != "" || cfg.KubernetesNodeName != "" {
 		t.Fatalf("Kubernetes defaults = api %q node %q, want empty packaged defaults", cfg.KubernetesAPIURL, cfg.KubernetesNodeName)
@@ -378,6 +416,14 @@ func TestParseRejectsInvalidRemoteSyslogConfig(t *testing.T) {
 			env: map[string]string{
 				"TRACEGUARD_EVENT_SYSLOG_URL": "syslog+udp://syslog.example:514",
 				"TRACEGUARD_EVENT_SYSLOG_TAG": "bad tag",
+			},
+			want: "event-syslog-tag",
+		},
+		{
+			name: "non-ascii tag",
+			env: map[string]string{
+				"TRACEGUARD_EVENT_SYSLOG_URL": "syslog+udp://syslog.example:514",
+				"TRACEGUARD_EVENT_SYSLOG_TAG": "tracegu\u00e4rd",
 			},
 			want: "event-syslog-tag",
 		},
@@ -581,6 +627,9 @@ func clearPolicyEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("TRACEGUARD_BLOCK", "")
 	t.Setenv("TRACEGUARD_DRY_RUN", "")
+	t.Setenv("TRACEGUARD_EMERGENCY_ALLOW", "")
+	t.Setenv("TRACEGUARD_PIN_EBPF", "")
+	t.Setenv("TRACEGUARD_EBPF_STATS", "")
 	t.Setenv("TRACEGUARD_BLOCK_ALL", "")
 	t.Setenv("TRACEGUARD_POLICY_PATH", "")
 	t.Setenv("TRACEGUARD_POLICY_URL", "")
@@ -591,6 +640,9 @@ func clearTypedEnv(t *testing.T) {
 	for _, key := range []string{
 		"TRACEGUARD_BLOCK",
 		"TRACEGUARD_DRY_RUN",
+		"TRACEGUARD_EMERGENCY_ALLOW",
+		"TRACEGUARD_PIN_EBPF",
+		"TRACEGUARD_EBPF_STATS",
 		"TRACEGUARD_EVENT_EXPORT_SPOOL",
 		"TRACEGUARD_FILE_AUDIT",
 		"TRACEGUARD_KUBERNETES_ENRICH",
@@ -600,5 +652,48 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestRedactCommandLineProtectsCredentialsAndURLQueries(t *testing.T) {
+	t.Parallel()
+
+	got := RedactCommandLine([]string{
+		"traceguard",
+		"--policy-authorization", "Bearer policy-secret",
+		"--event-export-authorization=Bearer export-secret",
+		"--policy-url=https://policy.example/v1?token=query-secret#fragment",
+		"-event-export-url", "https://collector.example/events?api_key=export-query",
+		"--event-syslog-url=syslog+tls://logs.example:6514?token=syslog-query",
+		"--kubernetes-api-url", "https://kubernetes.example?token=kubernetes-query",
+	})
+	rendered := strings.Join(got, " ")
+	for _, secret := range []string{"policy-secret", "export-secret", "query-secret", "export-query", "syslog-query", "kubernetes-query", "fragment"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("redacted command line retained %q: %q", secret, rendered)
+		}
+	}
+	for _, want := range []string{
+		"--policy-authorization " + redactedValue,
+		"--event-export-authorization=" + redactedValue,
+		"--policy-url=https://policy.example/v1",
+		"-event-export-url https://collector.example/events",
+		"--event-syslog-url=syslog+tls://logs.example:6514",
+		"--kubernetes-api-url https://kubernetes.example",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("redacted command line %q missing %q", rendered, want)
+		}
+	}
+}
+
+func TestSanitizeURLDoesNotEchoInvalidOrCredentialBearingInput(t *testing.T) {
+	t.Parallel()
+
+	if got := SanitizeURL("https://user:password@example.test/path?token=secret#fragment"); got != "https://example.test/path" {
+		t.Fatalf("SanitizeURL() = %q", got)
+	}
+	if got := SanitizeURL("%%%secret"); got != "[invalid-url]" {
+		t.Fatalf("SanitizeURL(invalid) = %q", got)
 	}
 }

@@ -90,7 +90,9 @@ func (b *blockedSink) Close() error {
 }
 
 func isBlockedRecord(entry record) bool {
-	return entry.Message == "blocked" || entry.Message == "egress_blocked" || strings.HasPrefix(entry.Message, "blocked-")
+	return entry.Message == "blocked" ||
+		strings.HasPrefix(entry.Message, "blocked-") ||
+		strings.HasSuffix(entry.Message, "_blocked")
 }
 
 type domainSink struct {
@@ -140,7 +142,8 @@ func (d *domainSink) Write(entry record) error {
 	if _, ok := d.seen[domain]; ok {
 		return nil
 	}
-	if _, err := d.writer.Write([]byte(entry.Timestamp + "\t" + domain + "\n")); err != nil {
+	hostname := normalizeDomainLogHostname(entry.Hostname)
+	if _, err := d.writer.Write([]byte(entry.Timestamp + "\t" + hostname + "\t" + domain + "\n")); err != nil {
 		return err
 	}
 	d.rememberDomain(domain)
@@ -189,7 +192,7 @@ func (d *domainSink) loadSeen(path string, backups int) error {
 	return nil
 }
 
-func (d *domainSink) loadSeenFile(path string) error {
+func (d *domainSink) loadSeenFile(path string) (loadErr error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -204,11 +207,15 @@ func (d *domainSink) loadSeenFile(path string) error {
 		return fmt.Errorf("domain log %q is not a regular file", path)
 	}
 
-	file, err := os.Open(path)
+	// The path is derived from the configured domain log and was just checked
+	// with Lstat to be a regular, non-symlink file.
+	file, err := os.Open(path) //nolint:gosec // validated log path, not untrusted input
 	if err != nil {
 		return fmt.Errorf("open domain log %q: %w", path, err)
 	}
-	defer file.Close()
+	defer func() {
+		loadErr = errors.Join(loadErr, file.Close())
+	}()
 
 	var input io.Reader = file
 	var compressed *gzip.Reader
@@ -217,7 +224,9 @@ func (d *domainSink) loadSeenFile(path string) error {
 		if err != nil {
 			return fmt.Errorf("open compressed domain log %q: %w", path, err)
 		}
-		defer compressed.Close()
+		defer func() {
+			loadErr = errors.Join(loadErr, compressed.Close())
+		}()
 		input = compressed
 	}
 
@@ -238,14 +247,22 @@ func domainFromLogLine(line string) string {
 	if line == "" {
 		return ""
 	}
-	timestamp, domain, ok := strings.Cut(line, "\t")
-	if !ok || timestamp == "" {
+	parts := strings.Split(line, "\t")
+	if len(parts) != 2 && len(parts) != 3 {
 		return ""
 	}
-	if _, err := time.Parse(time.RFC3339Nano, timestamp); err != nil {
+	if _, err := time.Parse(time.RFC3339Nano, parts[0]); err != nil {
 		return ""
 	}
-	return normalizeDomainLogValue(domain)
+	return normalizeDomainLogValue(parts[len(parts)-1])
+}
+
+func normalizeDomainLogHostname(hostname string) string {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" || len(hostname) > 255 || strings.ContainsAny(hostname, "\t\r\n") {
+		return "-"
+	}
+	return hostname
 }
 
 func normalizeDomainLogValue(domain string) string {

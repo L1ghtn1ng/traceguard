@@ -6,8 +6,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +107,149 @@ func TestManagerUsesValidatedStaleCache(t *testing.T) {
 	}
 	if got, want := bundle.DNS.BlockDomains[0], "cached.example"; got != want {
 		t.Fatalf("domain = %q, want %q", got, want)
+	}
+}
+
+func TestManagerDoesNotRollBackActivePolicyToStaleCache(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "policy.yaml")
+	manager, err := NewManager(Config{URL: "https://policy.example/v1", CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	manager.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return response(http.StatusOK, "version: 1\ndns:\n  block: [current.example]\n", nil), nil
+		}
+		return nil, errors.New("offline")
+	})
+	if _, _, err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("initial Load() error = %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("version: 1\ndns:\n  block: [stale.example]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, metadata, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatalf("refresh Load() error = %v", err)
+	}
+	if metadata.RemoteSource != LoadSourceLastKnown || !metadata.StaleFallback || metadata.RemoteError == "" {
+		t.Fatalf("refresh metadata = %+v, want last known remote base", metadata)
+	}
+	if got := bundle.DNS.BlockDomains; len(got) != 1 || got[0] != "current.example" {
+		t.Fatalf("block domains = %v, want active remote policy without cache rollback", got)
+	}
+}
+
+func TestManagerAppliesLocalOverlayDuringRemoteOutage(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.yaml")
+	if err := os.WriteFile(localPath, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{URL: "https://policy.example/v1", CachePath: filepath.Join(dir, "cache.yaml"), Path: localPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	manager.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return response(http.StatusOK, "version: 1\ndns:\n  block: [remote.example]\n", nil), nil
+		}
+		return nil, errors.New("offline")
+	})
+	if _, _, err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("initial Load() error = %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("version: 1\ndns:\n  allow: [urgent.example]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle, _, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatalf("reload during outage error = %v", err)
+	}
+	if !slices.Contains(bundle.DNS.BlockDomains, "remote.example") || !slices.Contains(bundle.DNS.AllowDomains, "urgent.example") {
+		t.Fatalf("bundle DNS = %+v, want remote base plus new local overlay", bundle.DNS)
+	}
+}
+
+func TestManagerCommitsRemoteStateOnlyAfterValidation(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "policy.yaml")
+	reject := errors.New("rejected by mode")
+	manager, err := NewManager(Config{
+		URL: "https://policy.example/v1", CachePath: cachePath,
+		Validate: func(bundle Bundle) error {
+			if slices.Contains(bundle.DNS.BlockDomains, "bad.example") {
+				return reject
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastIfNoneMatch string
+	requests := 0
+	manager.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		lastIfNoneMatch = request.Header.Get("If-None-Match")
+		body := "version: 1\ndns:\n  block: [good.example]\n"
+		etag := `"good"`
+		if requests == 2 {
+			body, etag = "version: 1\ndns:\n  block: [bad.example]\n", `"bad"`
+		}
+		resp := response(http.StatusOK, body, nil)
+		resp.Header.Set("ETag", etag)
+		return resp, nil
+	})
+	if _, _, err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("initial Load() error = %v", err)
+	}
+	if _, _, err := manager.Load(context.Background()); !errors.Is(err, reject) {
+		t.Fatalf("invalid refresh error = %v, want validator error", err)
+	}
+	cached, err := os.ReadFile(cachePath) //nolint:gosec // test-owned temporary path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cached), "good.example") {
+		t.Fatalf("cache = %q, want last valid remote document", cached)
+	}
+	if _, _, err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("third Load() error = %v", err)
+	}
+	if lastIfNoneMatch != `"good"` {
+		t.Fatalf("If-None-Match = %q, want ETag of the last valid document", lastIfNoneMatch)
+	}
+}
+
+func TestManagerRequestErrorsDoNotExposeURLQuery(t *testing.T) {
+	t.Parallel()
+
+	manager, err := NewManager(Config{
+		URL:       "https://policy.example/v1?token=query-secret",
+		CachePath: filepath.Join(t.TempDir(), "missing.yaml"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return nil, &url.Error{Op: "Get", URL: request.URL.String(), Err: errors.New("query-secret transport failure")}
+	})
+	_, _, loadErr := manager.Load(context.Background())
+	if loadErr == nil {
+		t.Fatal("Load() returned nil error")
+	}
+	if strings.Contains(loadErr.Error(), "query-secret") {
+		t.Fatalf("Load() error exposed URL query: %v", loadErr)
 	}
 }
 

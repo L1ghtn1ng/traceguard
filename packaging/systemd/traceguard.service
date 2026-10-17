@@ -17,6 +17,11 @@ User=root
 Group=root
 UMask=0027
 LimitNOFILE=16384
+# CAP_SYS_PTRACE is deliberately omitted (least privilege). Without it,
+# readlink(/proc/<pid>/exe) fails for processes owned by other users, so the
+# current_exe and current_parent_exe enrichment fields are empty for them.
+# Operators who accept the extra privilege may add CAP_SYS_PTRACE to both
+# capability sets below to restore full executable-path enrichment.
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
 NoNewPrivileges=true
@@ -27,7 +32,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/traceguard /var/log/traceguard
+ReadWritePaths=-/sys/fs/bpf /var/lib/traceguard /var/log/traceguard
 RestrictRealtime=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native

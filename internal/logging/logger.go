@@ -2,10 +2,12 @@ package logging
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"maps"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,25 +23,43 @@ const (
 )
 
 type Logger struct {
-	mu     sync.Mutex
-	format Format
-	text   *log.Logger
-	writer io.Writer
+	mu       sync.Mutex
+	format   Format
+	hostname string
+	text     *log.Logger
+	writer   io.Writer
 }
 
 func NewLogger(writer io.Writer, format string) (*Logger, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, fmt.Errorf("read hostname: %w", err)
+	}
+	return newLogger(writer, format, hostname)
+}
+
+func newLogger(writer io.Writer, format, hostname string) (*Logger, error) {
 	normalized := Format(strings.ToLower(strings.TrimSpace(format)))
 	switch normalized {
 	case FormatText, FormatJSON:
 	default:
 		return nil, fmt.Errorf("unsupported log format %q", format)
 	}
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return nil, errors.New("hostname must not be empty")
+	}
 
 	return &Logger{
-		format: normalized,
-		text:   log.New(writer, "", log.LstdFlags|log.LUTC),
-		writer: writer,
+		format:   normalized,
+		hostname: hostname,
+		text:     log.New(writer, "", log.LstdFlags|log.LUTC),
+		writer:   writer,
 	}, nil
+}
+
+func (l *Logger) Hostname() string {
+	return l.hostname
 }
 
 func (l *Logger) Info(msg string, fields map[string]any) error {
@@ -70,26 +90,27 @@ func (l *Logger) emitAt(timestamp time.Time, level, msg string, fields map[strin
 	defer l.mu.Unlock()
 
 	if l.format == FormatJSON {
-		record := make(map[string]any, len(fields)+3)
+		record := make(map[string]any, len(fields)+4)
 		record["timestamp"] = timestamp.Format(time.RFC3339Nano)
 		record["level"] = level
 		record["message"] = msg
+		record["hostname"] = l.hostname
 		for key, value := range fields {
-			if key == "timestamp" || key == "level" || key == "message" {
+			if isReservedField(key) {
 				continue
 			}
 			record[key] = value
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {
-			l.text.Printf("log marshal failure level=%q message=%q error=%q", level, msg, err.Error())
+			l.text.Printf("log marshal failure hostname=%q level=%q message=%q error=%q", l.hostname, level, msg, err.Error())
 			return err
 		}
 		_, err = l.writer.Write(append(payload, '\n'))
 		return err
 	}
 
-	_, err := fmt.Fprintf(l.writer, "%s %s\n", timestamp.Format("2006/01/02 15:04:05"), formatTextLine(msg, level, fields))
+	_, err := fmt.Fprintf(l.writer, "%s %s\n", timestamp.Format("2006/01/02 15:04:05"), formatTextLine(msg, level, l.hostname, fields))
 	return err
 }
 
@@ -102,11 +123,11 @@ func cloneFields(fields map[string]any) map[string]any {
 	return cloned
 }
 
-func formatTextLine(msg, level string, fields map[string]any) string {
+func formatTextLine(msg, level, hostname string, fields map[string]any) string {
 	keys := make([]string, 0, len(fields)+1)
 	keys = append(keys, "level")
 	for key := range fields {
-		if key == "timestamp" || key == "level" || key == "message" {
+		if isReservedField(key) {
 			continue
 		}
 		keys = append(keys, key)
@@ -117,6 +138,8 @@ func formatTextLine(msg, level string, fields map[string]any) string {
 	builder.WriteString(msg)
 	builder.WriteString(" level=")
 	builder.WriteString(strconv.Quote(level))
+	builder.WriteString(" hostname=")
+	builder.WriteString(strconv.Quote(hostname))
 	for _, key := range keys[1:] {
 		builder.WriteByte(' ')
 		builder.WriteString(key)
@@ -124,6 +147,10 @@ func formatTextLine(msg, level string, fields map[string]any) string {
 		builder.WriteString(formatValue(fields[key]))
 	}
 	return builder.String()
+}
+
+func isReservedField(key string) bool {
+	return key == "timestamp" || key == "level" || key == "message" || key == "hostname"
 }
 
 func formatValue(value any) string {
@@ -152,7 +179,10 @@ func formatValue(value any) string {
 	case uint64:
 		return strconv.FormatUint(typed, 10)
 	case []string:
-		payload, _ := json.Marshal(typed)
+		payload, err := json.Marshal(typed)
+		if err != nil {
+			return strconv.Quote(fmt.Sprint(typed))
+		}
 		return string(payload)
 	default:
 		payload, err := json.Marshal(typed)

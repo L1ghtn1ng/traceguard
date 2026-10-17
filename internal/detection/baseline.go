@@ -11,38 +11,45 @@ func BaselineRules() []policy.DetectionRule {
 	enabled := true
 	return []policy.DetectionRule{
 		{
-			ID:       "baseline.exec-from-shared-memory",
+			ID:       "baseline.cloud-metadata-access",
 			Enabled:  &enabled,
 			Severity: "warning",
-			Events:   []string{"exec"},
+			Events:   []string{"connection"},
 			Match: policy.DetectionMatch{
-				ExecutableGlobs: []string{"/dev/shm/**", "/run/shm/**"},
+				Directions: []string{"outbound"},
+				DestinationCIDRs: []string{
+					"169.254.169.254/32", // AWS, Azure, GCP, OCI and others
+					"fd00:ec2::254/128",  // AWS IMDS over IPv6
+					"169.254.170.2/32",   // AWS ECS task metadata and credentials
+					"169.254.170.23/32",  // AWS EKS Pod Identity
+					"fd00:ec2::23/128",   // AWS EKS Pod Identity over IPv6
+					"100.100.100.200/32", // Alibaba Cloud
+				},
+				Ports: []uint16{80, 443},
 			},
-			Cooldown: policy.Duration{Duration: 5 * time.Minute},
-			Message:  "process executed from a shared-memory filesystem",
-			Tags:     []string{"baseline", "execution"},
+			// Guest agents poll metadata continuously. A per-process cooldown
+			// keeps one agent from hiding another process's first access.
+			Cooldown: policy.Duration{Duration: time.Hour},
+			Message:  "a process connected to a cloud instance metadata endpoint",
+			Tags:     []string{"baseline", "cloud", "credential-access"},
 			Threshold: policy.Threshold{
-				Count: 1,
+				Count:   1,
+				GroupBy: []string{"cgroup", "executable"},
 			},
 		},
 		{
-			ID:       "baseline.sensitive-auth-file-write",
+			ID:       "baseline.direct-email-egress",
 			Enabled:  &enabled,
-			Severity: "warning",
-			Events:   []string{"file_access", "file_created"},
+			Severity: "notice",
+			Events:   []string{"connection"},
 			Match: policy.DetectionMatch{
-				FilePathGlobs: []string{
-					"/etc/passwd",
-					"/etc/shadow",
-					"/etc/sudoers",
-					"/etc/sudoers.d/**",
-					"/root/.ssh/**",
-				},
-				FileAccess: []string{"write"},
+				Directions: []string{"outbound"},
+				Protocols:  []string{"tcp"},
+				Ports:      []uint16{25, 465, 587},
 			},
 			Cooldown: policy.Duration{Duration: 5 * time.Minute},
-			Message:  "sensitive authentication file was opened for writing",
-			Tags:     []string{"baseline", "persistence", "privilege-escalation"},
+			Message:  "a process opened a direct outbound email connection",
+			Tags:     []string{"baseline", "egress", "exfiltration"},
 			Threshold: policy.Threshold{
 				Count: 1,
 			},
@@ -51,7 +58,10 @@ func BaselineRules() []policy.DetectionRule {
 			ID:       "baseline.policy-denial-burst",
 			Enabled:  &enabled,
 			Severity: "notice",
-			Events:   []string{"blocked", "resolver_blocked", "egress_blocked"},
+			Events: []string{
+				"resolver_blocked", "egress_blocked", "exec_blocked",
+				"file_blocked", "bind_blocked", "unix_blocked", "sockopt_blocked",
+			},
 			Threshold: policy.Threshold{
 				Count:   5,
 				Within:  policy.Duration{Duration: time.Minute},

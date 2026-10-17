@@ -33,10 +33,17 @@ type syslogSink struct {
 	hostname   string
 }
 
-func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*syslogSink, error) {
+// RFC 5424 section 6 header field limits. HOSTNAME, APP-NAME, PROCID and
+// MSGID must consist of PRINTUSASCII (%d33-126) only.
+const (
+	maxSyslogHostnameBytes = 255
+	maxSyslogTagBytes      = 48
+)
+
+func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry, hostname string) (*syslogSink, error) {
 	parsed, err := neturl.Parse(strings.TrimSpace(cfg.SyslogURL))
 	if err != nil {
-		return nil, fmt.Errorf("parse event syslog url: %w", err)
+		return nil, errors.New("event syslog url is not valid")
 	}
 	network, tlsEnabled, err := syslogNetwork(parsed.Scheme)
 	if err != nil {
@@ -47,13 +54,16 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 	if host == "" || port == "" {
 		return nil, errors.New("event syslog url must include host and port")
 	}
+	if parsed.User != nil {
+		return nil, errors.New("event syslog url must not contain user credentials")
+	}
 	facility, ok := syslogFacilityCode(cfg.SyslogFacility)
 	if !ok {
 		return nil, fmt.Errorf("unsupported event syslog facility %q", cfg.SyslogFacility)
 	}
 	tag := strings.TrimSpace(cfg.SyslogTag)
-	if tag == "" || strings.ContainsAny(tag, " \t\r\n") {
-		return nil, errors.New("event syslog tag must be non-empty and must not contain whitespace")
+	if tag == "" || len(tag) > maxSyslogTagBytes || !isSyslogPrintUSASCII(tag) {
+		return nil, fmt.Errorf("event syslog tag must be 1-%d bytes of printable US-ASCII (no whitespace or control characters)", maxSyslogTagBytes)
 	}
 	if cfg.SyslogTimeout <= 0 {
 		return nil, errors.New("event syslog timeout must be positive")
@@ -81,10 +91,6 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		}
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil || strings.TrimSpace(hostname) == "" {
-		hostname = "-"
-	}
 	sinkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	sink := &syslogSink{
 		network:    network,
@@ -97,7 +103,7 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		queue:      make(chan []byte, syslogQueueSize),
 		metrics:    metrics,
 		cancel:     cancel,
-		hostname:   sanitizeSyslogToken(hostname),
+		hostname:   sanitizeSyslogToken(hostname, maxSyslogHostnameBytes),
 	}
 	sink.wg.Go(func() {
 		sink.run(sinkCtx)
@@ -134,7 +140,7 @@ func (s *syslogSink) run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if err := s.send(payload); err != nil {
+			if err := s.send(ctx, payload); err != nil {
 				s.metrics.IncEventSyslog("error")
 				continue
 			}
@@ -143,19 +149,22 @@ func (s *syslogSink) run(ctx context.Context) {
 	}
 }
 
-func (s *syslogSink) send(payload []byte) error {
+func (s *syslogSink) send(ctx context.Context, payload []byte) (sendErr error) {
 	dialer := &net.Dialer{Timeout: s.timeout}
 	var conn net.Conn
 	var err error
 	if s.tlsConfig != nil {
-		conn, err = tls.DialWithDialer(dialer, s.network, s.address, s.tlsConfig)
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: s.tlsConfig}
+		conn, err = tlsDialer.DialContext(ctx, s.network, s.address)
 	} else {
-		conn, err = dialer.Dial(s.network, s.address)
+		conn, err = dialer.DialContext(ctx, s.network, s.address)
 	}
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		sendErr = errors.Join(sendErr, conn.Close())
+	}()
 	if err := conn.SetDeadline(time.Now().Add(s.timeout)); err != nil {
 		return err
 	}
@@ -167,17 +176,63 @@ func (s *syslogSink) send(payload []byte) error {
 }
 
 func (s *syslogSink) message(entry record) ([]byte, error) {
-	payload, err := marshalSingleRecord(entry)
-	if err != nil {
-		return nil, err
-	}
 	priority := s.facility*8 + syslogSeverity(entry.Level)
 	timestamp := strings.TrimSpace(entry.Timestamp)
 	if timestamp == "" {
 		timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	message := fmt.Sprintf("<%d>1 %s %s %s - - - %s", priority, timestamp, s.hostname, s.tag, payload)
-	return []byte(message), nil
+	header := fmt.Sprintf("<%d>1 %s %s %s - - - ", priority, timestamp, s.hostname, s.tag)
+	var payload []byte
+	var err error
+	if s.network == "udp" {
+		available := maxSyslogUDPPayloadBytes - len(header)
+		if available <= 0 {
+			return nil, errors.New("syslog header exceeds UDP payload limit")
+		}
+		payload, err = marshalUDPRecord(entry, available)
+	} else {
+		payload, err = marshalSingleRecord(entry)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(header), payload...), nil
+}
+
+func marshalUDPRecord(entry record, limit int) ([]byte, error) {
+	originalMessage := entry.Message
+	originalFields := entry.Fields
+	for _, bounds := range []struct {
+		message int
+		fields  int
+	}{
+		{message: 2048, fields: 4096},
+		{message: 1024, fields: 2048},
+		{message: 512, fields: 1024},
+		{message: 256, fields: 512},
+	} {
+		entry.Message, _ = truncateUTF8(originalMessage, bounds.message)
+		entry.Message, entry.Fields = boundTelemetry(entry.Message, originalFields, bounds.fields)
+		entry.Fields["syslog_udp_bounded"] = true
+		payload, err := marshalSingleRecord(entry)
+		if err == nil && len(payload) <= limit {
+			return payload, nil
+		}
+	}
+	entry.Message, _ = truncateUTF8(originalMessage, 128)
+	entry.Fields = map[string]any{
+		"syslog_udp_bounded":         true,
+		"telemetry_truncated":        true,
+		"telemetry_truncated_fields": len(originalFields),
+	}
+	payload, err := marshalSingleRecord(entry)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > limit {
+		return nil, fmt.Errorf("bounded syslog record exceeds %d-byte payload budget", limit)
+	}
+	return payload, nil
 }
 
 func (s *syslogSink) Close() error {
@@ -270,13 +325,38 @@ func syslogSeverity(level string) int {
 	return 6
 }
 
-func sanitizeSyslogToken(value string) string {
+// sanitizeSyslogToken makes value safe for an RFC 5424 header field: every
+// byte outside PRINTUSASCII (%d33-126) is replaced with '_', the result is
+// truncated to maxBytes, and an empty value becomes the NILVALUE "-".
+func sanitizeSyslogToken(value string, maxBytes int) string {
 	value = strings.TrimSpace(value)
-	if value == "" {
+	if value == "" || maxBytes <= 0 {
 		return "-"
 	}
-	if strings.ContainsAny(value, " \t\r\n") {
-		return "-"
+	if len(value) > maxBytes {
+		value = value[:maxBytes]
 	}
-	return value
+	if isSyslogPrintUSASCII(value) {
+		return value
+	}
+	sanitized := []byte(value)
+	for i, b := range sanitized {
+		if !isSyslogPrintUSASCIIByte(b) {
+			sanitized[i] = '_'
+		}
+	}
+	return string(sanitized)
+}
+
+func isSyslogPrintUSASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if !isSyslogPrintUSASCIIByte(value[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSyslogPrintUSASCIIByte(b byte) bool {
+	return b >= 33 && b <= 126
 }

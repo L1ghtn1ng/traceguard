@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -130,6 +131,22 @@ func (r *Registry) IncEgressDecision(decision, mode string) {
 	r.incCounter(metricKey2("traceguard_egress_decisions_total", "decision", decision, "mode", mode))
 }
 
+func (r *Registry) IncLSMDecision(domain, decision, mode string) {
+	r.incCounter(metricKey3("traceguard_lsm_decisions_total", "decision", decision, "domain", domain, "mode", mode))
+}
+
+func (r *Registry) IncBindDecision(decision, mode string) {
+	r.incCounter(metricKey2("traceguard_bind_decisions_total", "decision", decision, "mode", mode))
+}
+
+func (r *Registry) IncUnixDecision(decision, mode, operation string) {
+	r.incCounter(metricKey3("traceguard_unix_decisions_total", "decision", decision, "mode", mode, "op", operation))
+}
+
+func (r *Registry) IncSockoptDecision(decision, mode string) {
+	r.incCounter(metricKey2("traceguard_sockopt_decisions_total", "decision", decision, "mode", mode))
+}
+
 func (r *Registry) SetDetectionRules(count int) {
 	r.setGauge("traceguard_detection_rules", int64(count))
 }
@@ -202,6 +219,19 @@ func (r *Registry) SetEBPFAttachedPrograms(count int) {
 	r.setGauge("traceguard_ebpf_attached_programs", int64(count))
 }
 
+func (r *Registry) SetEBPFProgramStats(program string, runtime time.Duration, runCount, recursionMisses uint64) {
+	r.setGauge(metricKey1("traceguard_ebpf_program_runtime_nanoseconds", "program", program), runtime.Nanoseconds())
+	r.setGauge(metricKey1("traceguard_ebpf_program_run_count", "program", program), boundedMetricUint64(runCount))
+	r.setGauge(metricKey1("traceguard_ebpf_program_recursion_misses", "program", program), boundedMetricUint64(recursionMisses))
+}
+
+func boundedMetricUint64(value uint64) int64 {
+	if value > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(value)
+}
+
 func (r *Registry) SetKernelFeatures(features map[string]bool) {
 	gauges := make(map[string]int64, len(features))
 	for feature, enabled := range features {
@@ -220,6 +250,10 @@ func (r *Registry) IncEBPFReadError() {
 
 func (r *Registry) SetEventSinkHealthy(sink string, healthy bool) {
 	r.setComponentHealthy("sink:"+sink, "traceguard_event_sink_healthy", "sink", sink, healthy)
+}
+
+func (r *Registry) SetHookHealthy(hook string, healthy bool) {
+	r.setComponentHealthy("hook:"+hook, "traceguard_hook_healthy", "hook", hook, healthy)
 }
 
 func (r *Registry) setComponentHealthy(component, metric, label, value string, healthy bool) {
