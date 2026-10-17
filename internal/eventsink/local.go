@@ -207,9 +207,7 @@ func (d *domainSink) loadSeenFile(path string) (loadErr error) {
 		return fmt.Errorf("domain log %q is not a regular file", path)
 	}
 
-	// The path is derived from the configured domain log and was just checked
-	// with Lstat to be a regular, non-symlink file.
-	file, err := os.Open(path) //nolint:gosec // validated log path, not untrusted input
+	file, err := os.Open(path) //nolint:gosec // configured log path, checked with Lstat to be a regular file
 	if err != nil {
 		return fmt.Errorf("open domain log %q: %w", path, err)
 	}

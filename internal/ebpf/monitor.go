@@ -457,9 +457,8 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 	if err := closePinnedMapHandles(pinnedMaps); err != nil {
 		return nil, closeStatsOnError(errors.Join(fmt.Errorf("close adopted eBPF map handles: %w", err), optional.Close(), objects.Close()))
 	}
-	// A pin set created by this run must not outlive a failed startup: pinned
-	// cgroup and tracepoint links would keep policy attached without a daemon
-	// and block later unpinned starts. Adopted pins keep the previous state.
+	// Only a pin set created by this run is removed on failure; adopted pins
+	// keep the previous run's state.
 	freshPinSet := opts.PinEBPF && pinLayout == nil
 	failAfterPin := func(cause error) error {
 		if freshPinSet {

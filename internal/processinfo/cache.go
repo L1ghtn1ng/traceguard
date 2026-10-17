@@ -254,9 +254,7 @@ func (c *Cache) readMetadata(pid uint32, fallbackComm string) Metadata {
 }
 
 func readFilePrefix(path string, maxBytes int64) (payload []byte, truncated bool, readErr error) {
-	// Callers construct path beneath the fixed procfs root from a numeric PID
-	// and constant component names.
-	file, err := os.Open(path) //nolint:gosec // constrained procfs path
+	file, err := os.Open(path) //nolint:gosec // procfs path built from a numeric PID and constant names
 	if err != nil {
 		return nil, false, err
 	}

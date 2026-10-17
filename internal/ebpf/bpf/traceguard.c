@@ -2890,7 +2890,6 @@ static __always_inline int classify_endpoint6(const __u8 addr[16], __u16 port, c
 		if (!policy_rule_active(present, policy->policy_mask)) {
 			present = lookup_endpoint6_cidr_rule(addr, port, TRANSPORT_DOH, policy->policy_mask);
 		}
-		/* DoH remains endpoint-based on 443; wildcard resolver mode must not classify arbitrary HTTPS traffic. */
 		if (!policy_rule_active(present, policy->policy_mask)) {
 			return 0;
 		}
@@ -3116,9 +3115,6 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 			}
 			payload_offset = transport_offset + sizeof(udph);
 			if (parse_dns_payload(skb, payload_offset, packet_len, parsed, &policy) < 0) {
-				/* Fragmented or malformed UDP DNS cannot be matched against the
-				 * policy map. Block mode fails closed; observe mode passes it.
-				 */
 				return policy.block_enabled ? 0 : 1;
 			}
 			kind = dns_event_kind(parsed, &policy, &decision);
@@ -3150,9 +3146,6 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 			}
 			dns_parse = parse_tcp_dns_payload(skb, payload_offset, packet_len, parsed, &policy);
 			if (dns_parse != DNS_PARSE_OK) {
-				/* Segmented or malformed TCP DNS cannot be matched against the
-				 * policy map. Block mode fails closed; observe mode passes it.
-				 */
 				return dns_parse == DNS_PARSE_DROP ? 0 : 1;
 			}
 			kind = dns_event_kind(parsed, &policy, &decision);

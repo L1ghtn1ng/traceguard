@@ -212,7 +212,6 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
 	}
 
-	// Startup is complete: keep a newly created pin set across later restarts.
 	started = true
 	monitor.KeepPins()
 
