@@ -1514,6 +1514,39 @@ func TestUDPRecordIsAlwaysWithinPayloadBudget(t *testing.T) {
 	}
 }
 
+func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
+	t.Parallel()
+
+	message := strings.Repeat("m", 3072)
+	payload, err := marshalUDPRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   message,
+		Hostname:  "worker-1",
+		Fields:    map[string]any{"event": "exec"},
+	}, maxSyslogUDPPayloadBytes)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	if !bytes.Contains(payload, []byte(message)) || bytes.Contains(payload, []byte("syslog_udp_bounded")) {
+		t.Fatalf("record that fits was shortened: %d bytes", len(payload))
+	}
+
+	truncated, err := marshalUDPRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   strings.Repeat("\x00", maxRecordMessageBytes),
+		Hostname:  "worker-1",
+		Fields:    map[string]any{"event": "exec"},
+	}, 2048)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	if !bytes.Contains(truncated, []byte(`"telemetry_truncated":true`)) {
+		t.Fatalf("shortened UDP message lacks truncation marker: %s", truncated)
+	}
+}
+
 func writeClientCertificate(t *testing.T, dir string) (string, string) {
 	t.Helper()
 

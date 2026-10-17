@@ -370,6 +370,11 @@ func (r EgressRule) validate() error {
 	if err := validateUnique(r.Destinations.Ports, "destination port"); err != nil {
 		return err
 	}
+	// Port 0 is the kernel wildcard key, so an explicit 0 would match every
+	// port. Omit ports instead; that already covers ephemeral (port 0) binds.
+	if slices.Contains(r.Destinations.Ports, 0) {
+		return fmt.Errorf("port 0 is not allowed; omit ports to match any port")
+	}
 	if err := validateUnique(r.Destinations.Protocols, "destination protocol"); err != nil {
 		return err
 	}

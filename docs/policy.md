@@ -486,7 +486,8 @@ bind:
 
 The `endpoints` fields use the same syntax as egress destinations, but describe
 the requested local address and port. Omitted CIDRs cover IPv4 and IPv6;
-omitted ports match any port, including port `0` for an ephemeral allocation;
+omitted ports match any port, including port `0` for an ephemeral allocation
+(an explicit `0` is rejected because it would also match every fixed port);
 omitted protocols cover TCP and UDP. Other protocols are allowed.
 
 `bind.default` may be `allow` or `block`. IPv6-only rules require only the

@@ -200,6 +200,11 @@ func (s *syslogSink) message(entry record) ([]byte, error) {
 }
 
 func marshalUDPRecord(entry record, limit int) ([]byte, error) {
+	// Records were already bounded by the recorder; only shorten them further
+	// when the complete record does not fit in one datagram.
+	if payload, err := marshalSingleRecord(entry); err == nil && len(payload) <= limit {
+		return payload, nil
+	}
 	originalMessage := entry.Message
 	originalFields := entry.Fields
 	for _, bounds := range []struct {
@@ -211,9 +216,12 @@ func marshalUDPRecord(entry record, limit int) ([]byte, error) {
 		{message: 512, fields: 1024},
 		{message: 256, fields: 512},
 	} {
-		entry.Message, _ = truncateUTF8(originalMessage, bounds.message)
-		entry.Message, entry.Fields = boundTelemetry(entry.Message, originalFields, bounds.fields)
+		message, messageTruncated := truncateUTF8(originalMessage, bounds.message)
+		entry.Message, entry.Fields = boundTelemetry(message, originalFields, bounds.fields)
 		entry.Fields["syslog_udp_bounded"] = true
+		if messageTruncated {
+			entry.Fields["telemetry_truncated"] = true
+		}
 		payload, err := marshalSingleRecord(entry)
 		if err == nil && len(payload) <= limit {
 			return payload, nil

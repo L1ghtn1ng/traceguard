@@ -105,3 +105,28 @@ func TestPinnedCgroupTargetValidationRejectsWrongIdentityOrAttachType(t *testing
 		})
 	}
 }
+
+func TestRemoveFreshPinsOnlyRemovesUncommittedPinSet(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "traceguard")
+	if err := os.MkdirAll(filepath.Join(root, "maps"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	committed := &Monitor{freshPinPath: root}
+	committed.KeepPins()
+	if err := committed.RemoveFreshPins(); err != nil {
+		t.Fatalf("RemoveFreshPins() after KeepPins error = %v", err)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("committed pin set was removed: %v", err)
+	}
+
+	failed := &Monitor{freshPinPath: root}
+	if err := failed.RemoveFreshPins(); err != nil {
+		t.Fatalf("RemoveFreshPins() error = %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("fresh pin set still exists after failed startup: %v", err)
+	}
+}

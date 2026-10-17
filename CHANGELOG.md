@@ -11,6 +11,7 @@ All notable changes to TraceGuard are documented in this file.
 - Process enrichment fields read from `/proc` or Kubernetes are now prefixed with `current_` (`current_cgroup`, `current_service`, `current_container_id`, `current_pod_uid`, `current_runtime`, `current_lsm_*`, `current_selinux_context`, `current_apparmor_*`, `current_cmdline`, `current_exe`), and `filename` is now `requested_path`. `exe` is only set on exec decision events, where it is the target executable. Update SIEM queries and dashboards that use the old names.
 - `domains.log` lines now contain `timestamp<TAB>hostname<TAB>domain`. TraceGuard still reads older two-column backups, but external parsers that take the second column must move to the third.
 - Detection rules can no longer match on mutable enrichment (`command_globs`, `services`, `cgroup_prefixes`, `container_ids`, `pod_uids`, `k8s_*`, `lsm_*`), and executable or file-path globs are limited to LSM events. Policies that use these keys fail validation and must be updated before upgrading.
+- Egress and bind rules reject an explicit `ports: [0]`, which matched every port. Omit `ports` to match any port, including ephemeral binds.
 - Stop the service and run `traceguard -unpin` before downgrading from a release that used `-pin-ebpf`.
 
 ### Added
@@ -44,9 +45,10 @@ All notable changes to TraceGuard are documented in this file.
 - Evaluated `O_RDWR` file opens against both read and write rules, so a `read` block rule can no longer be bypassed by opening the file read-write.
 - Required the bind6 hook for IPv4 bind rules and evaluated wildcard `::` binds against IPv4 wildcard policy, closing IPv4-mapped and dual-stack bypasses of IPv4-only bind rules.
 - Refused exec and file enforcement when the daemon runs outside the host PID or time namespace, where its LSM self-exemption cannot identify it.
-- Removed a newly created pin set when startup fails, so pinned links cannot keep policy attached without a daemon or block later unpinned starts.
+- Removed a newly created pin set when startup fails, including failures after the monitor starts such as an invalid policy, so pinned links cannot keep policy attached without a daemon or block later unpinned starts.
 - Committed fetched remote policy to the cache and conditional-request state only after the full effective policy validates, and kept the last accepted remote base during refresh outages so local overlay changes still apply on `SIGHUP`.
 - Compiled detection rules before the kernel policy commit and reported hook health only after the commit succeeds.
+- Sent syslog UDP records unshortened when they fit in one datagram, and marked shortened messages as truncated.
 - Validated syslog APP-NAME and HOSTNAME as RFC 5424 printable US-ASCII with length limits, and stopped event export URL parse errors from echoing secrets in the URL.
 - Joined policy refresh, reload, cgroup reconciliation, and statistics workers before closing eBPF objects at shutdown, so a late reload cannot write to closed or reused map descriptors.
 - Grouped exec denials by the calling program instead of the denied target, so the denial-burst baseline fires for one process trying several blocked binaries.

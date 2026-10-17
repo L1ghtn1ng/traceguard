@@ -237,6 +237,8 @@ type Monitor struct {
 	// daemonNamespaceErr is non-nil when LSM self-exemption cannot identify
 	// the daemon, so exec and file enforcement must be refused.
 	daemonNamespaceErr error
+	// freshPinPath is the pin root this process created, until KeepPins.
+	freshPinPath string
 }
 
 type RuntimeMetrics interface {
@@ -493,7 +495,33 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		activePolicySlot: initialSettings.ActivePolicySlot, policyGeneration: initialSettings.PolicyGeneration,
 		attachState: attachState, statsCloser: statsCloser,
 		daemonNamespaceErr: hostNamespaceError("/proc/self/ns"),
+		freshPinPath:       freshPinPath(freshPinSet, opts),
 	}, nil
+}
+
+func freshPinPath(fresh bool, opts Options) string {
+	if !fresh {
+		return ""
+	}
+	return opts.pinPath()
+}
+
+// KeepPins commits a pin set created by this process once startup has
+// succeeded, so later shutdowns leave it in place for the next restart.
+func (m *Monitor) KeepPins() {
+	m.freshPinPath = ""
+}
+
+// RemoveFreshPins removes a pin set this process created but never committed
+// with KeepPins. Call it after Close when startup fails, so pinned links do not
+// keep policy attached without a daemon or block later unpinned starts.
+func (m *Monitor) RemoveFreshPins() error {
+	if m.freshPinPath == "" {
+		return nil
+	}
+	path := m.freshPinPath
+	m.freshPinPath = ""
+	return unpinPinPath(path)
 }
 
 const (

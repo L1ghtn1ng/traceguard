@@ -64,6 +64,13 @@
       "uniqueItems": true,
       "items": {"type": "integer", "minimum": 0, "maximum": 65535}
     },
+    "rule_port_list": {
+      "description": "Egress and bind ports. Port 0 is rejected because it is the kernel wildcard; omit ports to match any port.",
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1, "maximum": 65535}
+    },
     "duration": {
       "type": "string",
       "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+)$"
@@ -109,7 +116,7 @@
           "additionalProperties": false,
           "properties": {
             "cidrs": {"$ref": "#/$defs/unique_string_list"},
-            "ports": {"$ref": "#/$defs/port_list"},
+            "ports": {"$ref": "#/$defs/rule_port_list"},
             "protocols": {
               "type": "array",
               "uniqueItems": true,
@@ -133,7 +140,7 @@
       "additionalProperties": false,
       "properties": {
         "cidrs": {"$ref": "#/$defs/unique_string_list"},
-        "ports": {"$ref": "#/$defs/port_list"},
+        "ports": {"$ref": "#/$defs/rule_port_list"},
         "protocols": {
           "type": "array",
           "uniqueItems": true,

@@ -62,8 +62,12 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	if err != nil {
 		return err
 	}
+	started := false
 	defer func() {
 		runErr = errors.Join(runErr, monitor.Close())
+		if !started {
+			runErr = errors.Join(runErr, monitor.RemoveFreshPins())
+		}
 	}()
 	// Background workers apply policy to and read stats from the monitor.
 	// Deferred after monitor.Close so it runs first: cancel and join them
@@ -207,6 +211,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	if yamlManager != nil {
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
 	}
+
+	// Startup is complete: keep a newly created pin set across later restarts.
+	started = true
+	monitor.KeepPins()
 
 	monitorDone := make(chan struct{})
 	go func() {

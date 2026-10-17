@@ -86,6 +86,8 @@ func TestParseRejectsUnsafeEnforcementRules(t *testing.T) {
 		"unknown sockopt":         {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [socket], optnames: [so_debug]}}\n", "unsupported socket option name"},
 		"duplicate sockopt level": {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [socket, socket], optnames: [so_mark]}}\n", "duplicate socket option level"},
 		"duplicate sockopt name":  {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [socket], optnames: [so_mark, so_mark]}}\n", "duplicate socket option name"},
+		"egress port zero":        {"egress:\n  rules:\n    - {id: egress, action: block, destinations: {ports: [0]}}\n", "port 0 is not allowed"},
+		"bind port zero":          {"bind:\n  rules:\n    - {id: bind, action: allow, endpoints: {ports: [0]}}\n", "port 0 is not allowed"},
 		"sockopt alias level":     {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [socket, sol_socket], optnames: [so_mark]}}\n", "duplicate socket option level"},
 		"sockopt tcp level":       {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [tcp], optnames: [so_mark]}}\n", "unsupported socket option level"},
 		"sockopt missing level":   {"sockopt:\n  rules:\n    - {id: sockopt, action: block, match: {levels: [ip], optnames: [so_mark]}}\n", `requires level "socket"`},
