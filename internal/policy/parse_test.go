@@ -585,7 +585,7 @@ func TestMergeRejectsAggregateSelectorCompilationWork(t *testing.T) {
 	}
 	makeRules := func(prefix string, count int) []EgressRule {
 		rules := make([]EgressRule, 0, count)
-		for index := 0; index < count; index++ {
+		for index := range count {
 			rules = append(rules, EgressRule{
 				ID: prefix + fmt.Sprint(index), Action: "block",
 				Selectors:    EgressSelectors{CgroupPaths: selectors},
@@ -606,7 +606,7 @@ func TestBundleRejectsAggregateDetectionSampleBudget(t *testing.T) {
 
 	enabled := true
 	rules := make([]DetectionRule, 0, 7)
-	for index := 0; index < 7; index++ {
+	for index := range 7 {
 		rules = append(rules, DetectionRule{
 			ID: fmt.Sprintf("threshold-%d", index), Enabled: &enabled,
 			Severity: "notice", Events: []string{"connection"}, Message: "bounded",

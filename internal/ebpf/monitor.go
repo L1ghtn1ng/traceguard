@@ -581,7 +581,7 @@ func initializePolicyState(objects monitorObjects, adoptPinned bool, daemonIdent
 		return resetPinnedPolicyState(objects, selector)
 	}
 
-	for slot := uint8(0); slot < 2; slot++ {
+	for slot := range uint8(2) {
 		settings := runtimeSettings{ActivePolicySlot: slot}
 		if err := objects.Settings.Put(uint32(slot), settings); err != nil {
 			return runtimeSettings{}, fmt.Errorf("initialize policy settings slot %d: %w", slot, err)

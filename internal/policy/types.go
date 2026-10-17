@@ -580,8 +580,8 @@ func (m DetectionMatch) validate() error {
 
 func validateDetectionPathPattern(pattern string) error {
 	stem := pattern
-	if strings.HasSuffix(pattern, "/**") {
-		stem = strings.TrimSuffix(pattern, "/**")
+	if before, ok := strings.CutSuffix(pattern, "/**"); ok {
+		stem = before
 		if stem == "" {
 			stem = "/"
 		}

@@ -1352,7 +1352,7 @@ func TestTelemetryBoundsSerializedBytesAndMarksTruncation(t *testing.T) {
 	t.Parallel()
 
 	fields := make(map[string]any, maxRecordFields+20)
-	for index := 0; index < maxRecordFields+20; index++ {
+	for index := range maxRecordFields + 20 {
 		fields[fmt.Sprintf("field_%03d", index)] = strings.Repeat("\x00", maxRecordStringBytes)
 	}
 	message, bounded := boundTelemetry(strings.Repeat("\x00", maxRecordMessageBytes*2), fields, maxRecordFieldBytes)

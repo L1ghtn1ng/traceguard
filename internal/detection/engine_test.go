@@ -253,7 +253,7 @@ func TestEngineBoundsGlobalThresholdSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine.maxSamples = 8
-	for index := 0; index < 100; index++ {
+	for index := range 100 {
 		engine.Evaluate(Event{
 			Timestamp: time.Unix(int64(index), 0),
 			Name:      "connection",

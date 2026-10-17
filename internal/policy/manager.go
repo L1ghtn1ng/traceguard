@@ -261,8 +261,7 @@ func (m *Manager) fetch(ctx context.Context) (document Document, response *remot
 }
 
 func safeRemoteRequestError(err error) error {
-	var networkError net.Error
-	if errors.As(err, &networkError) {
+	if networkError, ok := errors.AsType[net.Error](err); ok {
 		return fmt.Errorf("remote policy HTTPS request failed (timeout=%t)", networkError.Timeout())
 	}
 	return fmt.Errorf("remote policy HTTPS request failed (%T)", err)
