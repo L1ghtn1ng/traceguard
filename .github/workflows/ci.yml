@@ -13,6 +13,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang
+
+      # The embedded eBPF objects are generated, not committed, and the
+      # bpf2go bindings fail type checking without them.
+      - name: Generate eBPF bindings
+        run: go generate ./internal/ebpf
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          # Build with the runner's Go toolchain: prebuilt binaries made with an
+          # older Go cannot read Go 1.27 export data.
+          install-mode: goinstall
+          skip-cache: true
+
   build-test:
     name: Build and Test
     runs-on: ubuntu-latest
@@ -32,6 +73,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          check-latest: true
           cache: true
 
       - name: Install clang

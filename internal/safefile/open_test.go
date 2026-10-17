@@ -68,7 +68,11 @@ func TestOpenAbsoluteFallsBackWhenOpenat2IsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openAbsolute fallback: %v", err)
 	}
-	defer file.Close()
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close fallback file: %v", err)
+		}
+	})
 	payload, err := io.ReadAll(file)
 	if err != nil {
 		t.Fatalf("read fallback file: %v", err)
@@ -119,7 +123,7 @@ func TestWriteFileAtomicReplacesContents(t *testing.T) {
 	if err := WriteFileAtomic(path, []byte("second"), 0o640); err != nil {
 		t.Fatalf("second WriteFileAtomic: %v", err)
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // path is rooted in t.TempDir
 	if err != nil {
 		t.Fatalf("read result: %v", err)
 	}
@@ -136,7 +140,7 @@ func TestWriteFileAtomicCleansRenameTarget(t *testing.T) {
 	if err := WriteFileAtomic(path, []byte("payload"), 0o640); err != nil {
 		t.Fatalf("WriteFileAtomic with unclean path: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(dir, "cache"))
+	got, err := os.ReadFile(filepath.Join(dir, "cache")) //nolint:gosec // path is rooted in t.TempDir
 	if err != nil {
 		t.Fatalf("read cleaned target: %v", err)
 	}

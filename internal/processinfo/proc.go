@@ -16,15 +16,18 @@ type statusSnapshot struct {
 	UID  uint32
 }
 
-func (c *Cache) readStatus(pid uint32) statusSnapshot {
+func (c *Cache) readStatus(pid uint32) (snapshot statusSnapshot) {
 	file, err := os.Open(c.procPath(pid, "status"))
 	if err != nil {
 		return statusSnapshot{}
 	}
-	defer file.Close()
 
-	snapshot, err := parseStatus(file)
+	snapshot, err = parseStatus(file)
 	if err != nil {
+		_ = file.Close()
+		return statusSnapshot{}
+	}
+	if err := file.Close(); err != nil {
 		return statusSnapshot{}
 	}
 	return snapshot
@@ -109,20 +112,28 @@ func parseStatStartTime(raw string) (uint64, error) {
 	return strconv.ParseUint(fields[19], 10, 64)
 }
 
-func parseCmdline(raw []byte) []string {
-	trimmed := strings.TrimRight(string(raw), "\x00")
-	if trimmed == "" {
-		return nil
-	}
-	parts := strings.Split(trimmed, "\x00")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
+func parseCmdline(raw []byte) ([]string, bool) {
+	out := make([]string, 0, min(16, maxProcessCmdlineArgs))
+	truncated := false
+	for offset := 0; offset < len(raw); {
+		end := offset
+		for end < len(raw) && raw[end] != 0 {
+			end++
+		}
+		part := strings.TrimSpace(string(raw[offset:end]))
 		if part != "" {
+			if len(out) == maxProcessCmdlineArgs {
+				truncated = true
+				break
+			}
 			out = append(out, part)
 		}
+		if end == len(raw) {
+			break
+		}
+		offset = end + 1
 	}
-	return out
+	return out, truncated
 }
 
 func ValidateRoot(root string) error {

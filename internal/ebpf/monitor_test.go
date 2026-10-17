@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/link"
@@ -76,8 +79,8 @@ func TestPolicySlotValuePreservesActiveSlot(t *testing.T) {
 func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
 	t.Parallel()
 
-	if got := binary.Size(runtimeSettings{}); got != 16 {
-		t.Fatalf("runtimeSettings size = %d, want 16", got)
+	if got := binary.Size(runtimeSettings{}); got != pinSettingsSize {
+		t.Fatalf("runtimeSettings size = %d, want %d", got, pinSettingsSize)
 	}
 	if got := binary.Size(domainSuffixKey{}); got != 16 {
 		t.Fatalf("domainSuffixKey size = %d, want 16", got)
@@ -87,6 +90,165 @@ func TestRuntimeSettingsKeepsKernelABISize(t *testing.T) {
 	}
 	if got := binary.Size(egress6Key{}); got != 40 {
 		t.Fatalf("egress6Key size = %d, want 40", got)
+	}
+	if got := binary.Size(pathLPMKey{}); got != 260 {
+		t.Fatalf("pathLPMKey size = %d, want 260", got)
+	}
+	if got := binary.Size(sockoptKey{}); got != 24 {
+		t.Fatalf("sockoptKey size = %d, want 24", got)
+	}
+	if got := binary.Size(ruleNameKey{}); got != 8 {
+		t.Fatalf("ruleNameKey size = %d, want 8", got)
+	}
+	if got := binary.Size(ruleNameValue{}); got != maxPolicyRuleIDBytes+1 {
+		t.Fatalf("ruleNameValue size = %d, want %d", got, maxPolicyRuleIDBytes+1)
+	}
+	if got := binary.Size(pinMetadata{}); got != pinMetadataSize {
+		t.Fatalf("pinMetadata size = %d, want %d", got, pinMetadataSize)
+	}
+}
+
+func TestBPFVerdictHelpersKeepExpectedPolarity(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("bpf/traceguard.c")
+	if err != nil {
+		t.Fatalf("read eBPF source: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(source)), " ")
+	for name, contract := range map[string]string{
+		"LSM MAC":          "static __always_inline int lsm_mac_verdict(__u8 deny) { return deny ? -TRACEGUARD_EPERM : 0; }",
+		"cgroup sock_addr": "static __always_inline int cgroup_verdict(__u8 deny) { return deny ? 0 : 1; }",
+	} {
+		if !strings.Contains(normalized, contract) {
+			t.Errorf("%s verdict helper no longer has the required polarity", name)
+		}
+	}
+}
+
+func TestBPFProcessIdentityUsesThreadGroupLeaderStartTime(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("bpf/traceguard.c")
+	if err != nil {
+		t.Fatalf("read eBPF source: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(source)), " ")
+	for _, contract := range []string{
+		"__builtin_preserve_access_index(&task->group_leader)",
+		"__builtin_preserve_access_index(&group_leader->start_boottime)",
+	} {
+		if !strings.Contains(normalized, contract) {
+			t.Errorf("process identity no longer reads the thread-group leader: missing %q", contract)
+		}
+	}
+	if strings.Contains(normalized, "__builtin_preserve_access_index(&task->start_boottime)") {
+		t.Error("process identity reads the current thread start time instead of its thread-group leader")
+	}
+}
+
+func TestBPFEventIdentityMarksPathTruncationAndCapturesCurrentSocketIdentity(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("bpf/traceguard.c")
+	if err != nil {
+		t.Fatalf("read eBPF source: %v", err)
+	}
+	normalized := strings.Join(strings.Fields(string(source)), " ")
+	for _, contract := range []string{
+		"event->file_mode |= PATH_EVENT_FLAG_TRUNCATED",
+		"#define UID_SOURCE_SOCKET_CACHE 2",
+		"event->kernel_uid = (__u32)bpf_get_current_uid_gid()",
+		"event->uid_source = UID_SOURCE_KERNEL",
+		"event->uid_source = UID_SOURCE_SOCKET_CACHE",
+		"event->cgroup_id = bpf_get_current_cgroup_id()",
+		"init_event_base(event, EVENT_SOCKOPS, TRANSPORT_TCP, EVENT_SOURCE_SOCKOPS)",
+	} {
+		if !strings.Contains(normalized, contract) {
+			t.Errorf("eBPF event identity contract is missing %q", contract)
+		}
+	}
+}
+
+func TestBPFCgroupAncestorBoundMatchesUserspaceValidation(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("bpf/traceguard.c")
+	if err != nil {
+		t.Fatalf("read eBPF source: %v", err)
+	}
+	contract := fmt.Sprintf("#define MAX_CGROUP_ANCESTORS %d", cgroupinfo.MaxAncestorLookupLevels)
+	if !strings.Contains(string(source), contract) {
+		t.Fatalf("eBPF source is missing userspace ancestor bound %q", contract)
+	}
+}
+
+func TestPolicySelectorRoundTripAndValidation(t *testing.T) {
+	t.Parallel()
+
+	selector := encodePolicySelector(1, 42)
+	slot, generation, ok := decodePolicySelector(selector)
+	if !ok || slot != 1 || generation != 42 {
+		t.Fatalf("decoded selector = %d/%d/%t, want 1/42/true", slot, generation, ok)
+	}
+	if _, _, ok := decodePolicySelector(encodePolicySelector(2, 42)); ok {
+		t.Fatal("selector accepted invalid policy slot 2")
+	}
+}
+
+func TestEncodeRuleNamesPreservesCompleteBoundedIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	longest := strings.Repeat("a", maxPolicyRuleIDBytes)
+	encoded, err := encodeRuleNames(map[uint32]string{17: longest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := encoded[17]
+	if got := zeroTerminated(value.Name[:]); got != longest {
+		t.Fatalf("encoded rule name = %q, want %q", got, longest)
+	}
+	for _, test := range []struct {
+		name  string
+		rules map[uint32]string
+	}{
+		{name: "reserved number", rules: map[uint32]string{0: "rule"}},
+		{name: "empty name", rules: map[uint32]string{1: ""}},
+		{name: "embedded NUL", rules: map[uint32]string{1: "rule\x00hidden"}},
+		{name: "oversized name", rules: map[uint32]string{1: longest + "b"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := encodeRuleNames(test.rules); err == nil {
+				t.Fatal("encodeRuleNames accepted invalid input")
+			}
+		})
+	}
+}
+
+func TestDaemonIdentityPreservesExactProcessCoordinates(t *testing.T) {
+	t.Parallel()
+
+	identity := daemonProcessIdentity{TGID: 42, StartTicks: 1000}
+	if identity.TGID != 42 || identity.StartTicks != 1000 {
+		t.Fatalf("daemon identity = %#v, want exact TGID and start ticks", identity)
+	}
+}
+
+func TestReadProcessStartTimeHandlesParenthesesInComm(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "stat")
+	payload := "42 (daemon ) worker) S " + strings.Repeat("0 ", 18) + "12345 0\n"
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start, err := readProcessStartTime(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != 12345 {
+		t.Fatalf("start time = %d, want 12345", start)
 	}
 }
 
@@ -103,10 +265,108 @@ func TestPolicyLimitsMatchKernelMapCapacities(t *testing.T) {
 	if got, want := spec.Maps["endpoint4_rules"].MaxEntries, uint32(2*endpointMaxEntries); got != want {
 		t.Fatalf("endpoint map capacity = %d, want two policy slots (%d)", got, want)
 	}
-	for _, name := range []string{"block_suffixes", "egress4_allow_rules", "egress4_block_rules", "egress6_allow_rules", "egress6_block_rules"} {
+	for _, name := range []string{
+		"block_suffixes", "egress4_allow_rules", "egress4_block_rules", "egress6_allow_rules", "egress6_block_rules",
+		"exec_allow_paths", "exec_block_paths", "file_allow_paths", "file_block_paths", "unix_allow_paths", "unix_block_paths",
+		"bind4_allow_rules", "bind4_block_rules", "bind6_allow_rules", "bind6_block_rules", "sockopt_allow", "sockopt_block",
+	} {
 		if got, want := spec.Maps[name].MaxEntries, uint32(2*egressMaxEntries); got != want {
 			t.Fatalf("%s map capacity = %d, want two policy slots (%d)", name, got, want)
 		}
+	}
+	if readers := spec.Maps["policy_readers"]; readers == nil || readers.Type != ebpf.PerCPUArray || readers.MaxEntries != 2 || readers.ValueSize != 8 {
+		t.Fatalf("policy reader map = %#v, want two per-CPU uint64 counters", readers)
+	}
+	if settings := spec.Maps["settings"]; settings == nil || settings.ValueSize != pinSettingsSize {
+		t.Fatalf("settings map = %#v, want value size %d", settings, pinSettingsSize)
+	}
+	if settings := spec.Maps["settings"]; settings == nil || settings.Type != ebpf.Array || settings.MaxEntries != 2 {
+		t.Fatalf("settings map = %#v, want two immutable array slots", settings)
+	}
+	if selector := spec.Maps["policy_selector"]; selector == nil || selector.Type != ebpf.Hash || selector.MaxEntries != 1 || selector.ValueSize != 8 {
+		t.Fatalf("policy selector map = %#v, want one RCU-replaced uint64 hash entry", selector)
+	}
+	if identity := spec.Maps["daemon_identity"]; identity == nil || identity.Type != ebpf.Hash || identity.MaxEntries != 1 || identity.ValueSize != 16 {
+		t.Fatalf("daemon identity map = %#v, want one exact RCU-replaced process identity", identity)
+	}
+	if names := spec.Maps["rule_names"]; names == nil || names.Type != ebpf.Hash || names.MaxEntries != 2*policyMaxEntries || names.KeySize != 8 || names.ValueSize != maxPolicyRuleIDBytes+1 {
+		t.Fatalf("rule name map = %#v, want two complete policy slots", names)
+	}
+	if socketInfo := spec.Maps["socket_info"]; socketInfo == nil || socketInfo.ValueSize != 40 {
+		t.Fatalf("socket_info map = %#v, want 40-byte generation-bound values", socketInfo)
+	}
+	if listenerInfo := spec.Maps["listener_info"]; listenerInfo == nil || listenerInfo.ValueSize != 40 {
+		t.Fatalf("listener_info map = %#v, want 40-byte generation-bound values", listenerInfo)
+	}
+}
+
+func TestPinnedModeKeepsLSMLinksLifecycleBound(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	linksDir := filepath.Join(root, "links")
+	if err := os.MkdirAll(linksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(linksDir, "lsm_exec")
+	if err := os.WriteFile(stale, []byte("stale pin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	closed := []int{}
+	attachCalls := 0
+	links, state := attachOptionalPrograms("/sys/fs/cgroup", Options{PinEBPF: true, PinPath: root}, optionalPrograms{
+		LSMExec: &ebpf.Program{},
+	}, attachmentFunctions{
+		attachLSM: func(link.LSMOptions) (io.Closer, error) {
+			attachCalls++
+			return &testCloser{id: 1, closed: &closed}, nil
+		},
+	})
+	if attachCalls != 1 || !state.LSMExecAttached || len(links) != 1 {
+		t.Fatalf("LSM attach result = calls:%d state:%+v links:%d", attachCalls, state, len(links))
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale persistent LSM link was not removed: %v", err)
+	}
+	if err := links[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGeneratedObjectsContainOptionalEnforcementHooks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		load func() (*ebpf.CollectionSpec, error)
+	}{
+		{"default", loadTraceguard}, {"dns-compat", loadTraceguardDNSCompat},
+		{"recvmsg-compat", loadTraceguardRecvmsgCompat}, {"dns-recvmsg-compat", loadTraceguardDNSRecvmsgCompat},
+		{"linux71", loadTraceguardLinux71}, {"linux71-dns-compat", loadTraceguardLinux71DNSCompat},
+		{"linux71-recvmsg-compat", loadTraceguardLinux71RecvmsgCompat}, {"linux71-dns-recvmsg-compat", loadTraceguardLinux71DNSRecvmsgCompat},
+	}
+	wantSections := map[string]string{
+		"lsm_bprm_check_security": "lsm/bprm_check_security",
+		"lsm_file_open":           "lsm/file_open", "trace_bind4": "cgroup/bind4", "trace_bind6": "cgroup/bind6",
+		"trace_connect_unix": "cgroup/connect_unix", "trace_sendmsg_unix": "cgroup/sendmsg_unix",
+		"trace_recvmsg_unix": "cgroup/recvmsg_unix", "trace_setsockopt": "cgroup/setsockopt", "trace_sockops": "sockops",
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			spec, err := test.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, section := range wantSections {
+				program := spec.Programs[name]
+				if program == nil || program.SectionName != section {
+					t.Errorf("program %s section = %v, want %s", name, program, section)
+				}
+			}
+			if path := spec.Maps["lsm_path_buf"]; path == nil || path.Type != ebpf.TaskStorage {
+				t.Errorf("lsm_path_buf = %#v, want task storage", path)
+			}
+		})
 	}
 }
 
@@ -146,7 +406,7 @@ func TestLinux71ObjectsIncludeEnhancedTelemetryHelpers(t *testing.T) {
 func collectionUsesHelper(spec *ebpf.CollectionSpec, helper asm.BuiltinFunc) bool {
 	for _, program := range spec.Programs {
 		for _, instruction := range program.Instructions {
-			if instruction.IsBuiltinCall() && asm.BuiltinFunc(instruction.Constant) == helper {
+			if instruction.IsBuiltinCall() && instruction.Constant == int64(helper) {
 				return true
 			}
 		}
@@ -264,7 +524,7 @@ func TestAttachMonitorProgramsRollsBackInReverseOrder(t *testing.T) {
 		},
 		attachTracepoint: func(string, string, *ebpf.Program) (io.Closer, error) {
 			t.Fatal("tracepoint attach called after cgroup failure")
-			return nil, nil
+			return nil, errors.New("unexpected tracepoint attach")
 		},
 	}
 

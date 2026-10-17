@@ -1,6 +1,8 @@
 package processinfo
 
 import (
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -97,6 +99,40 @@ func TestCacheLookupCapsRetainedCmdline(t *testing.T) {
 	}
 }
 
+func TestParseCmdlineCapsNULDenseArguments(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(strings.Repeat("x\x00", maxProcessCmdlineArgs+64))
+	got, truncated := parseCmdline(raw)
+	if !truncated {
+		t.Fatal("parseCmdline did not report argument-count truncation")
+	}
+	if len(got) != maxProcessCmdlineArgs {
+		t.Fatalf("argument count = %d, want %d", len(got), maxProcessCmdlineArgs)
+	}
+}
+
+func TestCacheLookupAtRejectsDifferentProcessGeneration(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeProcEntry(t, root, 100, "status", "Name:\tcurl\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
+	writeProcEntry(t, root, 100, "stat", statWithStartTime("curl", 2000))
+	writeProcEntry(t, root, 100, "cmdline", "/usr/bin/curl\x00--secret\x00")
+
+	cache := NewCache(root, time.Minute)
+	metadata, hit := cache.LookupAt(100, "kernel-curl", 1000)
+	if hit {
+		t.Fatal("generation mismatch unexpectedly hit the cache")
+	}
+	if metadata.Source != SourceFallback || metadata.Comm != "kernel-curl" || len(metadata.Cmdline) != 0 {
+		t.Fatalf("generation mismatch returned stale metadata: %+v", metadata)
+	}
+	if _, ok := cache.entries[100]; ok {
+		t.Fatal("generation mismatch cached metadata for the wrong process")
+	}
+}
+
 func TestCacheLookupKeepsFallbackWithoutStatusName(t *testing.T) {
 	t.Parallel()
 
@@ -144,7 +180,10 @@ func TestCacheLookupRefreshesAfterPIDReuse(t *testing.T) {
 func TestParseCmdline(t *testing.T) {
 	t.Parallel()
 
-	got := parseCmdline([]byte("python3\x00script.py\x00--flag\x00"))
+	got, truncated := parseCmdline([]byte("python3\x00script.py\x00--flag\x00"))
+	if truncated {
+		t.Fatal("parseCmdline unexpectedly reported truncation")
+	}
 	want := []string{"python3", "script.py", "--flag"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parseCmdline = %v, want %v", got, want)
@@ -232,7 +271,11 @@ func TestCacheEvictsLeastRecentlyUsedEntryAtCapacity(t *testing.T) {
 
 func TestCacheUsesAndClosesPidfdForRealProc(t *testing.T) {
 	cache := NewCache("/proc", time.Minute)
-	pid := uint32(os.Getpid())
+	pidValue := int64(os.Getpid())
+	if pidValue < 0 || pidValue > math.MaxUint32 {
+		t.Fatalf("current PID %d is outside the uint32 range", pidValue)
+	}
+	pid := uint32(pidValue) //nolint:gosec // explicit range check above guarantees a lossless conversion
 	metadata, _ := cache.Lookup(pid, "test")
 	if metadata.Source != SourceProc {
 		t.Skip("process metadata unavailable in test environment")
@@ -253,17 +296,24 @@ func TestCacheUsesAndClosesPidfdForRealProc(t *testing.T) {
 func TestStoreEntryLockedClosesReplacedPidfd(t *testing.T) {
 	t.Parallel()
 
+	// O_CLOEXEC keeps processes started by parallel tests from inheriting the
+	// read end. Closing it is observed through the write end, because the
+	// descriptor number may be reused by another test as soon as it closes.
 	var fds [2]int
-	if err := unix.Pipe(fds[:]); err != nil {
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
 		t.Fatalf("create pipe: %v", err)
 	}
-	defer unix.Close(fds[1])
+	t.Cleanup(func() {
+		if err := unix.Close(fds[1]); err != nil {
+			t.Errorf("close pipe: %v", err)
+		}
+	})
 
 	cache := NewCache(t.TempDir(), time.Minute)
 	cache.entries[100] = cacheEntry{pidfd: fds[0]}
 	cache.storeEntryLocked(100, cacheEntry{pidfd: -1})
-	if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0); err != unix.EBADF {
-		t.Fatalf("replaced pidfd error = %v, want EBADF", err)
+	if _, err := unix.Write(fds[1], []byte{0}); !errors.Is(err, unix.EPIPE) {
+		t.Fatalf("write after replacing pidfd error = %v, want EPIPE", err)
 	}
 }
 
@@ -298,14 +348,14 @@ func writeProcEntry(t *testing.T, root string, pid uint32, name, content string)
 	t.Helper()
 
 	procDir := filepath.Join(root, strconv.Itoa(int(pid)))
-	if err := os.MkdirAll(procDir, 0o755); err != nil {
+	if err := os.MkdirAll(procDir, 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", procDir, err)
 	}
 	path := filepath.Join(procDir, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 }
@@ -314,7 +364,7 @@ func writeProcSymlink(t *testing.T, root string, pid uint32, name, target string
 	t.Helper()
 
 	procDir := filepath.Join(root, strconv.Itoa(int(pid)))
-	if err := os.MkdirAll(procDir, 0o755); err != nil {
+	if err := os.MkdirAll(procDir, 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", procDir, err)
 	}
 	if err := os.Symlink(target, filepath.Join(procDir, name)); err != nil {

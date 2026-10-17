@@ -1,5 +1,6 @@
 GO ?= go
 BINARY ?= traceguard
+GOLANGCI_LINT ?= golangci-lint
 
 CGO_ENABLED ?= 1
 CGO_CFLAGS ?= -O2 -flto -D_FORTIFY_SOURCE=2 -fstack-protector-all -fPIE
@@ -7,13 +8,19 @@ CGO_LDFLAGS ?= -flto -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pie
 GO_BUILD_FLAGS ?= -trimpath -buildmode=pie
 GO_LDFLAGS ?= -s -w -linkmode=external -extldflags "$(CGO_LDFLAGS)"
 
-.PHONY: generate fix test test-ebpf test-ebpf-c build snapshot tidy
+.PHONY: generate fix fmt-check lint test test-ebpf test-ebpf-c build snapshot tidy
 
 generate:
 	$(GO) generate ./internal/ebpf
 
 fix:
 	$(GO) fix ./...
+
+fmt-check:
+	$(GOLANGCI_LINT) fmt --diff
+
+lint:
+	$(GOLANGCI_LINT) run ./...
 
 test:
 	$(GO) test ./...

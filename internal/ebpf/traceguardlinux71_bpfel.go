@@ -31,6 +31,13 @@ type traceguardLinux71ConnectionDedupeValue struct {
 	LastSeenNs uint64
 }
 
+type traceguardLinux71DaemonProcessIdentity struct {
+	_          structs.HostLayout
+	Tgid       uint32
+	Pad        uint32
+	StartTicks uint64
+}
+
 type traceguardLinux71DnsParseResult struct {
 	_                structs.HostLayout
 	Key              traceguardLinux71DomainKey
@@ -107,9 +114,35 @@ type traceguardLinux71ListenerInfoKey struct {
 }
 
 type traceguardLinux71ListenerInfoValue struct {
+	_                structs.HostLayout
+	ProcessStartTime uint64
+	CgroupId         uint64
+	Pid              uint32
+	Uid              uint32
+	Comm             [16]int8
+}
+
+type traceguardLinux71LsmPathValue struct {
 	_    structs.HostLayout
-	Pid  uint32
-	Comm [16]int8
+	Path [4096]int8
+}
+
+type traceguardLinux71PathLpmKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Data      [256]uint8
+}
+
+type traceguardLinux71RuleNameKey struct {
+	_          structs.HostLayout
+	PolicySlot uint8
+	Pad        [3]uint8
+	RuleId     uint32
+}
+
+type traceguardLinux71RuleNameValue struct {
+	_    structs.HostLayout
+	Name [65]int8
 }
 
 type traceguardLinux71Settings struct {
@@ -123,7 +156,23 @@ type traceguardLinux71Settings struct {
 	EgressEnabled        uint8
 	EgressEnforce        uint8
 	EgressDefaultBlock   uint8
-	Pad                  [7]uint8
+	ExecEnabled          uint8
+	ExecEnforce          uint8
+	ExecDefaultBlock     uint8
+	FileEnabled          uint8
+	FileEnforce          uint8
+	FileDefaultBlock     uint8
+	BindEnabled          uint8
+	BindEnforce          uint8
+	BindDefaultBlock     uint8
+	UnixEnabled          uint8
+	UnixEnforce          uint8
+	UnixDefaultBlock     uint8
+	SockoptEnabled       uint8
+	SockoptEnforce       uint8
+	SockoptDefaultBlock  uint8
+	PolicyGeneration     uint32
+	Pad                  uint32
 }
 
 type traceguardLinux71SocketInfoKey struct {
@@ -136,12 +185,26 @@ type traceguardLinux71SocketInfoKey struct {
 }
 
 type traceguardLinux71SocketInfoValue struct {
+	_                structs.HostLayout
+	ProcessStartTime uint64
+	CgroupId         uint64
+	Uid              uint32
+	Comm             [16]int8
+	Hook             uint8
+	Family           uint8
+	Protocol         uint8
+	Pad              uint8
+}
+
+type traceguardLinux71SockoptKey struct {
 	_        structs.HostLayout
-	Comm     [16]int8
-	Hook     uint8
-	Family   uint8
-	Protocol uint8
-	Pad      uint8
+	Slot     uint8
+	Kind     uint8
+	Pad      [2]uint8
+	Uid      uint32
+	CgroupId uint64
+	Level    uint32
+	Optname  uint32
 }
 
 // Names of all BPF objects in the ELF.
@@ -150,9 +213,14 @@ type traceguardLinux71SocketInfoValue struct {
 const (
 	traceguardLinux71MapAllowSuffixes           = "allow_suffixes"
 	traceguardLinux71MapAllowlist               = "allowlist"
+	traceguardLinux71MapBind4AllowRules         = "bind4_allow_rules"
+	traceguardLinux71MapBind4BlockRules         = "bind4_block_rules"
+	traceguardLinux71MapBind6AllowRules         = "bind6_allow_rules"
+	traceguardLinux71MapBind6BlockRules         = "bind6_block_rules"
 	traceguardLinux71MapBlockSuffixes           = "block_suffixes"
 	traceguardLinux71MapBlocklist               = "blocklist"
 	traceguardLinux71MapConnectionDedupe        = "connection_dedupe"
+	traceguardLinux71MapDaemonIdentity          = "daemon_identity"
 	traceguardLinux71MapDnsScratch              = "dns_scratch"
 	traceguardLinux71MapEgress4AllowRules       = "egress4_allow_rules"
 	traceguardLinux71MapEgress4BlockRules       = "egress4_block_rules"
@@ -167,11 +235,28 @@ const (
 	traceguardLinux71MapEndpoint6CidrRules      = "endpoint6_cidr_rules"
 	traceguardLinux71MapEndpoint6Rules          = "endpoint6_rules"
 	traceguardLinux71MapEvents                  = "events"
+	traceguardLinux71MapExecAllowPaths          = "exec_allow_paths"
+	traceguardLinux71MapExecBlockPaths          = "exec_block_paths"
+	traceguardLinux71MapFileAllowPaths          = "file_allow_paths"
+	traceguardLinux71MapFileBlockPaths          = "file_block_paths"
 	traceguardLinux71MapListenerInfo            = "listener_info"
+	traceguardLinux71MapLsmPathBuf              = "lsm_path_buf"
+	traceguardLinux71MapPolicyReaders           = "policy_readers"
+	traceguardLinux71MapPolicySelector          = "policy_selector"
+	traceguardLinux71MapRuleNames               = "rule_names"
 	traceguardLinux71MapSettings                = "settings"
 	traceguardLinux71MapSocketInfo              = "socket_info"
+	traceguardLinux71MapSockoptAllow            = "sockopt_allow"
+	traceguardLinux71MapSockoptBlock            = "sockopt_block"
+	traceguardLinux71MapUnixAllowPaths          = "unix_allow_paths"
+	traceguardLinux71MapUnixBlockPaths          = "unix_block_paths"
+	traceguardLinux71ProgLsmBprmCheckSecurity   = "lsm_bprm_check_security"
+	traceguardLinux71ProgLsmFileOpen            = "lsm_file_open"
+	traceguardLinux71ProgTraceBind4             = "trace_bind4"
+	traceguardLinux71ProgTraceBind6             = "trace_bind6"
 	traceguardLinux71ProgTraceConnect4          = "trace_connect4"
 	traceguardLinux71ProgTraceConnect6          = "trace_connect6"
+	traceguardLinux71ProgTraceConnectUnix       = "trace_connect_unix"
 	traceguardLinux71ProgTraceConnectionIngress = "trace_connection_ingress"
 	traceguardLinux71ProgTraceCreat             = "trace_creat"
 	traceguardLinux71ProgTraceDns               = "trace_dns"
@@ -184,8 +269,12 @@ const (
 	traceguardLinux71ProgTracePostBind6         = "trace_post_bind6"
 	traceguardLinux71ProgTraceRecvmsg4          = "trace_recvmsg4"
 	traceguardLinux71ProgTraceRecvmsg6          = "trace_recvmsg6"
+	traceguardLinux71ProgTraceRecvmsgUnix       = "trace_recvmsg_unix"
 	traceguardLinux71ProgTraceSendmsg4          = "trace_sendmsg4"
 	traceguardLinux71ProgTraceSendmsg6          = "trace_sendmsg6"
+	traceguardLinux71ProgTraceSendmsgUnix       = "trace_sendmsg_unix"
+	traceguardLinux71ProgTraceSetsockopt        = "trace_setsockopt"
+	traceguardLinux71ProgTraceSockops           = "trace_sockops"
 )
 
 // loadTraceguardLinux71 returns the embedded CollectionSpec for traceguardLinux71.
@@ -230,8 +319,13 @@ type traceguardLinux71Specs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardLinux71ProgramSpecs struct {
+	LsmBprmCheckSecurity   *ebpf.ProgramSpec `ebpf:"lsm_bprm_check_security"`
+	LsmFileOpen            *ebpf.ProgramSpec `ebpf:"lsm_file_open"`
+	TraceBind4             *ebpf.ProgramSpec `ebpf:"trace_bind4"`
+	TraceBind6             *ebpf.ProgramSpec `ebpf:"trace_bind6"`
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
+	TraceConnectUnix       *ebpf.ProgramSpec `ebpf:"trace_connect_unix"`
 	TraceConnectionIngress *ebpf.ProgramSpec `ebpf:"trace_connection_ingress"`
 	TraceCreat             *ebpf.ProgramSpec `ebpf:"trace_creat"`
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
@@ -244,8 +338,12 @@ type traceguardLinux71ProgramSpecs struct {
 	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
+	TraceRecvmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
+	TraceSendmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_sendmsg_unix"`
+	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
+	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
 }
 
 // traceguardLinux71MapSpecs contains maps before they are loaded into the kernel.
@@ -254,9 +352,14 @@ type traceguardLinux71ProgramSpecs struct {
 type traceguardLinux71MapSpecs struct {
 	AllowSuffixes           *ebpf.MapSpec `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.MapSpec `ebpf:"allowlist"`
+	Bind4AllowRules         *ebpf.MapSpec `ebpf:"bind4_allow_rules"`
+	Bind4BlockRules         *ebpf.MapSpec `ebpf:"bind4_block_rules"`
+	Bind6AllowRules         *ebpf.MapSpec `ebpf:"bind6_allow_rules"`
+	Bind6BlockRules         *ebpf.MapSpec `ebpf:"bind6_block_rules"`
 	BlockSuffixes           *ebpf.MapSpec `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.MapSpec `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.MapSpec `ebpf:"connection_dedupe"`
+	DaemonIdentity          *ebpf.MapSpec `ebpf:"daemon_identity"`
 	DnsScratch              *ebpf.MapSpec `ebpf:"dns_scratch"`
 	Egress4AllowRules       *ebpf.MapSpec `ebpf:"egress4_allow_rules"`
 	Egress4BlockRules       *ebpf.MapSpec `ebpf:"egress4_block_rules"`
@@ -271,9 +374,21 @@ type traceguardLinux71MapSpecs struct {
 	Endpoint6CidrRules      *ebpf.MapSpec `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
+	ExecAllowPaths          *ebpf.MapSpec `ebpf:"exec_allow_paths"`
+	ExecBlockPaths          *ebpf.MapSpec `ebpf:"exec_block_paths"`
+	FileAllowPaths          *ebpf.MapSpec `ebpf:"file_allow_paths"`
+	FileBlockPaths          *ebpf.MapSpec `ebpf:"file_block_paths"`
 	ListenerInfo            *ebpf.MapSpec `ebpf:"listener_info"`
+	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
+	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
+	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
+	SockoptAllow            *ebpf.MapSpec `ebpf:"sockopt_allow"`
+	SockoptBlock            *ebpf.MapSpec `ebpf:"sockopt_block"`
+	UnixAllowPaths          *ebpf.MapSpec `ebpf:"unix_allow_paths"`
+	UnixBlockPaths          *ebpf.MapSpec `ebpf:"unix_block_paths"`
 }
 
 // traceguardLinux71VariableSpecs contains global variables before they are loaded into the kernel.
@@ -304,9 +419,14 @@ func (o *traceguardLinux71Objects) Close() error {
 type traceguardLinux71Maps struct {
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
+	Bind4AllowRules         *ebpf.Map `ebpf:"bind4_allow_rules"`
+	Bind4BlockRules         *ebpf.Map `ebpf:"bind4_block_rules"`
+	Bind6AllowRules         *ebpf.Map `ebpf:"bind6_allow_rules"`
+	Bind6BlockRules         *ebpf.Map `ebpf:"bind6_block_rules"`
 	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
+	DaemonIdentity          *ebpf.Map `ebpf:"daemon_identity"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
 	Egress4AllowRules       *ebpf.Map `ebpf:"egress4_allow_rules"`
 	Egress4BlockRules       *ebpf.Map `ebpf:"egress4_block_rules"`
@@ -321,18 +441,35 @@ type traceguardLinux71Maps struct {
 	Endpoint6CidrRules      *ebpf.Map `ebpf:"endpoint6_cidr_rules"`
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
+	ExecAllowPaths          *ebpf.Map `ebpf:"exec_allow_paths"`
+	ExecBlockPaths          *ebpf.Map `ebpf:"exec_block_paths"`
+	FileAllowPaths          *ebpf.Map `ebpf:"file_allow_paths"`
+	FileBlockPaths          *ebpf.Map `ebpf:"file_block_paths"`
 	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
+	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
+	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
+	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
+	SockoptAllow            *ebpf.Map `ebpf:"sockopt_allow"`
+	SockoptBlock            *ebpf.Map `ebpf:"sockopt_block"`
+	UnixAllowPaths          *ebpf.Map `ebpf:"unix_allow_paths"`
+	UnixBlockPaths          *ebpf.Map `ebpf:"unix_block_paths"`
 }
 
 func (m *traceguardLinux71Maps) Close() error {
 	return _TraceguardLinux71Close(
 		m.AllowSuffixes,
 		m.Allowlist,
+		m.Bind4AllowRules,
+		m.Bind4BlockRules,
+		m.Bind6AllowRules,
+		m.Bind6BlockRules,
 		m.BlockSuffixes,
 		m.Blocklist,
 		m.ConnectionDedupe,
+		m.DaemonIdentity,
 		m.DnsScratch,
 		m.Egress4AllowRules,
 		m.Egress4BlockRules,
@@ -347,9 +484,21 @@ func (m *traceguardLinux71Maps) Close() error {
 		m.Endpoint6CidrRules,
 		m.Endpoint6Rules,
 		m.Events,
+		m.ExecAllowPaths,
+		m.ExecBlockPaths,
+		m.FileAllowPaths,
+		m.FileBlockPaths,
 		m.ListenerInfo,
+		m.LsmPathBuf,
+		m.PolicyReaders,
+		m.PolicySelector,
+		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,
+		m.SockoptAllow,
+		m.SockoptBlock,
+		m.UnixAllowPaths,
+		m.UnixBlockPaths,
 	)
 }
 
@@ -363,8 +512,13 @@ type traceguardLinux71Variables struct {
 //
 // It can be passed to loadTraceguardLinux71Objects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardLinux71Programs struct {
+	LsmBprmCheckSecurity   *ebpf.Program `ebpf:"lsm_bprm_check_security"`
+	LsmFileOpen            *ebpf.Program `ebpf:"lsm_file_open"`
+	TraceBind4             *ebpf.Program `ebpf:"trace_bind4"`
+	TraceBind6             *ebpf.Program `ebpf:"trace_bind6"`
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
+	TraceConnectUnix       *ebpf.Program `ebpf:"trace_connect_unix"`
 	TraceConnectionIngress *ebpf.Program `ebpf:"trace_connection_ingress"`
 	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
@@ -377,14 +531,23 @@ type traceguardLinux71Programs struct {
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
+	TraceRecvmsgUnix       *ebpf.Program `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
+	TraceSendmsgUnix       *ebpf.Program `ebpf:"trace_sendmsg_unix"`
+	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
+	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
 }
 
 func (p *traceguardLinux71Programs) Close() error {
 	return _TraceguardLinux71Close(
+		p.LsmBprmCheckSecurity,
+		p.LsmFileOpen,
+		p.TraceBind4,
+		p.TraceBind6,
 		p.TraceConnect4,
 		p.TraceConnect6,
+		p.TraceConnectUnix,
 		p.TraceConnectionIngress,
 		p.TraceCreat,
 		p.TraceDns,
@@ -397,8 +560,12 @@ func (p *traceguardLinux71Programs) Close() error {
 		p.TracePostBind6,
 		p.TraceRecvmsg4,
 		p.TraceRecvmsg6,
+		p.TraceRecvmsgUnix,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
+		p.TraceSendmsgUnix,
+		p.TraceSetsockopt,
+		p.TraceSockops,
 	)
 }
 

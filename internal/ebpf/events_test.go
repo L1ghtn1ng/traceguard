@@ -14,7 +14,8 @@ func TestEventTimestampAtConvertsBootClockToWallTime(t *testing.T) {
 	t.Parallel()
 
 	wallNow := time.Date(2026, time.July, 10, 12, 0, 0, 0, time.UTC)
-	got, err := eventTimestampAt(uint64((2*time.Hour - time.Second).Nanoseconds()), wallNow, (2 * time.Hour).Nanoseconds())
+	const eventBootNS uint64 = uint64(2*time.Hour - time.Second)
+	got, err := eventTimestampAt(eventBootNS, wallNow, (2 * time.Hour).Nanoseconds())
 	if err != nil {
 		t.Fatalf("eventTimestampAt returned error: %v", err)
 	}
@@ -230,6 +231,7 @@ func TestDecodeQNameRejectsMalformedWireNames(t *testing.T) {
 		{name: "root", raw: []byte{0}},
 		{name: "label too long", raw: append([]byte{64}, bytes.Repeat([]byte("a"), 64)...)},
 		{name: "truncated label", raw: []byte{7, 'e', 'x'}},
+		{name: "missing root label", raw: []byte{3, 'c', 'o', 'm'}},
 	}
 
 	for _, tt := range tests {
@@ -240,6 +242,73 @@ func TestDecodeQNameRejectsMalformedWireNames(t *testing.T) {
 				t.Fatalf("decodeQName(%v) = %q, want empty", tt.raw, got)
 			}
 		})
+	}
+}
+
+func TestDecodeQNameEscapesLabelBoundariesAndBytes(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte{3, 'a', '.', 'b', 3, 'a', '\\', 'b', 2, 0x00, 0xff, 0}
+	if got, want := decodeQName(raw), `a\.b.a\\b.\x00\xff`; got != want {
+		t.Fatalf("decodeQName() = %q, want %q", got, want)
+	}
+	if got := decodeQName([]byte{1, 'a', 1, 'b', 0}); got == decodeQName([]byte{3, 'a', '.', 'b', 0}) {
+		t.Fatalf("label separator and literal dot decoded to the same name %q", got)
+	}
+}
+
+func TestDecodeEventKeepsDNSDecisionSeparateFromRuleNumber(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		kind         uint32
+		rawRuleID    uint32
+		wantDecision string
+		wantRule     uint32
+	}{
+		{name: "dns allow", kind: EventDNS, rawRuleID: 1, wantDecision: "allow"},
+		{name: "resolver block", kind: EventResolverBlocked, rawRuleID: 2, wantDecision: "block"},
+		{name: "egress rule", kind: EventEgressBlocked, rawRuleID: 17, wantRule: 17},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw := rawEvent{Kind: tt.kind, RuleID: tt.rawRuleID}
+			var encoded bytes.Buffer
+			if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+				t.Fatal(err)
+			}
+			event, err := decodeEvent(encoded.Bytes())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.PolicyDecision != tt.wantDecision || event.RuleNumber != tt.wantRule {
+				t.Fatalf("decision/rule = %q/%d, want %q/%d", event.PolicyDecision, event.RuleNumber, tt.wantDecision, tt.wantRule)
+			}
+		})
+	}
+}
+
+func TestDecodeEventCarriesStableEnforcementRuleName(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{Kind: EventEgressBlocked, RuleID: 17}
+	copy(raw.Domain[:], "previous-policy-rule")
+	var encoded bytes.Buffer
+	if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.RuleNumber != 17 || event.RuleID != "previous-policy-rule" {
+		t.Fatalf("rule = %d/%q, want 17/%q", event.RuleNumber, event.RuleID, "previous-policy-rule")
+	}
+	if event.Domain != "" {
+		t.Fatalf("enforcement event exposed rule storage as DNS domain %q", event.Domain)
 	}
 }
 
@@ -312,6 +381,40 @@ func TestDecodeEventSocketMetadata(t *testing.T) {
 	}
 	if event.SocketProtocol != "udp" {
 		t.Fatalf("SocketProtocol = %q, want udp", event.SocketProtocol)
+	}
+}
+
+func TestDecodeEnforcementEventOverlays(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		raw        rawEvent
+		wantFamily string
+		wantHook   string
+		wantSource string
+	}{
+		{name: "unix", raw: rawEvent{Kind: EventUnixBlocked, Family: 1, SocketHook: 13, EventSource: 3, FileFlags: 1}, wantFamily: "unix", wantHook: "cgroup_unix_connect", wantSource: "cgroup-sock-addr"},
+		{name: "sockopt", raw: rawEvent{Kind: EventSockoptWouldBlock, Family: 6, SocketHook: 16, EventSource: 7, FileFlags: 1, FileMode: 36}, wantFamily: "ipv6", wantHook: "cgroup_setsockopt", wantSource: "cgroup-sockopt"},
+		{name: "sockops", raw: rawEvent{Kind: EventSockOps, Family: 4, SocketHook: 17, EventSource: 6}, wantFamily: "ipv4", wantHook: "sockops", wantSource: "sockops"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var encoded bytes.Buffer
+			if err := binary.Write(&encoded, binary.NativeEndian, test.raw); err != nil {
+				t.Fatal(err)
+			}
+			event, err := decodeEvent(encoded.Bytes())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.SocketFamily != test.wantFamily || event.SocketHook != test.wantHook || event.EventSource != test.wantSource {
+				t.Fatalf("decoded overlay = family %q hook %q source %q", event.SocketFamily, event.SocketHook, event.EventSource)
+			}
+			if test.raw.Family == 1 && (event.Address != "" || event.LocalAddress != "") {
+				t.Fatalf("unix event decoded IP addresses: peer=%q local=%q", event.Address, event.LocalAddress)
+			}
+		})
 	}
 }
 
@@ -396,6 +499,27 @@ func TestDecodeConnectionEvent(t *testing.T) {
 	}
 }
 
+func TestDecodePathDecisionReportsTruncatedIdentity(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{Kind: EventFileWouldBlock, FileMode: pathTruncatedFlag | 0o600}
+	copy(raw.Filename[:], "/safe/partial")
+	var encoded bytes.Buffer
+	if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
+	}
+	event, err := decodeEvent(encoded.Bytes())
+	if err != nil {
+		t.Fatalf("decodeEvent returned error: %v", err)
+	}
+	if !event.PathTruncated {
+		t.Fatal("path truncation marker was not decoded")
+	}
+	if event.FileMode != 0o600 {
+		t.Fatalf("FileMode = %#o, want %#o after removing marker", event.FileMode, 0o600)
+	}
+}
+
 func TestDecodeFileAccessEvent(t *testing.T) {
 	t.Parallel()
 
@@ -462,6 +586,24 @@ func TestDecodeKernelFeatureMetadata(t *testing.T) {
 	}
 	if event.KernelUID != 1000 || event.CgroupID != 12345 || event.SocketCookie != 67890 {
 		t.Fatalf("kernel metadata = uid:%d cgroup:%d cookie:%d", event.KernelUID, event.CgroupID, event.SocketCookie)
+	}
+}
+
+func TestDecodeSocketCacheIdentitySource(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{Kind: EventDNS, UIDSource: 2, KernelUID: 1000, CgroupID: 12345}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
+		t.Fatalf("binary.Write returned error: %v", err)
+	}
+
+	event, err := decodeEvent(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decodeEvent returned error: %v", err)
+	}
+	if event.UIDSource != "socket-cache" {
+		t.Fatalf("UIDSource = %q, want socket-cache", event.UIDSource)
 	}
 }
 

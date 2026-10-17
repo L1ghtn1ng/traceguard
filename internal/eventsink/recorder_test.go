@@ -6,19 +6,23 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -28,6 +32,29 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
+
+func closeTestResource(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close test resource: %v", err)
+		}
+	})
+}
+
+func trustTestServer(t *testing.T, sink *exportSink, server *httptest.Server) {
+	t.Helper()
+	transport, ok := sink.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport type = %T, want *http.Transport", sink.client.Transport)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(server.Certificate())
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+	}
+}
 
 func TestRecorderWritesArchive(t *testing.T) {
 	t.Parallel()
@@ -42,7 +69,7 @@ func TestRecorderWritesArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRotatingFile returned error: %v", err)
 	}
-	defer logWriter.Close()
+	closeTestResource(t, logWriter)
 
 	logger, err := logging.NewLogger(logWriter, "json")
 	if err != nil {
@@ -56,19 +83,19 @@ func TestRecorderWritesArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	recorder.Info("dns", map[string]any{
 		"domain":  "example.com",
 		"program": "curl",
 	})
 
-	content, err := os.ReadFile(archivePath)
+	content, err := os.ReadFile(archivePath) //nolint:gosec // path is rooted in t.TempDir
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
 	text := string(content)
-	for _, want := range []string{`"message":"dns"`, `"domain":"example.com"`, `"program":"curl"`} {
+	for _, want := range []string{`"message":"dns"`, `"hostname":"` + logger.Hostname() + `"`, `"domain":"example.com"`, `"program":"curl"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("archive missing %q in %q", want, text)
 		}
@@ -99,7 +126,7 @@ func TestRecorderMarksHealthUnhealthyOnLocalSinkFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 	if err := recorder.archive.writer.Close(); err != nil {
 		t.Fatalf("close archive writer: %v", err)
 	}
@@ -125,21 +152,23 @@ func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	recorder.Info("dns", map[string]any{"domain": "allowed.example"})
 	recorder.Info("would-block", map[string]any{"domain": "dry-run.example", "policy": "block"})
+	recorder.Info("exec_would_block", map[string]any{"path": "/usr/bin/dry-run", "policy": "block"})
 	recorder.Info("blocked", map[string]any{"domain": "blocked.example", "policy": "block"})
 	recorder.Info("blocked-doh", map[string]any{"endpoint": "dns.example", "policy": "block"})
 	recorder.Info("egress_blocked", map[string]any{"peer_address": "203.0.113.9", "policy": "block"})
+	recorder.Info("exec_blocked", map[string]any{"path": "/usr/bin/blocked", "policy": "block"})
 
-	content, err := os.ReadFile(blockedPath)
+	content, err := os.ReadFile(blockedPath) //nolint:gosec // path is rooted in t.TempDir
 	if err != nil {
 		t.Fatalf("ReadFile blocked log: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("blocked log line count = %d, want 3; content=%q", len(lines), content)
+	if len(lines) != 4 {
+		t.Fatalf("blocked log line count = %d, want 4; content=%q", len(lines), content)
 	}
 
 	var first map[string]any
@@ -165,6 +194,14 @@ func TestRecorderWritesBlockedLogForBlockedEventsOnly(t *testing.T) {
 	if third["message"] != "egress_blocked" || third["peer_address"] != "203.0.113.9" || third["policy"] != "block" {
 		t.Fatalf("third blocked line = %#v, want blocked egress record", third)
 	}
+
+	var fourth map[string]any
+	if err := json.Unmarshal([]byte(lines[3]), &fourth); err != nil {
+		t.Fatalf("json.Unmarshal fourth blocked line: %v", err)
+	}
+	if fourth["message"] != "exec_blocked" || fourth["path"] != "/usr/bin/blocked" || fourth["policy"] != "block" {
+		t.Fatalf("fourth blocked line = %#v, want blocked exec record", fourth)
+	}
 }
 
 func TestRecorderWritesUniqueDomainsLog(t *testing.T) {
@@ -183,7 +220,7 @@ func TestRecorderWritesUniqueDomainsLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	now := time.Date(2026, time.June, 7, 9, 30, 0, 123, time.UTC)
 	recorder.now = func() time.Time { return now }
@@ -204,13 +241,14 @@ func TestRecorderWritesUniqueDomainsLog(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("domain log line count = %d, want 3; content=%q", len(lines), strings.Join(lines, "\n"))
 	}
-	if lines[0] != "2026-06-07T09:30:00.000000123Z\texample.com" {
+	prefix := "2026-06-07T09:30:00.000000123Z\t" + logger.Hostname() + "\t"
+	if lines[0] != prefix+"example.com" {
 		t.Fatalf("first domain log line = %q, want timestamped example.com", lines[0])
 	}
-	if lines[1] != "2026-06-07T09:30:00.000000123Z\tblocked.example" {
+	if lines[1] != prefix+"blocked.example" {
 		t.Fatalf("second domain log line = %q, want timestamped blocked.example", lines[1])
 	}
-	if lines[2] != "2026-06-07T09:30:00.000000123Z\t_dmarc.example" {
+	if lines[2] != prefix+"_dmarc.example" {
 		t.Fatalf("third domain log line = %q, want timestamped _dmarc.example", lines[2])
 	}
 }
@@ -220,14 +258,14 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 
 	dir := t.TempDir()
 	domainsPath := filepath.Join(dir, "domains.log")
-	if err := os.WriteFile(domainsPath, []byte("2026-06-07T09:00:00Z\texisting.example\n"), 0o640); err != nil {
+	if err := os.WriteFile(domainsPath, []byte("2026-06-07T09:00:00Z\texisting.example\n"), 0o600); err != nil {
 		t.Fatalf("write domains log: %v", err)
 	}
-	if err := os.WriteFile(domainsPath+".1", []byte("2026-06-07T08:00:00Z\trotated.example\n"), 0o640); err != nil {
+	if err := os.WriteFile(domainsPath+".1", []byte("2026-06-07T08:00:00Z\trotated.example\n"), 0o600); err != nil {
 		t.Fatalf("write rotated domains log: %v", err)
 	}
 	writeGzipFile(t, domainsPath+".2.gz", "2026-06-07T07:30:00Z\tcompressed.example\n")
-	if err := os.WriteFile(domainsPath+".3", []byte("forged.example\n2026-06-07T07:01:00Z\talso\tbad\n"), 0o640); err != nil {
+	if err := os.WriteFile(domainsPath+".3", []byte("forged.example\n2026-06-07T07:01:00Z\talso\ttoo\tbad\n"), 0o600); err != nil {
 		t.Fatalf("write malformed rotated domains log: %v", err)
 	}
 
@@ -243,7 +281,7 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	now := time.Date(2026, time.June, 7, 10, 0, 0, 0, time.UTC)
 	recorder.now = func() time.Time { return now }
@@ -262,14 +300,28 @@ func TestRecorderLoadsExistingDomainsLogForDedup(t *testing.T) {
 	if lines[0] != "2026-06-07T09:00:00Z\texisting.example" {
 		t.Fatalf("first current domain log line changed: %q", lines[0])
 	}
-	if lines[1] != "2026-06-07T10:00:00Z\tforged.example" {
+	prefix := "2026-06-07T10:00:00Z\t" + logger.Hostname() + "\t"
+	if lines[1] != prefix+"forged.example" {
 		t.Fatalf("second current domain log line = %q, want forged.example appended", lines[1])
 	}
-	if lines[2] != "2026-06-07T10:00:00Z\tbad" {
+	if lines[2] != prefix+"bad" {
 		t.Fatalf("third current domain log line = %q, want bad appended", lines[2])
 	}
-	if lines[3] != "2026-06-07T10:00:00Z\tnew.example" {
+	if lines[3] != prefix+"new.example" {
 		t.Fatalf("fourth current domain log line = %q, want new.example appended", lines[3])
+	}
+}
+
+func TestDomainLogHostnameIsBoundedAndCannotInjectColumns(t *testing.T) {
+	t.Parallel()
+
+	for _, hostname := range []string{"", "bad\thost", "bad\nhost", strings.Repeat("h", 256)} {
+		if got := normalizeDomainLogHostname(hostname); got != "-" {
+			t.Errorf("normalizeDomainLogHostname(%q) = %q, want -", hostname, got)
+		}
+	}
+	if got := normalizeDomainLogHostname("worker-1"); got != "worker-1" {
+		t.Fatalf("normalizeDomainLogHostname() = %q, want worker-1", got)
 	}
 }
 
@@ -371,18 +423,18 @@ func TestRecorderPrunesExpiredDedupeStates(t *testing.T) {
 func TestLimitDedupeStatesBoundsCardinality(t *testing.T) {
 	t.Parallel()
 
-	states := make(map[string]errorDedupeState, maxDedupeStates+1)
+	states := make(map[recordFingerprint]errorDedupeState, maxDedupeStates+1)
 	for idx := 0; idx <= maxDedupeStates; idx++ {
-		states[strconv.Itoa(idx)] = errorDedupeState{}
+		states[fingerprintBytes([]byte(strconv.Itoa(idx)))] = errorDedupeState{}
 	}
-	const preserve = "65536"
+	preserve := fingerprintBytes([]byte("65536"))
 	limitDedupeStates(states, preserve)
 
 	if len(states) != maxDedupeStates {
 		t.Fatalf("dedupe state count = %d, want %d", len(states), maxDedupeStates)
 	}
 	if _, ok := states[preserve]; !ok {
-		t.Fatalf("current dedupe state %q was evicted", preserve)
+		t.Fatal("current dedupe state was evicted")
 	}
 }
 
@@ -427,7 +479,7 @@ func TestRecorderInfoIfChangedBoundsChangeStates(t *testing.T) {
 
 	recorder, _ := newTestRecorder(t)
 	for idx := range maxDedupeStates {
-		recorder.changeStates[strconv.Itoa(idx)] = "existing"
+		recorder.changeStates[fingerprintBytes([]byte(strconv.Itoa(idx)))] = fingerprintBytes([]byte("existing"))
 	}
 	const current = "current policy"
 	if !recorder.InfoIfChanged(current, map[string]any{"revision": 1}) {
@@ -436,7 +488,7 @@ func TestRecorderInfoIfChangedBoundsChangeStates(t *testing.T) {
 	if len(recorder.changeStates) != maxDedupeStates {
 		t.Fatalf("change state count = %d, want %d", len(recorder.changeStates), maxDedupeStates)
 	}
-	if _, ok := recorder.changeStates[current]; !ok {
+	if _, ok := recorder.changeStates[fingerprintBytes([]byte(current))]; !ok {
 		t.Fatalf("current change state %q was evicted", current)
 	}
 }
@@ -685,13 +737,8 @@ func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
-	defer sink.Close()
-	if transport, ok := sink.client.Transport.(*http.Transport); ok {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
-		}
-	}
+	closeTestResource(t, sink)
+	trustTestServer(t, sink, server)
 
 	batch := []json.RawMessage{
 		mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "one"}),
@@ -734,12 +781,7 @@ func TestExportSinkKeepsLateEventsUntilClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
-	if transport, ok := sink.client.Transport.(*http.Transport); ok {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
-		}
-	}
+	trustTestServer(t, sink, server)
 
 	cancel()
 	time.Sleep(20 * time.Millisecond)
@@ -761,7 +803,7 @@ func TestExportSinkKeepsLateEventsUntilClose(t *testing.T) {
 func TestExportRedirectsStayOnOriginalOrigin(t *testing.T) {
 	t.Parallel()
 
-	original, err := http.NewRequest(http.MethodPost, "https://collector.example.test/v1/events", nil)
+	original, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://collector.example.test/v1/events", nil)
 	if err != nil {
 		t.Fatalf("create original request: %v", err)
 	}
@@ -780,7 +822,7 @@ func TestExportRedirectsStayOnOriginalOrigin(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			redirect, err := http.NewRequest(http.MethodPost, test.target, nil)
+			redirect, err := http.NewRequestWithContext(t.Context(), http.MethodPost, test.target, nil)
 			if err != nil {
 				t.Fatalf("create redirect request: %v", err)
 			}
@@ -797,7 +839,7 @@ func TestNewExportSinkLoadsClientCertificate(t *testing.T) {
 	tempDir := t.TempDir()
 	certPath, keyPath := writeClientCertificate(t, tempDir)
 	caPath := filepath.Join(tempDir, "ca.crt")
-	if err := os.WriteFile(caPath, encodeServerCertPEM(t, httptest.NewTLSServer(http.NotFoundHandler())), 0o644); err != nil {
+	if err := os.WriteFile(caPath, encodeServerCertPEM(t, httptest.NewTLSServer(http.NotFoundHandler())), 0o600); err != nil {
 		t.Fatalf("WriteFile ca: %v", err)
 	}
 
@@ -810,7 +852,7 @@ func TestNewExportSinkLoadsClientCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
-	defer sink.Close()
+	closeTestResource(t, sink)
 
 	transport, ok := sink.client.Transport.(*http.Transport)
 	if !ok {
@@ -845,13 +887,8 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
-	defer sink.Close()
-	if transport, ok := sink.client.Transport.(*http.Transport); ok {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
-		}
-	}
+	closeTestResource(t, sink)
+	trustTestServer(t, sink, server)
 
 	batch := []json.RawMessage{
 		mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "spool"}),
@@ -918,7 +955,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
-	if err := os.Mkdir(target, 0o755); err != nil {
+	if err := os.Mkdir(target, 0o750); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
 	link := filepath.Join(root, "spool-link")
@@ -963,7 +1000,7 @@ func TestSpoolStoreRejectsByteCapacityExceeded(t *testing.T) {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
 	existing := filepath.Join(dir, "existing.json")
-	file, err := os.Create(existing)
+	file, err := os.Create(existing) //nolint:gosec // path is rooted in t.TempDir
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -998,12 +1035,7 @@ func TestExportSinkCloseDrainsQueuedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newExportSink returned error: %v", err)
 	}
-	if transport, ok := sink.client.Transport.(*http.Transport); ok {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
-		}
-	}
+	trustTestServer(t, sink, server)
 
 	sink.Enqueue(record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "queued"})
 	if err := sink.Close(); err != nil {
@@ -1071,11 +1103,11 @@ func TestExportSinkShutdownKeepsBatchesBounded(t *testing.T) {
 func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
 	t.Parallel()
 
-	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	packetConn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ListenPacket returned error: %v", err)
 	}
-	defer packetConn.Close()
+	closeTestResource(t, packetConn)
 
 	received := make(chan string, 1)
 	go func() {
@@ -1098,7 +1130,7 @@ func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	recorder.Info("dns", map[string]any{"domain": "example.com"})
 
@@ -1118,11 +1150,11 @@ func TestRecorderExportsEventsToUDPSyslog(t *testing.T) {
 func TestRecorderCloseDrainsQueuedSyslog(t *testing.T) {
 	t.Parallel()
 
-	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	packetConn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ListenPacket returned error: %v", err)
 	}
-	defer packetConn.Close()
+	closeTestResource(t, packetConn)
 	recorder, err := newSyslogTestRecorder(t, Config{
 		SyslogURL:      "syslog+udp://" + packetConn.LocalAddr().String(),
 		SyslogFacility: "local0",
@@ -1150,11 +1182,11 @@ func TestRecorderCloseDrainsQueuedSyslog(t *testing.T) {
 func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
 	t.Parallel()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen returned error: %v", err)
 	}
-	defer listener.Close()
+	closeTestResource(t, listener)
 
 	received := make(chan string, 1)
 	go func() {
@@ -1163,12 +1195,16 @@ func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
 			received <- "ERROR: " + err.Error()
 			return
 		}
-		defer conn.Close()
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		buffer := make([]byte, 4096)
 		n, err := conn.Read(buffer)
 		if err != nil {
+			_ = conn.Close()
 			received <- "ERROR: " + err.Error()
+			return
+		}
+		if err := conn.Close(); err != nil {
+			received <- "ERROR: close connection: " + err.Error()
 			return
 		}
 		received <- string(buffer[:n])
@@ -1183,7 +1219,7 @@ func TestRecorderExportsEventsToTCPSyslog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSyslogTestRecorder returned error: %v", err)
 	}
-	defer recorder.Close()
+	closeTestResource(t, recorder)
 
 	recorder.Error("export", errors.New("boom"), nil)
 
@@ -1216,9 +1252,7 @@ func newTestRecorder(t *testing.T) (*Recorder, *bytes.Buffer) {
 	if err != nil {
 		t.Fatalf("NewRecorder returned error: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = recorder.Close()
-	})
+	closeTestResource(t, recorder)
 	return recorder, &buffer
 }
 
@@ -1254,7 +1288,7 @@ func decodeLogLines(t *testing.T, buffer *bytes.Buffer) []map[string]any {
 func readDomainLogLines(t *testing.T, path string) []string {
 	t.Helper()
 
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) //nolint:gosec // path is supplied by a test helper
 	if err != nil {
 		t.Fatalf("ReadFile domain log: %v", err)
 	}
@@ -1276,7 +1310,7 @@ func writeGzipFile(t *testing.T, path, content string) {
 	if err := compressed.Close(); err != nil {
 		t.Fatalf("close gzip writer: %v", err)
 	}
-	if err := os.WriteFile(path, buffer.Bytes(), 0o640); err != nil {
+	if err := os.WriteFile(path, buffer.Bytes(), 0o600); err != nil {
 		t.Fatalf("write gzip file: %v", err)
 	}
 }
@@ -1297,18 +1331,219 @@ func TestMarshalSingleRecordProtectsReservedFields(t *testing.T) {
 		Timestamp: "2026-07-10T12:00:00Z",
 		Level:     "info",
 		Message:   "dns",
+		Hostname:  "worker-1",
 		Fields: map[string]any{
 			"timestamp": "forged",
 			"level":     "forged",
 			"message":   "forged",
+			"hostname":  "forged",
 		},
 	})
 	var decoded map[string]any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
 	}
-	if decoded["timestamp"] != "2026-07-10T12:00:00Z" || decoded["level"] != "info" || decoded["message"] != "dns" {
+	if decoded["timestamp"] != "2026-07-10T12:00:00Z" || decoded["level"] != "info" || decoded["message"] != "dns" || decoded["hostname"] != "worker-1" {
 		t.Fatalf("reserved fields were overwritten: %#v", decoded)
+	}
+}
+
+func TestTelemetryBoundsSerializedBytesAndMarksTruncation(t *testing.T) {
+	t.Parallel()
+
+	fields := make(map[string]any, maxRecordFields+20)
+	for index := 0; index < maxRecordFields+20; index++ {
+		fields[fmt.Sprintf("field_%03d", index)] = strings.Repeat("\x00", maxRecordStringBytes)
+	}
+	message, bounded := boundTelemetry(strings.Repeat("\x00", maxRecordMessageBytes*2), fields, maxRecordFieldBytes)
+	payload, err := marshalSingleRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   message,
+		Hostname:  "worker-1",
+		Fields:    bounded,
+	})
+	if err != nil {
+		t.Fatalf("marshalSingleRecord returned error: %v", err)
+	}
+	if len(payload) > maxSerializedRecordBytes {
+		t.Fatalf("serialized record bytes = %d, want <= %d", len(payload), maxSerializedRecordBytes)
+	}
+	if bounded["telemetry_truncated"] != true {
+		t.Fatalf("bounded fields = %#v, want truncation marker", bounded)
+	}
+}
+
+func TestTelemetryBoundsEscapedMessageAndPopulatedFieldsTogether(t *testing.T) {
+	t.Parallel()
+
+	fields := make(map[string]any, maxRecordFields)
+	for index := range maxRecordFields {
+		fields[fmt.Sprintf("field_%03d", index)] = strings.Repeat("value", 256)
+	}
+	message, bounded := boundTelemetry(strings.Repeat("\x00", maxRecordMessageBytes), fields, maxRecordFieldBytes)
+	payload, err := marshalSingleRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   message,
+		Hostname:  "worker-1",
+		Fields:    bounded,
+	})
+	if err != nil {
+		t.Fatalf("marshalSingleRecord returned error: %v", err)
+	}
+	if len(payload) > maxSerializedRecordBytes {
+		t.Fatalf("serialized record bytes = %d, want <= %d", len(payload), maxSerializedRecordBytes)
+	}
+	if bounded["telemetry_truncated"] != true {
+		t.Fatalf("bounded fields = %#v, want truncation marker", bounded)
+	}
+}
+
+func TestTelemetryKeepsCoreFieldsWhenProcessControlledFieldsExpand(t *testing.T) {
+	t.Parallel()
+
+	// Each '<' escapes to six bytes, so these values nearly exhaust the field
+	// budget on their own and previously evicted fields sorted after them.
+	expanding := strings.Repeat("<", maxRecordStringBytes-21)
+	fields := map[string]any{
+		"current_cmdline":   expanding,
+		"requested_path":    expanding,
+		"attribution":       "event_time",
+		"detection_rule_id": "cloud-metadata",
+		"domain":            "metadata.example",
+		"event":             "detection_alert",
+		"kernel_uid":        uint32(1000),
+		"peer_address":      "169.254.169.254",
+		"peer_port":         uint16(80),
+		"pid":               uint32(4242),
+		"program":           "curl",
+		"severity":          "high",
+		"source_event":      "connect",
+		"uid":               uint32(1000),
+	}
+	message, bounded := boundTelemetry("detection", fields, maxRecordFieldBytes)
+	for _, key := range []string{"domain", "event", "kernel_uid", "peer_address", "peer_port", "pid", "program", "severity", "source_event", "uid"} {
+		if bounded[key] != fields[key] {
+			t.Fatalf("bounded[%q] = %#v, want %#v; fields = %v", key, bounded[key], fields[key], slices.Sorted(maps.Keys(bounded)))
+		}
+	}
+	if bounded["telemetry_truncated"] != true {
+		t.Fatalf("bounded fields = %#v, want truncation marker", bounded)
+	}
+	for _, key := range []string{"current_cmdline", "requested_path"} {
+		if value, ok := bounded[key].(string); ok && !strings.HasPrefix(expanding, value) {
+			t.Fatalf("bounded[%q] is not a prefix of the original value", key)
+		}
+	}
+	payload, err := marshalSingleRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "warn",
+		Message:   message,
+		Hostname:  "worker-1",
+		Fields:    bounded,
+	})
+	if err != nil {
+		t.Fatalf("marshalSingleRecord returned error: %v", err)
+	}
+	if len(payload) > maxSerializedRecordBytes {
+		t.Fatalf("serialized record bytes = %d, want <= %d", len(payload), maxSerializedRecordBytes)
+	}
+}
+
+func TestBoundValueDoesNotTraverseUnknownContainers(t *testing.T) {
+	t.Parallel()
+
+	value, truncated := boundValue(map[string]any{"large": strings.Repeat("x", 1<<20)})
+	if !truncated || value != "[value truncated]" {
+		t.Fatalf("boundValue() = %#v, %t, want placeholder and truncation", value, truncated)
+	}
+}
+
+func TestFileAuditFingerprintUsesFixedDigestAndRequestedPath(t *testing.T) {
+	t.Parallel()
+
+	first := fingerprintFileAuditRecord("file_access", map[string]any{
+		"requested_path":  "/tmp/first",
+		"current_cmdline": []string{strings.Repeat("x", 8<<10)},
+	})
+	second := fingerprintFileAuditRecord("file_access", map[string]any{
+		"requested_path":  "/tmp/second",
+		"current_cmdline": []string{strings.Repeat("x", 8<<10)},
+	})
+	if len(first) != sha256.Size {
+		t.Fatalf("fingerprint size = %d, want %d", len(first), sha256.Size)
+	}
+	if first == second {
+		t.Fatal("distinct requested paths produced the same file-audit fingerprint")
+	}
+}
+
+func TestExportBatchRejectsPayloadAboveByteLimit(t *testing.T) {
+	t.Parallel()
+
+	sink := &exportSink{}
+	oversized := json.RawMessage(`"` + strings.Repeat("a", maxSpoolPayloadBytes) + `"`)
+	if err := sink.sendBatch(context.Background(), []json.RawMessage{oversized}); err == nil || !strings.Contains(err.Error(), "export batch exceeds") {
+		t.Fatalf("sendBatch error = %v, want byte-limit rejection", err)
+	}
+}
+
+func TestUDPRecordIsAlwaysWithinPayloadBudget(t *testing.T) {
+	t.Parallel()
+
+	entry := record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   strings.Repeat("\x00", maxRecordMessageBytes),
+		Hostname:  "worker-1",
+		Fields: map[string]any{
+			"event":   "file_access",
+			"cmdline": []string{strings.Repeat("\x00", maxRecordStringBytes)},
+		},
+	}
+	payload, err := marshalUDPRecord(entry, 2048)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	if len(payload) > 2048 {
+		t.Fatalf("UDP JSON payload bytes = %d, want <= 2048", len(payload))
+	}
+	if !bytes.Contains(payload, []byte(`"syslog_udp_bounded":true`)) {
+		t.Fatalf("UDP JSON payload lacks bounding marker: %s", payload)
+	}
+}
+
+func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
+	t.Parallel()
+
+	message := strings.Repeat("m", 3072)
+	payload, err := marshalUDPRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   message,
+		Hostname:  "worker-1",
+		Fields:    map[string]any{"event": "exec"},
+	}, maxSyslogUDPPayloadBytes)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	if !bytes.Contains(payload, []byte(message)) || bytes.Contains(payload, []byte("syslog_udp_bounded")) {
+		t.Fatalf("record that fits was shortened: %d bytes", len(payload))
+	}
+
+	truncated, err := marshalUDPRecord(record{
+		Timestamp: "2026-08-31T12:00:00Z",
+		Level:     "info",
+		Message:   strings.Repeat("\x00", maxRecordMessageBytes),
+		Hostname:  "worker-1",
+		Fields:    map[string]any{"event": "exec"},
+	}, 2048)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	if !bytes.Contains(truncated, []byte(`"telemetry_truncated":true`)) {
+		t.Fatalf("shortened UDP message lacks truncation marker: %s", truncated)
 	}
 }
 
@@ -1338,7 +1573,7 @@ func writeClientCertificate(t *testing.T, dir string) (string, string) {
 
 	certPath := filepath.Join(dir, "client.crt")
 	keyPath := filepath.Join(dir, "client.key")
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		t.Fatalf("WriteFile cert: %v", err)
 	}
 	keyBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)

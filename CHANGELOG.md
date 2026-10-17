@@ -2,6 +2,60 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [Unreleased]
+
+## [1.7.0] - 2026-10-17
+
+### Upgrade notes
+
+- Process enrichment fields read from `/proc` or Kubernetes are now prefixed with `current_` (`current_cgroup`, `current_service`, `current_container_id`, `current_pod_uid`, `current_runtime`, `current_lsm_*`, `current_selinux_context`, `current_apparmor_*`, `current_cmdline`, `current_exe`), and `filename` is now `requested_path`. `exe` is only set on exec decision events, where it is the target executable. Update SIEM queries and dashboards that use the old names.
+- `domains.log` lines now contain `timestamp<TAB>hostname<TAB>domain`. TraceGuard still reads older two-column backups, but external parsers that take the second column must move to the third.
+- Detection rules can no longer match on mutable enrichment (`command_globs`, `services`, `cgroup_prefixes`, `container_ids`, `pod_uids`, `k8s_*`, `lsm_*`), and executable or file-path globs are limited to LSM events. Policies that use these keys fail validation and must be updated before upgrading.
+- Egress and bind rules reject an explicit `ports: [0]`, which matched every port. Omit `ports` to match any port, including ephemeral binds.
+- Stop the service and run `traceguard -unpin` before downgrading from a release that used `-pin-ebpf`.
+
+### Added
+
+- Added atomic exec, file-open, inet bind, AF_UNIX, and socket-option enforcement with allow-first policy semantics, dry-run decisions, hook readiness, rule attribution, schema coverage, and detection events.
+- Added observe-only TCP sockops lifecycle telemetry and opt-in eBPF runtime statistics.
+- Added optional bpffs persistence for maps, programs, and cgroup/tracepoint `bpf_link` objects, explicit unpinning, and an emergency-allow recovery mode; host-wide LSM links remain lifecycle-bound.
+- Added an extended golangci-lint v2 configuration with local Make targets and a dedicated pinned CI gate.
+- Added a protected startup hostname to text and JSON logs, event archives, blocked-event and domain logs, HTTPS exports, and syslog output.
+- Extended the cloud-metadata baseline to AWS IPv6 IMDS, ECS and EKS credential endpoints, and Alibaba Cloud, with per-cgroup/executable grouping and a one-hour cooldown so guest-agent polling cannot hide other processes.
+- Made `traceguard -doctor` evaluate the cached remote policy merged with the local overlay for exec/file readiness checks, and warn when no cache is available.
+- Added audit-only AF_UNIX `recvmsg` decisions; the kernel does not allow `cgroup/recvmsg_unix` to deny, so matching rules emit `unix_would_block` events and the receive proceeds.
+
+### Changed
+
+- Expanded the YAML v1 merge, cgroup reconciliation, doctor, metrics, example, and policy documentation for the new enforcement sections.
+- Split settings into two immutable 32-byte slots, an RCU-replaced selector, and a separate exact daemon identity; advanced the pin layout to version 5 while preserving the 632-byte event ABI.
+
+### Security
+
+- Made policy-slot reuse wait for in-kernel readers, bound telemetry and detection state, rejected enforcement-time resolver hostnames and stale-cache rollback, and tied daemon exemptions and `/proc` enrichment to process generations.
+- Matched bounded cgroup prefixes against kernel ancestry, rejected exact-cgroup deny rules and unsupported deep prefix roots, canonicalized IPv4-mapped resolver, enforcement, and detection prefixes before masking, rejected batched or multi-question DNS requests in block mode, and preserved DNS decisions at event time.
+- Bound daemon identity to the thread-group leader generation and made bpffs directory creation conditional on pinning so default systemd startup does not require writable bpffs.
+- Reject cgroup-scoped block rules in block and dry-run modes so cgroup deletion and recreation cannot create a fail-open policy window; cgroup-scoped allow exceptions remain fail-closed.
+- Restricted detection matching and grouping to event-time kernel identity and canonical LSM paths; mutable `/proc`/Kubernetes enrichment and syscall-requested path aliases remain telemetry-only.
+- Separated staleable DNS/listener socket-cache attribution from contemporaneous process identity, rejected incompatible UID and process-grouping detection scopes, and excluded plaintext DNS packet decisions from the identity-grouped denial baseline.
+- Replaced requested-path-dependent built-in detections with default-active cloud-metadata and direct-email egress baselines that use event-time socket data.
+- Embedded stable rule names in kernel enforcement events, made emergency mode clear persistent policy before startup sinks, and kept LSM links unpinned so delayed events and recovery restarts cannot inherit unsafe state.
+- Refused unpinned startup and readiness while a TraceGuard pin root exists, preventing persistent policies from remaining active beside a second unpinned collection and providing explicit `-unpin` recovery guidance.
+- Matched each socket-option name only at its own level instead of crossing every listed level with every listed name, which also matched unrelated options with the same number (for example `SOL_IP` option 36, `IP_DROP_MEMBERSHIP`). Rules must now list each name's level and may not list unused levels; the `tcp` level is no longer accepted because no supported option uses it.
+- Evaluated `O_RDWR` file opens against both read and write rules, so a `read` block rule can no longer be bypassed by opening the file read-write.
+- Required the bind6 hook for IPv4 bind rules and evaluated wildcard `::` binds against IPv4 wildcard policy, closing IPv4-mapped and dual-stack bypasses of IPv4-only bind rules.
+- Refused exec and file enforcement when the daemon runs outside the host PID or time namespace, where its LSM self-exemption cannot identify it.
+- Removed a newly created pin set when startup fails, including failures after the monitor starts such as an invalid policy, so pinned links cannot keep policy attached without a daemon or block later unpinned starts.
+- Committed fetched remote policy to the cache and conditional-request state only after the full effective policy validates, and kept the last accepted remote base during refresh outages so local overlay changes still apply on `SIGHUP`.
+- Compiled detection rules before the kernel policy commit and reported hook health only after the commit succeeds.
+- Sent syslog UDP records unshortened when they fit in one datagram, and marked shortened messages as truncated.
+- Validated syslog APP-NAME and HOSTNAME as RFC 5424 printable US-ASCII with length limits, and stopped event export URL parse errors from echoing secrets in the URL.
+- Joined policy refresh, reload, cgroup reconciliation, and statistics workers before closing eBPF objects at shutdown, so a late reload cannot write to closed or reused map descriptors.
+- Grouped exec denials by the calling program instead of the denied target, so the denial-burst baseline fires for one process trying several blocked binaries.
+- Preserved other sockops programs' callback flags when enabling TraceGuard's retransmit and state callbacks.
+- Bounded telemetry by admitting the smallest fields first and shortening oversized strings, so process-controlled command lines and paths cannot evict identity fields from logs and exports.
+- Added aggregate policy limits, escaped DNS labels in telemetry, redacted credentials and URL secrets from diagnostics, and changed the packaged metrics listener to loopback.
+
 ## [1.6.0] - 2026-07-31
 
 ### Added

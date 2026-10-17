@@ -41,6 +41,27 @@ func TestParsePolicyRulesSupportsDNSPolicyEntries(t *testing.T) {
 	}
 }
 
+func TestParsePolicyRulesCanonicalizesMappedResolverCIDRsBeforeMasking(t *testing.T) {
+	t.Parallel()
+
+	if _, err := ParsePolicyRules([]string{"::ffff:192.0.2.129/95"}, nil); err == nil {
+		t.Fatal("ParsePolicyRules accepted an ambiguous mapped resolver prefix below /96")
+	}
+	rules, err := ParsePolicyRules([]string{"::ffff:192.0.2.129/120"}, nil)
+	if err != nil {
+		t.Fatalf("ParsePolicyRules rejected mapped resolver subnet: %v", err)
+	}
+	want := netip.MustParsePrefix("192.0.2.0/24")
+	if len(rules.BlockEndpointCIDRs) != 2 {
+		t.Fatalf("BlockEndpointCIDRs = %#v, want DoH and DoT entries", rules.BlockEndpointCIDRs)
+	}
+	for _, endpoint := range rules.BlockEndpointCIDRs {
+		if endpoint.Prefix != want {
+			t.Errorf("resolver prefix = %s, want %s", endpoint.Prefix, want)
+		}
+	}
+}
+
 func TestPolicyAllowRulesTakePrecedence(t *testing.T) {
 	t.Parallel()
 

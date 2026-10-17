@@ -38,12 +38,17 @@ type exportSink struct {
 }
 
 func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*exportSink, error) {
-	parsed, err := neturl.Parse(cfg.ExportURL)
+	// Never include the raw URL or the *url.Error in returned errors: the
+	// query string may carry secrets such as access tokens.
+	parsed, err := neturl.Parse(strings.TrimSpace(cfg.ExportURL))
 	if err != nil {
-		return nil, fmt.Errorf("parse export url: %w", err)
+		return nil, errors.New("export url is not valid")
 	}
 	if parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, fmt.Errorf("export url must use https://")
+	}
+	if parsed.User != nil {
+		return nil, errors.New("export url must not contain user credentials; use the authorization header or mTLS")
 	}
 
 	// The recorder owns the export worker lifetime. Keep it alive through run
@@ -109,6 +114,7 @@ func (e *exportSink) run(ctx context.Context) {
 	defer replayTicker.Stop()
 
 	batch := make([]json.RawMessage, 0, exportBatchSize)
+	batchBytes := 2 // JSON array brackets.
 	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
@@ -130,6 +136,19 @@ func (e *exportSink) run(ctx context.Context) {
 			e.metrics.SetEventExportLastSuccess()
 		}
 		batch = batch[:0]
+		batchBytes = 2
+	}
+	appendPayload := func(flushCtx context.Context, payload json.RawMessage) {
+		separator := 0
+		if len(batch) > 0 {
+			separator = 1
+		}
+		if len(batch) > 0 && batchBytes+separator+len(payload) > maxSpoolPayloadBytes {
+			flush(flushCtx)
+			separator = 0
+		}
+		batch = append(batch, payload)
+		batchBytes += separator + len(payload)
 	}
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), exportShutdownFlush)
@@ -137,7 +156,7 @@ func (e *exportSink) run(ctx context.Context) {
 		for {
 			select {
 			case payload := <-e.queue:
-				batch = append(batch, payload)
+				appendPayload(shutdownCtx, payload)
 				e.updateQueueDepth()
 				if len(batch) >= exportBatchSize {
 					flush(shutdownCtx)
@@ -157,7 +176,7 @@ func (e *exportSink) run(ctx context.Context) {
 			shutdown()
 			return
 		case payload := <-e.queue:
-			batch = append(batch, payload)
+			appendPayload(ctx, payload)
 			e.updateQueueDepth()
 			if len(batch) >= exportBatchSize {
 				flush(ctx)
@@ -204,6 +223,9 @@ func (e *exportSink) sendBatch(ctx context.Context, batch []json.RawMessage) err
 	payload, err := json.Marshal(batch)
 	if err != nil {
 		return err
+	}
+	if len(payload) > maxSpoolPayloadBytes {
+		return fmt.Errorf("export batch exceeds %d bytes", maxSpoolPayloadBytes)
 	}
 	return e.sendPayload(ctx, payload)
 }
@@ -424,12 +446,14 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 	return nil
 }
 
-func (s *spoolStore) files() ([]string, error) {
+func (s *spoolStore) files() (files []string, listErr error) {
 	dir, err := safefile.OpenBeneath(int(s.dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() {
+		listErr = errors.Join(listErr, dir.Close())
+	}()
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
@@ -457,17 +481,25 @@ func (s *spoolStore) Close() error {
 }
 
 func marshalSingleRecord(entry record) (json.RawMessage, error) {
-	payload := make(map[string]any, len(entry.Fields)+3)
+	payload := make(map[string]any, len(entry.Fields)+4)
 	payload["timestamp"] = entry.Timestamp
 	payload["level"] = entry.Level
 	payload["message"] = entry.Message
+	payload["hostname"] = entry.Hostname
 	for key, value := range entry.Fields {
-		if key == "timestamp" || key == "level" || key == "message" {
+		if key == "timestamp" || key == "level" || key == "message" || key == "hostname" {
 			continue
 		}
 		payload[key] = value
 	}
-	return json.Marshal(payload)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > maxSerializedRecordBytes {
+		return nil, fmt.Errorf("serialized event record exceeds %d bytes", maxSerializedRecordBytes)
+	}
+	return encoded, nil
 }
 
 func cloneFields(fields map[string]any) map[string]any {

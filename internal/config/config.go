@@ -18,7 +18,7 @@ const (
 	defaultPolicyCachePath = "/var/lib/traceguard/policy.yaml"
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
 	defaultLogFormat       = "json"
-	defaultMetricsAddr     = ":9091"
+	defaultMetricsAddr     = "127.0.0.1:9091"
 	defaultProcessCacheTTL = 5 * time.Minute
 	defaultSyslogFacility  = "local0"
 	defaultSyslogTag       = "traceguard"
@@ -32,6 +32,10 @@ const (
 type Config struct {
 	Block                    bool
 	DryRun                   bool
+	EmergencyAllow           bool
+	PinEBPF                  bool
+	Unpin                    bool
+	EBPFStats                bool
 	PolicyPath               string
 	PolicyURL                string
 	PolicyCachePath          string
@@ -77,6 +81,18 @@ func Parse() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	emergencyAllowDefault, err := envBool("TRACEGUARD_EMERGENCY_ALLOW", false)
+	if err != nil {
+		return Config{}, err
+	}
+	pinEBPFDefault, err := envBool("TRACEGUARD_PIN_EBPF", false)
+	if err != nil {
+		return Config{}, err
+	}
+	ebpfStatsDefault, err := envBool("TRACEGUARD_EBPF_STATS", false)
+	if err != nil {
+		return Config{}, err
+	}
 	policyRefreshDefault, err := envDuration("TRACEGUARD_POLICY_REFRESH_INTERVAL", defaultPolicyRefresh)
 	if err != nil {
 		return Config{}, err
@@ -109,8 +125,12 @@ func Parse() (Config, error) {
 	cfg := Config{}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
-	fs.BoolVar(&cfg.Block, "block", blockDefault, "enforce configured DNS and outbound egress block decisions")
-	fs.BoolVar(&cfg.DryRun, "dry-run", dryRunDefault, "evaluate DNS and outbound egress policy and log would-block decisions without enforcing drops")
+	fs.BoolVar(&cfg.Block, "block", blockDefault, "enforce configured DNS and kernel policy block decisions")
+	fs.BoolVar(&cfg.DryRun, "dry-run", dryRunDefault, "evaluate policy and log would-block decisions without enforcing denials")
+	fs.BoolVar(&cfg.EmergencyAllow, "emergency-allow", emergencyAllowDefault, "clear persistent policy, ignore policy sources, and keep enforcement fail-open")
+	fs.BoolVar(&cfg.PinEBPF, "pin-ebpf", pinEBPFDefault, "pin eBPF maps, programs, and cgroup/tracepoint links across service restarts")
+	fs.BoolVar(&cfg.Unpin, "unpin", false, "remove TraceGuard eBPF pins and exit")
+	fs.BoolVar(&cfg.EBPFStats, "ebpf-stats", ebpfStatsDefault, "collect eBPF runtime statistics (has a kernel-wide performance cost)")
 	fs.StringVar(&cfg.PolicyPath, "policy-path", envString("TRACEGUARD_POLICY_PATH", ""), "absolute path to a strict YAML v1 policy overlay")
 	fs.StringVar(&cfg.PolicyURL, "policy-url", envString("TRACEGUARD_POLICY_URL", ""), "HTTPS URL that returns a strict YAML v1 base policy")
 	fs.StringVar(&cfg.PolicyCachePath, "policy-cache-path", envString("TRACEGUARD_POLICY_CACHE_PATH", defaultPolicyCachePath), "absolute path to the cached remote YAML policy")
@@ -119,10 +139,10 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.PolicyCAPath, "policy-ca-path", envString("TRACEGUARD_POLICY_CA_PATH", ""), "path to an optional CA bundle for the remote YAML policy")
 	fs.StringVar(&cfg.PolicyClientCert, "policy-client-cert", envString("TRACEGUARD_POLICY_CLIENT_CERT", ""), "path to an optional client certificate for the remote YAML policy")
 	fs.StringVar(&cfg.PolicyClientKey, "policy-client-key", envString("TRACEGUARD_POLICY_CLIENT_KEY", ""), "path to an optional client key for the remote YAML policy")
-	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for egress attachment")
+	fs.StringVar(&cfg.CgroupPath, "cgroup-path", envString("TRACEGUARD_CGROUP_PATH", defaultCgroupPath), "cgroup v2 path used for cgroup eBPF attachments; LSM MAC hooks remain host-wide")
 	fs.StringVar(&cfg.LogPath, "log-path", envString("TRACEGUARD_LOG_PATH", defaultLogPath), "absolute path to the primary log file")
 	fs.StringVar(&cfg.LogFormat, "log-format", envString("TRACEGUARD_LOG_FORMAT", defaultLogFormat), "log format: text or json")
-	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", defaultMetricsAddr), "listen address for /metrics and /health, for example :9091")
+	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", defaultMetricsAddr), "listen address for /metrics and /health, for example 127.0.0.1:9091")
 	fs.StringVar(&cfg.EventArchivePath, "event-archive-path", envString("TRACEGUARD_EVENT_ARCHIVE_PATH", ""), "absolute path to an optional JSONL event archive")
 	fs.StringVar(&cfg.EventExportURL, "event-export-url", envString("TRACEGUARD_EVENT_EXPORT_URL", ""), "HTTPS URL to receive JSON event POSTs")
 	fs.StringVar(&cfg.EventExportAuthorization, "event-export-authorization", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", ""), "optional Authorization header value for HTTPS event export, for example 'Bearer token'")
@@ -153,7 +173,7 @@ func Parse() (Config, error) {
 		return Config{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), ", "))
 	}
 	normalizeKubernetesConfig(&cfg)
-	if cfg.PrintVersion || cfg.Doctor {
+	if cfg.PrintVersion || cfg.Doctor || cfg.Unpin {
 		return cfg, nil
 	}
 
@@ -161,17 +181,20 @@ func Parse() (Config, error) {
 		return Config{}, errors.New("policy-refresh-interval must be positive")
 	}
 
-	if (cfg.Block || cfg.DryRun) && cfg.PolicyPath == "" && cfg.PolicyURL == "" {
+	if !cfg.EmergencyAllow && (cfg.Block || cfg.DryRun) && cfg.PolicyPath == "" && cfg.PolicyURL == "" {
 		return Config{}, errors.New("block and dry-run modes require at least one policy source")
 	}
 
 	if cfg.PolicyURL != "" {
 		parsed, err := neturl.Parse(strings.TrimSpace(cfg.PolicyURL))
 		if err != nil {
-			return Config{}, fmt.Errorf("policy-url: %w", err)
+			return Config{}, errors.New("policy-url is not a valid URL")
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
 			return Config{}, errors.New("policy-url must use https:// and include a host")
+		}
+		if parsed.User != nil {
+			return Config{}, errors.New("policy-url must not contain user credentials; use policy-authorization or mTLS")
 		}
 	}
 
@@ -231,10 +254,13 @@ func Parse() (Config, error) {
 	if cfg.EventExportURL != "" {
 		parsed, err := neturl.Parse(strings.TrimSpace(cfg.EventExportURL))
 		if err != nil {
-			return Config{}, fmt.Errorf("event-export-url: %w", err)
+			return Config{}, errors.New("event-export-url is not a valid URL")
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
 			return Config{}, errors.New("event-export-url must use https://")
+		}
+		if parsed.User != nil {
+			return Config{}, errors.New("event-export-url must not contain user credentials; use event-export-authorization or mTLS")
 		}
 		if (cfg.EventExportClientCert == "") != (cfg.EventExportClientKey == "") {
 			return Config{}, errors.New("event-export-client-cert and event-export-client-key must be set together")
@@ -254,10 +280,13 @@ func Parse() (Config, error) {
 		}
 		parsed, err := neturl.Parse(strings.TrimSpace(cfg.KubernetesAPIURL))
 		if err != nil {
-			return Config{}, fmt.Errorf("kubernetes-api-url: %w", err)
+			return Config{}, errors.New("kubernetes-api-url is not a valid URL")
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
 			return Config{}, errors.New("kubernetes-api-url must use https://")
+		}
+		if parsed.User != nil {
+			return Config{}, errors.New("kubernetes-api-url must not contain user credentials; use the service-account token")
 		}
 		if !filepath.IsAbs(cfg.KubernetesTokenPath) {
 			return Config{}, errors.New("kubernetes-token-path must be an absolute path")

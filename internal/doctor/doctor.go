@@ -22,6 +22,7 @@ import (
 
 var defaultChecks = environmentChecks{
 	stat:                      os.Stat,
+	lstat:                     os.Lstat,
 	readFile:                  os.ReadFile,
 	statfs:                    unix.Statfs,
 	geteuid:                   os.Geteuid,
@@ -32,6 +33,7 @@ var defaultChecks = environmentChecks{
 
 type environmentChecks struct {
 	stat                      func(string) (fs.FileInfo, error)
+	lstat                     func(string) (fs.FileInfo, error)
 	readFile                  func(string) ([]byte, error)
 	statfs                    func(string, *unix.Statfs_t) error
 	geteuid                   func() int
@@ -47,6 +49,7 @@ func Run(cfg config.Config, w io.Writer) error {
 func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error {
 	var failures int
 	var writeErr error
+	var localPolicy *policyconfig.Document
 
 	check := func(ok bool, name, detail string) {
 		state := "PASS"
@@ -55,6 +58,11 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 			failures++
 		}
 		if _, err := fmt.Fprintf(w, "%s %s: %s\n", state, name, detail); err != nil {
+			writeErr = errors.Join(writeErr, err)
+		}
+	}
+	info := func(level, name, detail string) {
+		if _, err := fmt.Fprintf(w, "%s %s: %s\n", level, name, detail); err != nil {
 			writeErr = errors.Join(writeErr, err)
 		}
 	}
@@ -102,17 +110,50 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 		} else if document, err := policyconfig.Parse(payload); err != nil {
 			check(false, "policy-parse", err.Error())
 		} else {
+			localPolicy = &document
 			check(true, "policy-path", cfg.PolicyPath)
-			check(true, "policy-parse", fmt.Sprintf("version=%d egress_rules=%d detections=%d", document.Version, len(document.Egress.Rules), len(document.DetectionRules)))
+			check(true, "policy-parse", fmt.Sprintf("version=%d egress_rules=%d exec_rules=%d file_rules=%d bind_rules=%d unix_rules=%d sockopt_rules=%d detections=%d",
+				document.Version, len(document.Egress.Rules), len(document.Exec.Rules), len(document.File.Rules),
+				len(document.Bind.Rules), len(document.Unix.Rules), len(document.Sockopt.Rules), len(document.DetectionRules)))
 		}
 	} else {
 		check(true, "policy-path", "not configured")
 	}
+	var remotePolicy *policyconfig.Document
 	if cfg.PolicyURL != "" {
 		parsed, err := url.Parse(cfg.PolicyURL)
-		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "policy-url", cfg.PolicyURL)
+		check(err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil,
+			"policy-url", config.SanitizeURL(cfg.PolicyURL))
+		// Doctor does not fetch the remote policy, so the cached copy the daemon
+		// falls back to is the best available view of the remote base policy.
+		if document, err := readPolicyFile(env, cfg.PolicyCachePath); err != nil {
+			info("WARN", "policy-remote-cache", fmt.Sprintf("remote policy is not fetched by doctor and the cache is unavailable (%v); exec/file enforcement checks cover only the local policy", err))
+		} else {
+			remotePolicy = &document
+			check(true, "policy-remote-cache", fmt.Sprintf("%s exec_rules=%d file_rules=%d", cfg.PolicyCachePath, len(document.Exec.Rules), len(document.File.Rules)))
+		}
 	} else {
 		check(true, "policy-url", "not configured")
+	}
+	if cfg.PinEBPF {
+		bpffsRoot := filepath.Dir(ebpfmonitor.DefaultPinPath)
+		bpffsInfo, statErr := env.stat(bpffsRoot)
+		var bpffs unix.Statfs_t
+		statfsErr := env.statfs(bpffsRoot, &bpffs)
+		ready := statErr == nil && bpffsInfo.IsDir() && statfsErr == nil && bpffs.Type == int64(unix.BPF_FS_MAGIC)
+		detail := fmt.Sprintf("%s (bpffs=%t)", ebpfmonitor.DefaultPinPath, statfsErr == nil && bpffs.Type == int64(unix.BPF_FS_MAGIC))
+		if statErr != nil {
+			detail = statErr.Error()
+		} else if statfsErr != nil {
+			detail = statfsErr.Error()
+		}
+		check(ready, "pin-dir", detail)
+	} else if _, err := env.lstat(ebpfmonitor.DefaultPinPath); err == nil {
+		check(false, "pin-dir", fmt.Sprintf("existing TraceGuard eBPF pins at %s may still be active; stop the previous daemon and run traceguard -unpin before starting without -pin-ebpf", ebpfmonitor.DefaultPinPath))
+	} else if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrNotExist) {
+		check(true, "pin-dir", "disabled; no existing TraceGuard pins")
+	} else {
+		check(false, "pin-dir", fmt.Sprintf("check for existing eBPF pins at %s: %v", ebpfmonitor.DefaultPinPath, err))
 	}
 	for _, target := range []struct {
 		path string
@@ -138,12 +179,16 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	if cfg.MetricsAddr != "" {
 		_, err := net.ResolveTCPAddr("tcp", cfg.MetricsAddr)
 		check(err == nil, "metrics-addr", cfg.MetricsAddr)
+		if err == nil && !isLoopbackListenAddress(cfg.MetricsAddr) {
+			info("WARN", "metrics-exposure", "listener is not loopback-only; protect unauthenticated /metrics and /health with a trusted network boundary")
+		}
 	} else {
 		check(true, "metrics-addr", "disabled")
 	}
 	if cfg.EventExportURL != "" {
 		parsed, err := url.Parse(cfg.EventExportURL)
-		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "event-export-url", cfg.EventExportURL)
+		check(err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil,
+			"event-export-url", config.SanitizeURL(cfg.EventExportURL))
 		if cfg.EventExportCAPath != "" {
 			if info, err := env.stat(cfg.EventExportCAPath); err != nil {
 				check(false, "event-export-ca-path", err.Error())
@@ -170,7 +215,8 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	}
 	if cfg.EventSyslogURL != "" {
 		parsed, err := url.Parse(cfg.EventSyslogURL)
-		check(err == nil && validSyslogURL(parsed), "event-syslog-url", cfg.EventSyslogURL)
+		check(err == nil && validSyslogURL(parsed) && parsed.User == nil,
+			"event-syslog-url", config.SanitizeURL(cfg.EventSyslogURL))
 		check(validSyslogFacility(cfg.EventSyslogFacility), "event-syslog-facility", cfg.EventSyslogFacility)
 		check(validSyslogTag(cfg.EventSyslogTag), "event-syslog-tag", cfg.EventSyslogTag)
 		check(cfg.EventSyslogTimeout > 0, "event-syslog-timeout", cfg.EventSyslogTimeout.String())
@@ -206,8 +252,34 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "kernel-at-least-7.1", enabledDetail(features.KernelAtLeast71))
 	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
 	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
+	check(true, "lsm-program-type", enabledDetail(features.LSMProgramType))
+	info("INFO", "lsm-exec-attached", "verified by the real optional attach at daemon startup")
+	info("INFO", "lsm-file-attached", "verified by the real optional attach at daemon startup")
+	info("INFO", "cgroup-bind", "bind4 and bind6 are verified independently at daemon startup")
+	info("INFO", "cgroup-unix", "connect, sendmsg, and recvmsg are verified independently at daemon startup")
+	info("INFO", "cgroup-sockopt", "verified by the real optional attach at daemon startup")
 	check(true, "kernel-bpf-object", emptyDetail(features.SelectedObject, "none"))
 	check(true, "kernel-enhanced-telemetry", enhancedTelemetryDetail(features))
+	if effective, ok := effectivePolicy(remotePolicy, localPolicy, check); ok {
+		execBlocks := policyBlockRuleCount(effective.Exec.Rules, func(rule policyconfig.PathRule) string { return rule.Action })
+		fileBlocks := policyBlockRuleCount(effective.File.Rules, func(rule policyconfig.FileRule) string { return rule.Action })
+		lsmScopeOK := execBlocks+fileBlocks == 0 || filepath.Clean(cfg.CgroupPath) == "/sys/fs/cgroup"
+		check(lsmScopeOK, "lsm-scope", "exec/file MAC enforcement is host-wide and requires cgroup-path /sys/fs/cgroup")
+		if cfg.Block && !cfg.DryRun {
+			check(execBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "exec-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
+			check(fileBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "file-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
+		}
+		for _, rule := range effective.Exec.Rules {
+			if rule.Action == "block" && len(rule.Selectors.UIDs) == 0 && len(rule.Selectors.CgroupPaths) == 0 && len(rule.Selectors.CgroupPrefixes) == 0 {
+				info("WARN", "exec-host-wide-rule", fmt.Sprintf("rule %s has no selectors", rule.ID))
+			}
+		}
+		for _, rule := range effective.File.Rules {
+			if rule.Action == "block" && len(rule.Selectors.UIDs) == 0 && len(rule.Selectors.CgroupPaths) == 0 && len(rule.Selectors.CgroupPrefixes) == 0 {
+				info("WARN", "file-host-wide-rule", fmt.Sprintf("rule %s has no selectors", rule.ID))
+			}
+		}
+	}
 
 	check(cfg.LogFormat == "text" || cfg.LogFormat == "json", "log-format", cfg.LogFormat)
 	check(cfg.ProcessCacheTTL > 0, "process-cache-ttl", cfg.ProcessCacheTTL.String())
@@ -216,7 +288,8 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "apparmor", apparmorStatus(env))
 	if cfg.KubernetesEnrich {
 		parsed, err := url.Parse(cfg.KubernetesAPIURL)
-		check(err == nil && parsed.Scheme == "https" && parsed.Host != "", "kubernetes-api-url", cfg.KubernetesAPIURL)
+		check(err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil,
+			"kubernetes-api-url", config.SanitizeURL(cfg.KubernetesAPIURL))
 		if info, err := env.stat(cfg.KubernetesTokenPath); err != nil {
 			check(false, "kubernetes-token-path", err.Error())
 		} else {
@@ -247,4 +320,81 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 		return fmt.Errorf("write doctor summary: %w", err)
 	}
 	return nil
+}
+
+func isLoopbackListenAddress(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil || host == "" {
+		return false
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func policyBlockRuleCount[T any](rules []T, action func(T) string) int {
+	count := 0
+	for _, rule := range rules {
+		if action(rule) == "block" {
+			count++
+		}
+	}
+	return count
+}
+
+// readPolicyFile reads and strictly parses a policy file through the injected
+// environment, applying the same size limit as the daemon.
+func readPolicyFile(env environmentChecks, path string) (policyconfig.Document, error) {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return policyconfig.Document{}, errors.New("path must be a non-empty absolute path")
+	}
+	info, err := env.stat(path)
+	if err != nil {
+		return policyconfig.Document{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return policyconfig.Document{}, fmt.Errorf("%s must be a regular file", path)
+	}
+	if info.Size() > policyconfig.MaxDocumentBytes {
+		return policyconfig.Document{}, fmt.Errorf("%s exceeds %d bytes", path, policyconfig.MaxDocumentBytes)
+	}
+	payload, err := env.readFile(path)
+	if err != nil {
+		return policyconfig.Document{}, err
+	}
+	document, err := policyconfig.Parse(payload)
+	if err != nil {
+		return policyconfig.Document{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return document, nil
+}
+
+// effectivePolicy merges the cached remote base policy with the local overlay
+// exactly as the daemon does, so enforcement readiness checks see rules from
+// either source and honour disabled_rule_ids. It reports false when no policy
+// source was loaded or the merge failed.
+func effectivePolicy(remote, local *policyconfig.Document, check func(bool, string, string)) (policyconfig.Bundle, bool) {
+	if remote == nil && local == nil {
+		return policyconfig.Bundle{}, false
+	}
+	base := policyconfig.Document{Version: policyconfig.Version}
+	if remote != nil {
+		base = *remote
+	}
+	overlay := policyconfig.Document{Version: policyconfig.Version}
+	if local != nil {
+		overlay = *local
+	}
+	bundle, err := policyconfig.Merge(base, overlay)
+	if err != nil {
+		check(false, "policy-effective", err.Error())
+		return policyconfig.Bundle{}, false
+	}
+	if remote != nil {
+		check(true, "policy-effective", fmt.Sprintf("cached remote base merged with local overlay: exec_rules=%d file_rules=%d", len(bundle.Exec.Rules), len(bundle.File.Rules)))
+	}
+	return bundle, true
 }

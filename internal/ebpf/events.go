@@ -17,7 +17,8 @@ const (
 	commSize            = 16
 	domainSize          = 256
 	maxDNSWireNameBytes = 255
-	filenameSize        = 256
+	filenameSize        = 248
+	pathTruncatedFlag   = uint32(1 << 31)
 	timestampOffsetTTL  = time.Second
 )
 
@@ -45,35 +46,47 @@ const (
 	EventFileAccess
 	EventEgressBlocked
 	EventEgressWouldBlock
+	EventExecBlocked
+	EventExecWouldBlock
+	EventFileBlocked
+	EventFileWouldBlock
+	EventBindBlocked
+	EventBindWouldBlock
+	EventUnixBlocked
+	EventUnixWouldBlock
+	EventSockoptBlocked
+	EventSockoptWouldBlock
+	EventSockOps
 )
 
 type rawEvent struct {
-	TimestampNS  uint64
-	Kind         uint32
-	PID          uint32
-	Comm         [commSize]byte
-	Domain       [domainSize]byte
-	Filename     [filenameSize]byte
-	Transport    uint8
-	Family       uint8
-	SocketProto  uint8
-	Attribution  uint8
-	SocketHook   uint8
-	Direction    uint8
-	Port         uint16
-	LocalPort    uint16
-	CPad         uint16
-	FileFlags    uint32
-	FileMode     uint32
-	KernelUID    uint32
-	EventSource  uint32
-	FeatureSet   uint32
-	UIDSource    uint32
-	RuleID       uint32
-	CgroupID     uint64
-	SocketCookie uint64
-	Addr         [16]byte
-	LocalAddr    [16]byte
+	TimestampNS      uint64
+	Kind             uint32
+	PID              uint32
+	Comm             [commSize]byte
+	Domain           [domainSize]byte
+	Filename         [filenameSize]byte
+	ProcessStartTime uint64
+	Transport        uint8
+	Family           uint8
+	SocketProto      uint8
+	Attribution      uint8
+	SocketHook       uint8
+	Direction        uint8
+	Port             uint16
+	LocalPort        uint16
+	CPad             uint16
+	FileFlags        uint32
+	FileMode         uint32
+	KernelUID        uint32
+	EventSource      uint32
+	FeatureSet       uint32
+	UIDSource        uint32
+	RuleID           uint32
+	CgroupID         uint64
+	SocketCookie     uint64
+	Addr             [16]byte
+	LocalAddr        [16]byte
 }
 
 type Event struct {
@@ -90,6 +103,7 @@ type Event struct {
 	LocalPort        uint16
 	FileFlags        uint32
 	FileMode         uint32
+	PathTruncated    bool
 	KernelUID        uint32
 	CgroupID         uint64
 	SocketCookie     uint64
@@ -103,6 +117,8 @@ type Event struct {
 	UIDSource        string
 	RuleNumber       uint32
 	RuleID           string
+	ProcessStartTime uint64
+	PolicyDecision   string
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -122,20 +138,21 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		return Event{}, err
 	}
 
-	return Event{
+	event := Event{
 		Timestamp:        timestamp,
 		Kind:             raw.Kind,
 		PID:              raw.PID,
 		Comm:             zeroTerminated(raw.Comm[:]),
-		Domain:           decodeQName(raw.Domain[:]),
 		Filename:         zeroTerminated(raw.Filename[:]),
+		ProcessStartTime: raw.ProcessStartTime,
 		Transport:        transportName(raw.Transport),
 		Address:          decodeAddress(raw.Family, raw.Addr),
 		Port:             raw.Port,
 		LocalAddress:     decodeAddress(raw.Family, raw.LocalAddr),
 		LocalPort:        raw.LocalPort,
 		FileFlags:        raw.FileFlags,
-		FileMode:         raw.FileMode,
+		FileMode:         raw.FileMode &^ pathTruncatedFlag,
+		PathTruncated:    isPathEnforcementEvent(raw.Kind) && raw.FileMode&pathTruncatedFlag != 0,
 		KernelUID:        raw.KernelUID,
 		CgroupID:         raw.CgroupID,
 		SocketCookie:     raw.SocketCookie,
@@ -147,8 +164,62 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		EventSource:      eventSourceName(raw.EventSource),
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
-		RuleNumber:       raw.RuleID,
-	}, nil
+	}
+	if isDNSPolicyEvent(raw.Kind) {
+		event.Domain = decodeQName(raw.Domain[:])
+		event.PolicyDecision = policyDecisionName(raw.RuleID)
+	} else {
+		event.RuleNumber = raw.RuleID
+		if isEnforcementPolicyEvent(raw.Kind) {
+			event.RuleID = zeroTerminated(raw.Domain[:])
+		}
+	}
+	return event, nil
+}
+
+func isEnforcementPolicyEvent(kind uint32) bool {
+	switch kind {
+	case EventEgressBlocked, EventEgressWouldBlock,
+		EventExecBlocked, EventExecWouldBlock,
+		EventFileBlocked, EventFileWouldBlock,
+		EventBindBlocked, EventBindWouldBlock,
+		EventUnixBlocked, EventUnixWouldBlock,
+		EventSockoptBlocked, EventSockoptWouldBlock:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPathEnforcementEvent(kind uint32) bool {
+	switch kind {
+	case EventExecBlocked, EventExecWouldBlock,
+		EventFileBlocked, EventFileWouldBlock,
+		EventUnixBlocked, EventUnixWouldBlock:
+		return true
+	default:
+		return false
+	}
+}
+
+func isDNSPolicyEvent(kind uint32) bool {
+	switch kind {
+	case EventDNS, EventBlocked, EventResolver, EventResolverBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+func policyDecisionName(decision uint32) string {
+	switch decision {
+	case 1:
+		return "allow"
+	case 2:
+		return "block"
+	default:
+		return "none"
+	}
 }
 
 func eventTimestamp(timestampNS uint64) (time.Time, error) {
@@ -255,26 +326,52 @@ func decodeQName(raw []byte) string {
 	}
 
 	parts := make([]string, 0, 8)
+	terminated := false
 	for offset := 0; offset < len(raw); {
 		labelLen := int(raw[offset])
 		offset++
 
 		if labelLen == 0 {
+			terminated = true
 			break
 		}
 		if labelLen > 63 || offset+labelLen > len(raw) {
 			return ""
 		}
 
-		parts = append(parts, string(raw[offset:offset+labelLen]))
+		parts = append(parts, escapeDNSLabel(raw[offset:offset+labelLen]))
 		offset += labelLen
+	}
+	if !terminated {
+		return ""
 	}
 
 	return strings.Join(parts, ".")
 }
 
+func escapeDNSLabel(label []byte) string {
+	var builder strings.Builder
+	for _, value := range label {
+		switch {
+		case value == '.' || value == '\\':
+			builder.WriteByte('\\')
+			builder.WriteByte(value)
+		case value >= 0x21 && value <= 0x7e:
+			builder.WriteByte(value)
+		default:
+			const hex = "0123456789abcdef"
+			builder.WriteString("\\x")
+			builder.WriteByte(hex[value>>4])
+			builder.WriteByte(hex[value&0x0f])
+		}
+	}
+	return builder.String()
+}
+
 func decodeAddress(family uint8, raw [16]byte) string {
 	switch family {
+	case 1:
+		return ""
 	case 4:
 		if bytes.Equal(raw[:4], make([]byte, 4)) {
 			return ""
@@ -292,6 +389,8 @@ func decodeAddress(family uint8, raw [16]byte) string {
 
 func socketFamilyName(family uint8) string {
 	switch family {
+	case 1:
+		return "unix"
 	case 4:
 		return "ipv4"
 	case 6:
@@ -362,6 +461,20 @@ func socketHookName(code uint8) string {
 		return "cgroup_post_bind4"
 	case 10:
 		return "cgroup_post_bind6"
+	case 11:
+		return "cgroup_bind4"
+	case 12:
+		return "cgroup_bind6"
+	case 13:
+		return "cgroup_unix_connect"
+	case 14:
+		return "cgroup_unix_sendmsg"
+	case 15:
+		return "cgroup_unix_recvmsg"
+	case 16:
+		return "cgroup_setsockopt"
+	case 17:
+		return "sockops"
 	default:
 		return ""
 	}
@@ -377,6 +490,12 @@ func eventSourceName(code uint32) string {
 		return "cgroup-sock-addr"
 	case 4:
 		return "cgroup-sock"
+	case 5:
+		return "lsm-mac"
+	case 6:
+		return "sockops"
+	case 7:
+		return "cgroup-sockopt"
 	default:
 		return ""
 	}
@@ -397,6 +516,8 @@ func uidSourceName(code uint32) string {
 	switch code {
 	case 1:
 		return "kernel"
+	case 2:
+		return "socket-cache"
 	default:
 		return ""
 	}

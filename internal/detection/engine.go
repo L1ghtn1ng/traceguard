@@ -1,7 +1,11 @@
 package detection
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"maps"
+	"math"
 	"net/netip"
 	"path/filepath"
 	"slices"
@@ -9,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 	"github.com/L1ghtn1ng/traceguard/internal/policy"
 )
 
@@ -30,13 +35,17 @@ type Alert struct {
 }
 
 type Engine struct {
-	mu        sync.Mutex
-	rules     []compiledRule
-	groups    map[string]*groupState
-	groupKeys []string
-	groupNext int
-	maxGroups int
+	mu         sync.Mutex
+	rules      []compiledRule
+	groups     map[groupKey]*groupState
+	groupKeys  []groupKey
+	groupNext  int
+	maxGroups  int
+	samples    int
+	maxSamples int
 }
+
+type groupKey [sha256.Size]byte
 
 type compiledRule struct {
 	rule         policy.DetectionRule
@@ -45,7 +54,7 @@ type compiledRule struct {
 }
 
 type groupState struct {
-	timestamps []time.Time
+	timestamps []int64
 	lastAlert  time.Time
 }
 
@@ -55,24 +64,46 @@ func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{
-		rules:     rules,
-		groups:    make(map[string]*groupState),
-		maxGroups: policy.MaxDetectionGroups,
+		rules:      rules,
+		groups:     make(map[groupKey]*groupState),
+		maxGroups:  policy.MaxDetectionGroups,
+		maxSamples: policy.MaxDetectionSamples,
 	}, nil
 }
 
-func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error {
+// CompiledRules is a validated detection rule set that Install can apply
+// without failing.
+type CompiledRules struct {
+	rules []compiledRule
+}
+
+// Compile validates and compiles detection rules without changing an engine.
+func Compile(custom []policy.DetectionRule, disabled []string) (CompiledRules, error) {
 	rules, err := compileRules(effectiveRules(custom, disabled))
+	if err != nil {
+		return CompiledRules{}, err
+	}
+	return CompiledRules{rules: rules}, nil
+}
+
+func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error {
+	compiled, err := Compile(custom, disabled)
 	if err != nil {
 		return err
 	}
+	e.Install(compiled)
+	return nil
+}
+
+// Install replaces the active rules and resets grouping state.
+func (e *Engine) Install(compiled CompiledRules) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.rules = rules
-	e.groups = make(map[string]*groupState)
+	e.rules = compiled.rules
+	e.groups = make(map[groupKey]*groupState)
 	e.groupKeys = nil
 	e.groupNext = 0
-	return nil
+	e.samples = 0
 }
 
 func (e *Engine) Evaluate(event Event) []Alert {
@@ -86,11 +117,12 @@ func (e *Engine) Evaluate(event Event) []Alert {
 	defer e.mu.Unlock()
 
 	alerts := make([]Alert, 0, 1)
+	matchContext := eventMatchContext{fields: event.Fields}
 	for index := range e.rules {
 		rule := &e.rules[index]
 		if !slices.Contains(rule.rule.Events, event.Name) ||
-			!matches(rule.rule.Match, rule.matchCIDRs, event.Fields) ||
-			(!emptyMatch(rule.rule.Exclude) && matches(rule.rule.Exclude, rule.excludeCIDRs, event.Fields)) {
+			!matches(rule.rule.Match, rule.matchCIDRs, &matchContext) ||
+			(!emptyMatch(rule.rule.Exclude) && matches(rule.rule.Exclude, rule.excludeCIDRs, &matchContext)) {
 			continue
 		}
 
@@ -98,46 +130,66 @@ func (e *Engine) Evaluate(event Event) []Alert {
 		if count == 0 {
 			count = 1
 		}
-		key := groupKey(rule.rule.ID, rule.rule.Threshold.GroupBy, event.Fields)
+		cooldown := rule.rule.Cooldown.Duration
+		if count == 1 && cooldown <= 0 {
+			alerts = append(alerts, newAlert(rule, event, count))
+			continue
+		}
+
+		key := makeGroupKey(rule.rule.ID, rule.rule.Threshold.GroupBy, event.Fields)
 		state := e.groups[key]
 		if state == nil {
 			e.makeRoom(key)
+			if e.maxGroups <= 0 {
+				continue
+			}
 			state = &groupState{}
 			e.groups[key] = state
 		}
 
 		window := rule.rule.Threshold.Within.Duration
 		if count > 1 {
-			cutoff := event.Timestamp.Add(-window)
+			cutoff := event.Timestamp.Add(-window).UnixNano()
 			first := 0
-			for first < len(state.timestamps) && state.timestamps[first].Before(cutoff) {
+			for first < len(state.timestamps) && state.timestamps[first] < cutoff {
 				first++
 			}
-			state.timestamps = append(state.timestamps[first:], event.Timestamp)
+			if first > 0 {
+				state.timestamps = slices.Clone(state.timestamps[first:])
+				e.samples -= first
+			}
+			e.makeSampleRoom(key)
+			state = e.groups[key]
+			if state == nil || e.maxSamples <= 0 {
+				continue
+			}
+			state.timestamps = append(state.timestamps, event.Timestamp.UnixNano())
+			e.samples++
 			if len(state.timestamps) > count {
-				state.timestamps = state.timestamps[len(state.timestamps)-count:]
+				dropped := len(state.timestamps) - count
+				state.timestamps = slices.Clone(state.timestamps[dropped:])
+				e.samples -= dropped
 			}
 			if len(state.timestamps) < count {
 				continue
 			}
 		}
-		if cooldown := rule.rule.Cooldown.Duration; cooldown > 0 &&
+		if cooldown > 0 &&
 			!state.lastAlert.IsZero() && event.Timestamp.Sub(state.lastAlert) < cooldown {
 			continue
 		}
 		state.lastAlert = event.Timestamp
-		alerts = append(alerts, Alert{
-			RuleID:    rule.rule.ID,
-			Severity:  rule.rule.Severity,
-			Message:   rule.rule.Message,
-			Tags:      slices.Clone(rule.rule.Tags),
-			Count:     count,
-			Window:    window,
-			Timestamp: event.Timestamp,
-			Fields:    cloneFields(event.Fields),
-		})
+		alerts = append(alerts, newAlert(rule, event, count))
 	}
 	return alerts
+}
+
+func newAlert(rule *compiledRule, event Event, count int) Alert {
+	return Alert{
+		RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
+		Tags: slices.Clone(rule.rule.Tags), Count: count, Window: rule.rule.Threshold.Within.Duration,
+		Timestamp: event.Timestamp, Fields: cloneFields(event.Fields),
+	}
 }
 
 func (e *Engine) RuleCount() int {
@@ -152,7 +204,13 @@ func (e *Engine) StateCount() int {
 	return len(e.groups)
 }
 
-func (e *Engine) makeRoom(key string) {
+func (e *Engine) StateSampleCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.samples
+}
+
+func (e *Engine) makeRoom(key groupKey) {
 	if len(e.groups) < e.maxGroups {
 		e.groupKeys = append(e.groupKeys, key)
 		return
@@ -163,9 +221,38 @@ func (e *Engine) makeRoom(key string) {
 	if e.groupNext >= len(e.groupKeys) {
 		e.groupNext = 0
 	}
-	delete(e.groups, e.groupKeys[e.groupNext])
+	e.deleteGroup(e.groupKeys[e.groupNext])
 	e.groupKeys[e.groupNext] = key
 	e.groupNext = (e.groupNext + 1) % len(e.groupKeys)
+}
+
+func (e *Engine) makeSampleRoom(preserve groupKey) {
+	for e.samples >= e.maxSamples && len(e.groups) > 1 {
+		if e.groupNext >= len(e.groupKeys) {
+			e.groupNext = 0
+		}
+		candidate := e.groupKeys[e.groupNext]
+		if candidate == preserve {
+			e.groupNext = (e.groupNext + 1) % len(e.groupKeys)
+			continue
+		}
+		e.deleteGroup(candidate)
+		e.groupKeys = append(e.groupKeys[:e.groupNext], e.groupKeys[e.groupNext+1:]...)
+	}
+	if e.samples >= e.maxSamples {
+		state := e.groups[preserve]
+		if state != nil && len(state.timestamps) > 0 {
+			state.timestamps = slices.Clone(state.timestamps[1:])
+			e.samples--
+		}
+	}
+}
+
+func (e *Engine) deleteGroup(key groupKey) {
+	if state := e.groups[key]; state != nil {
+		e.samples -= len(state.timestamps)
+	}
+	delete(e.groups, key)
 }
 
 func compileRules(rules []policy.DetectionRule) ([]compiledRule, error) {
@@ -195,24 +282,33 @@ func parseCIDRs(values []string) ([]netip.Prefix, error) {
 		if err != nil {
 			return nil, err
 		}
-		prefixes = append(prefixes, prefix.Masked())
+		canonical, err := netprefix.Canonical(prefix)
+		if err != nil {
+			return nil, err
+		}
+		prefixes = append(prefixes, canonical)
 	}
 	return prefixes, nil
 }
 
-func matches(match policy.DetectionMatch, cidrs []netip.Prefix, fields map[string]any) bool {
+type eventMatchContext struct {
+	fields map[string]any
+}
+
+func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMatchContext) bool {
+	fields := context.fields
 	return matchStrings(match.Actions, stringField(fields, "action", "policy")) &&
 		matchStrings(match.Directions, stringField(fields, "direction")) &&
 		matchStrings(match.Transports, stringField(fields, "transport")) &&
 		matchStrings(match.Protocols, stringField(fields, "socket_protocol", "transport")) &&
-		matchUint32s(match.UIDs, uint32Field(fields, "kernel_uid", "uid")) &&
+		matchUint32Field(match.UIDs, fields, "kernel_uid", "uid") &&
 		matchDomains(match.Domains, stringField(fields, "domain")) &&
 		matchSuffixes(match.DomainSuffixes, stringField(fields, "domain")) &&
 		matchAddress(cidrs, stringField(fields, "peer_address", "address")) &&
-		matchUint16s(match.Ports, uint16Field(fields, "peer_port", "port")) &&
-		matchGlobs(match.ExecutableGlobs, stringField(fields, "exe", "filename")) &&
-		matchGlobs(match.CommandGlobs, commandField(fields)) &&
-		matchGlobs(match.FilePathGlobs, stringField(fields, "path", "filename")) &&
+		matchUint16Field(match.Ports, fields, "peer_port", "port") &&
+		matchCanonicalPathGlobs(match.ExecutableGlobs, stringField(fields, "exe"), boolField(fields, "path_truncated")) &&
+		len(match.CommandGlobs) == 0 &&
+		matchCanonicalPathGlobs(match.FilePathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchStrings(match.FileAccess, stringField(fields, "file_access")) &&
 		matchPrefixes(match.CgroupPrefixes, stringField(fields, "cgroup")) &&
 		matchStrings(match.Services, stringField(fields, "service")) &&
@@ -270,6 +366,9 @@ func matchAddress(prefixes []netip.Prefix, candidate string) bool {
 	if err != nil {
 		return false
 	}
+	if address.Is4In6() {
+		address = address.Unmap()
+	}
 	for _, prefix := range prefixes {
 		if prefix.Contains(address) {
 			return true
@@ -278,12 +377,20 @@ func matchAddress(prefixes []netip.Prefix, candidate string) bool {
 	return false
 }
 
-func matchUint32s(values []uint32, candidate uint32) bool {
-	return len(values) == 0 || slices.Contains(values, candidate)
+func matchUint32Field(values []uint32, fields map[string]any, names ...string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	candidate, ok := uint32Field(fields, names...)
+	return ok && slices.Contains(values, candidate)
 }
 
-func matchUint16s(values []uint16, candidate uint16) bool {
-	return len(values) == 0 || slices.Contains(values, candidate)
+func matchUint16Field(values []uint16, fields map[string]any, names ...string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	candidate, ok := uint16Field(fields, names...)
+	return ok && slices.Contains(values, candidate)
 }
 
 func matchGlobs(patterns []string, candidate string) bool {
@@ -298,6 +405,21 @@ func matchGlobs(patterns []string, candidate string) bool {
 		matchPattern := strings.ReplaceAll(pattern, "/", "\x00")
 		matchCandidate := strings.ReplaceAll(candidate, "/", "\x00")
 		if matched, _ := filepath.Match(matchPattern, matchCandidate); matched {
+			return true
+		}
+	}
+	return false
+}
+
+func matchCanonicalPathGlobs(patterns []string, candidate string, truncated bool) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, pattern := range patterns {
+		if truncated && !strings.HasSuffix(pattern, "/**") {
+			continue
+		}
+		if matchGlobs([]string{pattern}, candidate) {
 			return true
 		}
 	}
@@ -327,68 +449,111 @@ func stringField(fields map[string]any, names ...string) string {
 	return ""
 }
 
-func uint32Field(fields map[string]any, names ...string) uint32 {
+func boolField(fields map[string]any, name string) bool {
+	value, _ := fields[name].(bool)
+	return value
+}
+
+func uint32Field(fields map[string]any, names ...string) (uint32, bool) {
 	for _, name := range names {
 		if value, ok := fields[name]; ok {
 			switch number := value.(type) {
 			case uint:
-				return uint32(number)
+				if converted, valid := uint32FromUint64(uint64(number)); valid {
+					return converted, true
+				}
 			case uint16:
-				return uint32(number)
+				return uint32(number), true
 			case uint32:
-				return number
+				return number, true
 			case uint64:
-				return uint32(number)
+				if converted, valid := uint32FromUint64(number); valid {
+					return converted, true
+				}
 			case int:
-				return uint32(number)
+				if converted, valid := uint32FromInt64(int64(number)); valid {
+					return converted, true
+				}
 			case int64:
-				return uint32(number)
+				if converted, valid := uint32FromInt64(number); valid {
+					return converted, true
+				}
 			case float64:
-				return uint32(number)
+				if number >= 0 && number <= math.MaxUint32 && math.Trunc(number) == number {
+					return uint32(number), true
+				}
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
-func uint16Field(fields map[string]any, names ...string) uint16 {
-	return uint16(uint32Field(fields, names...))
+func uint16Field(fields map[string]any, names ...string) (uint16, bool) {
+	value, ok := uint32Field(fields, names...)
+	if !ok || value > math.MaxUint16 {
+		return 0, false
+	}
+	return uint16(value), true
 }
 
-func commandField(fields map[string]any) string {
-	switch command := fields["cmdline"].(type) {
-	case []string:
-		return strings.Join(command, " ")
-	case string:
-		return command
+func uint32FromUint64(value uint64) (uint32, bool) {
+	if value > math.MaxUint32 {
+		return 0, false
+	}
+	return uint32(value), true
+}
+
+func uint32FromInt64(value int64) (uint32, bool) {
+	if value < 0 || value > math.MaxUint32 {
+		return 0, false
+	}
+	return uint32(value), true
+}
+
+// actingExecutable identifies the process that caused an event. Exec decision
+// events carry the denied target in exe, so they group by the calling program.
+func actingExecutable(values map[string]any) string {
+	switch stringField(values, "event") {
+	case "exec_blocked", "exec_would_block":
+		return stringField(values, "program")
 	default:
-		return ""
+		return stringField(values, "exe", "program")
 	}
 }
 
-func groupKey(ruleID string, fields []string, values map[string]any) string {
-	var builder strings.Builder
-	builder.WriteString(ruleID)
+func makeGroupKey(ruleID string, fields []string, values map[string]any) groupKey {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, ruleID)
 	for _, field := range fields {
-		builder.WriteByte(0)
-		builder.WriteString(field)
-		builder.WriteByte('=')
+		_, _ = hash.Write([]byte{0})
+		_, _ = io.WriteString(hash, field)
+		_, _ = hash.Write([]byte{'='})
 		switch field {
 		case "destination":
-			builder.WriteString(stringField(values, "peer_address", "address"))
+			_, _ = io.WriteString(hash, stringField(values, "peer_address", "address"))
 		case "executable":
-			builder.WriteString(stringField(values, "exe", "filename"))
-		case "pod":
-			builder.WriteString(stringField(values, "pod_uid", "k8s_pod"))
-		case "container":
-			builder.WriteString(stringField(values, "container_id"))
+			_, _ = io.WriteString(hash, actingExecutable(values))
+		case "path":
+			_, _ = io.WriteString(hash, stringField(values, "path"))
+		case "cgroup":
+			if cgroupID, ok := values["cgroup_id"]; ok && cgroupID != nil {
+				_, _ = fmt.Fprint(hash, cgroupID)
+			} else {
+				_, _ = fmt.Fprintf(hash, "missing:%v:%v:%v", values["pid"], values["process_start_ticks"], values["program"])
+			}
 		case "uid":
-			builder.WriteString(fmt.Sprint(uint32Field(values, "kernel_uid", "uid")))
+			if uid, ok := uint32Field(values, "kernel_uid", "uid"); ok {
+				_, _ = fmt.Fprint(hash, uid)
+			} else {
+				_, _ = io.WriteString(hash, "missing")
+			}
 		default:
-			builder.WriteString(fmt.Sprint(values[field]))
+			_, _ = fmt.Fprint(hash, values[field])
 		}
 	}
-	return builder.String()
+	var key groupKey
+	copy(key[:], hash.Sum(nil))
+	return key
 }
 
 func emptyMatch(match policy.DetectionMatch) bool {
@@ -403,8 +568,6 @@ func emptyMatch(match policy.DetectionMatch) bool {
 
 func cloneFields(fields map[string]any) map[string]any {
 	cloned := make(map[string]any, len(fields))
-	for key, value := range fields {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, fields)
 	return cloned
 }

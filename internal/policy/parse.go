@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"slices"
 	"strings"
 
@@ -62,32 +63,27 @@ func Merge(base, overlay Document) (Bundle, error) {
 	for _, id := range append(slices.Clone(base.DisabledRuleIDs), overlay.DisabledRuleIDs...) {
 		disabled[id] = struct{}{}
 	}
-	overlayIDs := make(map[string]struct{}, len(overlay.Egress.Rules)+len(overlay.DetectionRules))
+	overlayIDs := make(map[string]struct{}, len(overlay.Egress.Rules)+len(overlay.Exec.Rules)+len(overlay.File.Rules)+len(overlay.Bind.Rules)+len(overlay.Unix.Rules)+len(overlay.Sockopt.Rules)+len(overlay.DetectionRules))
 	for _, rule := range overlay.Egress.Rules {
+		overlayIDs[rule.ID] = struct{}{}
+	}
+	for _, rule := range overlay.Exec.Rules {
+		overlayIDs[rule.ID] = struct{}{}
+	}
+	for _, rule := range overlay.File.Rules {
+		overlayIDs[rule.ID] = struct{}{}
+	}
+	for _, rule := range overlay.Bind.Rules {
+		overlayIDs[rule.ID] = struct{}{}
+	}
+	for _, rule := range overlay.Unix.Rules {
+		overlayIDs[rule.ID] = struct{}{}
+	}
+	for _, rule := range overlay.Sockopt.Rules {
 		overlayIDs[rule.ID] = struct{}{}
 	}
 	for _, rule := range overlay.DetectionRules {
 		overlayIDs[rule.ID] = struct{}{}
-	}
-	mergeByID := func(baseRules, overlayRules []EgressRule) []EgressRule {
-		merged := make(map[string]EgressRule, len(baseRules)+len(overlayRules))
-		for _, rule := range baseRules {
-			if _, replaced := overlayIDs[rule.ID]; replaced {
-				continue
-			}
-			merged[rule.ID] = rule
-		}
-		for _, rule := range overlayRules {
-			merged[rule.ID] = rule
-		}
-		out := make([]EgressRule, 0, len(merged))
-		for id, rule := range merged {
-			if _, skip := disabled[id]; !skip {
-				out = append(out, rule)
-			}
-		}
-		slices.SortFunc(out, func(left, right EgressRule) int { return strings.Compare(left.ID, right.ID) })
-		return out
 	}
 	mergeDetectionByID := func(baseRules, overlayRules []DetectionRule) []DetectionRule {
 		merged := make(map[string]DetectionRule, len(baseRules)+len(overlayRules))
@@ -118,13 +114,7 @@ func Merge(base, overlay Document) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
-	defaultAction := base.Egress.Default
-	if defaultAction == "" {
-		defaultAction = "allow"
-	}
-	if overlay.Egress.Default != "" {
-		defaultAction = overlay.Egress.Default
-	}
+	defaultAction := mergeDefault(base.Egress.Default, overlay.Egress.Default)
 	profiles := append(slices.Clone(base.BuiltinProfiles), overlay.BuiltinProfiles...)
 	slices.Sort(profiles)
 	profiles = slices.Compact(profiles)
@@ -134,16 +124,138 @@ func Merge(base, overlay Document) (Bundle, error) {
 	}
 	slices.Sort(disabledIDs)
 
-	return Bundle{
+	bundle := Bundle{
 		DNS: dns,
 		Egress: EgressPolicy{
 			Default: defaultAction,
-			Rules:   mergeByID(base.Egress.Rules, overlay.Egress.Rules),
+			Rules:   mergeRulesByID(base.Egress.Rules, overlay.Egress.Rules, overlayIDs, disabled, func(rule EgressRule) string { return rule.ID }),
+		},
+		Exec: PathPolicy{
+			Default: mergeDefault(base.Exec.Default, overlay.Exec.Default),
+			Rules:   mergeRulesByID(base.Exec.Rules, overlay.Exec.Rules, overlayIDs, disabled, func(rule PathRule) string { return rule.ID }),
+		},
+		File: FilePolicy{
+			Default: mergeDefault(base.File.Default, overlay.File.Default),
+			Rules:   mergeRulesByID(base.File.Rules, overlay.File.Rules, overlayIDs, disabled, func(rule FileRule) string { return rule.ID }),
+		},
+		Bind: BindPolicy{
+			Default: mergeDefault(base.Bind.Default, overlay.Bind.Default),
+			Rules:   mergeRulesByID(base.Bind.Rules, overlay.Bind.Rules, overlayIDs, disabled, func(rule BindRule) string { return rule.ID }),
+		},
+		Unix: UnixPolicy{
+			Default: mergeDefault(base.Unix.Default, overlay.Unix.Default),
+			Rules:   mergeRulesByID(base.Unix.Rules, overlay.Unix.Rules, overlayIDs, disabled, func(rule UnixRule) string { return rule.ID }),
+		},
+		Sockopt: SockoptPolicy{
+			Default: mergeDefault(base.Sockopt.Default, overlay.Sockopt.Default),
+			Rules:   mergeRulesByID(base.Sockopt.Rules, overlay.Sockopt.Rules, overlayIDs, disabled, func(rule SockoptRule) string { return rule.ID }),
 		},
 		DetectionRules:  mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
 		BuiltinProfiles: profiles,
 		DisabledRuleIDs: disabledIDs,
-	}, nil
+	}
+	if err := bundle.Validate(); err != nil {
+		return Bundle{}, fmt.Errorf("validate merged policy: %w", err)
+	}
+	return bundle, nil
+}
+
+// Validate enforces the source limits on the final effective policy before any
+// DNS lookup, cgroup scan, or eBPF compilation is attempted.
+func (b Bundle) Validate() error {
+	document := Document{
+		Version: Version, BuiltinProfiles: slices.Clone(b.BuiltinProfiles),
+		DisabledRuleIDs: slices.Clone(b.DisabledRuleIDs), Egress: b.Egress,
+		Exec: b.Exec, File: b.File, Bind: b.Bind, Unix: b.Unix,
+		Sockopt: b.Sockopt, DetectionRules: slices.Clone(b.DetectionRules),
+	}
+	if err := document.Validate(); err != nil {
+		return err
+	}
+	dnsCount := len(b.DNS.BlockDomains) + len(b.DNS.AllowDomains) +
+		len(b.DNS.BlockSuffixes) + len(b.DNS.AllowSuffixes) +
+		len(b.DNS.BlockEndpoints) + len(b.DNS.AllowEndpoints) +
+		len(b.DNS.BlockEndpointCIDRs) + len(b.DNS.AllowEndpointCIDRs)
+	if dnsCount > MaxDNSRules {
+		return fmt.Errorf("merged dns rule count %d exceeds %d", dnsCount, MaxDNSRules)
+	}
+	hostnames := 0
+	for _, endpoint := range append(slices.Clone(b.DNS.BlockEndpoints), b.DNS.AllowEndpoints...) {
+		if net.ParseIP(endpoint.Host) == nil {
+			hostnames++
+		}
+	}
+	if hostnames > MaxResolverHostnames {
+		return fmt.Errorf("resolver hostname count %d exceeds %d", hostnames, MaxResolverHostnames)
+	}
+	selectorCount := 0
+	addSelectors := func(selectors EgressSelectors) {
+		selectorCount += len(selectors.CgroupPaths) + len(selectors.CgroupPrefixes)
+	}
+	for _, rule := range b.Egress.Rules {
+		addSelectors(rule.Selectors)
+	}
+	for _, rule := range b.Exec.Rules {
+		addSelectors(rule.Selectors)
+	}
+	for _, rule := range b.File.Rules {
+		addSelectors(rule.Selectors)
+	}
+	for _, rule := range b.Bind.Rules {
+		addSelectors(rule.Selectors)
+	}
+	for _, rule := range b.Unix.Rules {
+		addSelectors(rule.Selectors)
+	}
+	for _, rule := range b.Sockopt.Rules {
+		addSelectors(rule.Selectors)
+	}
+	if selectorCount > MaxPolicySelectors {
+		return fmt.Errorf("merged cgroup selector count %d exceeds %d", selectorCount, MaxPolicySelectors)
+	}
+	thresholdSamples := 0
+	for _, rule := range b.DetectionRules {
+		count := rule.Threshold.Count
+		if count == 0 {
+			count = 1
+		}
+		thresholdSamples += count
+		if thresholdSamples > MaxDetectionSamples {
+			return fmt.Errorf("detection threshold sample budget %d exceeds %d", thresholdSamples, MaxDetectionSamples)
+		}
+	}
+	return nil
+}
+
+func mergeDefault(base, overlay string) string {
+	if overlay != "" {
+		return overlay
+	}
+	if base != "" {
+		return base
+	}
+	return "allow"
+}
+
+func mergeRulesByID[T any](base, overlay []T, overlayIDs, disabled map[string]struct{}, id func(T) string) []T {
+	merged := make(map[string]T, len(base)+len(overlay))
+	for _, rule := range base {
+		ruleID := id(rule)
+		if _, replaced := overlayIDs[ruleID]; !replaced {
+			merged[ruleID] = rule
+		}
+	}
+	for _, rule := range overlay {
+		merged[id(rule)] = rule
+	}
+	out := make([]T, 0, len(merged))
+	for ruleID, rule := range merged {
+		if _, skip := disabled[ruleID]; !skip {
+			out = append(out, rule)
+		}
+	}
+	slices.SortFunc(out, func(left, right T) int { return strings.Compare(id(left), id(right)) })
+	return out
 }
 
 func parseDNS(policy DNSPolicy) (blocklist.Rules, error) {

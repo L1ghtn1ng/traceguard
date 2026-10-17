@@ -4,16 +4,49 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
 
-const maxEnforcedSuffixWireBytes = 64
+const (
+	maxEnforcedSuffixWireBytes = 64
+	maxPolicyRuleIDBytes       = 64
+)
+
+const (
+	policyReaderDrainTimeout = 30 * time.Second
+	policyReaderPollInterval = time.Millisecond
+)
 
 func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	egress, err := compileEgressPolicy(policy.Egress)
 	if err != nil {
+		return err
+	}
+	execPolicy, err := compilePathPolicy(policy.Exec)
+	if err != nil {
+		return fmt.Errorf("compile exec policy: %w", err)
+	}
+	filePolicy, err := compilePathPolicy(policy.File)
+	if err != nil {
+		return fmt.Errorf("compile file policy: %w", err)
+	}
+	bindPolicy, err := compileEgressPolicy(policy.Bind)
+	if err != nil {
+		return fmt.Errorf("compile bind policy: %w", err)
+	}
+	unixPolicy, err := compilePathPolicy(policy.Unix)
+	if err != nil {
+		return fmt.Errorf("compile unix policy: %w", err)
+	}
+	sockoptPolicy, err := compileSockoptPolicy(policy.Sockopt)
+	if err != nil {
+		return fmt.Errorf("compile sockopt policy: %w", err)
+	}
+	if err := m.validateEnforcementHooks(policy); err != nil {
 		return err
 	}
 	nextBlock := make(map[domainKey]struct{}, len(policy.BlockedDomains))
@@ -111,6 +144,11 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 			if !ok {
 				return fmt.Errorf("unsupported resolver transport %q", endpoint.Transport)
 			}
+			canonical, err := canonicalPrefix(endpoint.Prefix)
+			if err != nil {
+				return err
+			}
+			endpoint.Prefix = canonical
 			addr := endpoint.Prefix.Addr()
 			if !addr.IsValid() {
 				return fmt.Errorf("invalid endpoint prefix %q", endpoint.Prefix)
@@ -173,12 +211,30 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	if len(nextBlockCIDR6) > endpointMaxEntries || len(nextAllowCIDR6) > endpointMaxEntries {
 		return fmt.Errorf("ipv6 resolver cidrs exceed map capacity %d", endpointMaxEntries)
 	}
+	nextRuleIDs, err := mergeCompiledRuleIDs(
+		egress.ruleIDs,
+		execPolicy.ruleIDs,
+		filePolicy.ruleIDs,
+		bindPolicy.ruleIDs,
+		unixPolicy.ruleIDs,
+		sockoptPolicy.ruleIDs,
+	)
+	if err != nil {
+		return err
+	}
+	encodedRuleNames, err := encodeRuleNames(nextRuleIDs)
+	if err != nil {
+		return err
+	}
 
 	m.policyMu.Lock()
 	defer m.policyMu.Unlock()
 	inactiveSlot := uint8(1)
 	if m.activePolicySlot == 1 {
 		inactiveSlot = 0
+	}
+	if err := waitForPolicyReaders(m.objects.PolicyReaders, inactiveSlot); err != nil {
+		return fmt.Errorf("wait to reuse inactive policy slot %d: %w", inactiveSlot, err)
 	}
 	for _, update := range []struct {
 		name string
@@ -200,13 +256,33 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 		{name: "egress4 block rules", fn: func() error { return syncEgress4MapSlot(m.objects.Egress4BlockRules, egress.block4, inactiveSlot) }},
 		{name: "egress6 allow rules", fn: func() error { return syncEgress6MapSlot(m.objects.Egress6AllowRules, egress.allow6, inactiveSlot) }},
 		{name: "egress6 block rules", fn: func() error { return syncEgress6MapSlot(m.objects.Egress6BlockRules, egress.block6, inactiveSlot) }},
+		{name: "exec allow paths", fn: func() error { return syncPathMapSlot(m.objects.ExecAllowPaths, execPolicy.allow, inactiveSlot) }},
+		{name: "exec block paths", fn: func() error { return syncPathMapSlot(m.objects.ExecBlockPaths, execPolicy.block, inactiveSlot) }},
+		{name: "file allow paths", fn: func() error { return syncPathMapSlot(m.objects.FileAllowPaths, filePolicy.allow, inactiveSlot) }},
+		{name: "file block paths", fn: func() error { return syncPathMapSlot(m.objects.FileBlockPaths, filePolicy.block, inactiveSlot) }},
+		{name: "bind4 allow rules", fn: func() error { return syncEgress4MapSlot(m.objects.Bind4AllowRules, bindPolicy.allow4, inactiveSlot) }},
+		{name: "bind4 block rules", fn: func() error { return syncEgress4MapSlot(m.objects.Bind4BlockRules, bindPolicy.block4, inactiveSlot) }},
+		{name: "bind6 allow rules", fn: func() error { return syncEgress6MapSlot(m.objects.Bind6AllowRules, bindPolicy.allow6, inactiveSlot) }},
+		{name: "bind6 block rules", fn: func() error { return syncEgress6MapSlot(m.objects.Bind6BlockRules, bindPolicy.block6, inactiveSlot) }},
+		{name: "unix allow paths", fn: func() error { return syncPathMapSlot(m.objects.UnixAllowPaths, unixPolicy.allow, inactiveSlot) }},
+		{name: "unix block paths", fn: func() error { return syncPathMapSlot(m.objects.UnixBlockPaths, unixPolicy.block, inactiveSlot) }},
+		{name: "sockopt allow rules", fn: func() error { return syncSockoptMapSlot(m.objects.SockoptAllow, sockoptPolicy.allow, inactiveSlot) }},
+		{name: "sockopt block rules", fn: func() error { return syncSockoptMapSlot(m.objects.SockoptBlock, sockoptPolicy.block, inactiveSlot) }},
+		{name: "rule names", fn: func() error { return syncRuleNameMapSlot(m.objects.RuleNames, encodedRuleNames, inactiveSlot) }},
 	} {
 		if err := update.fn(); err != nil {
 			return fmt.Errorf("prepare inactive %s: %w", update.name, err)
 		}
 	}
 
-	settings := runtimeSettings{ActivePolicySlot: inactiveSlot}
+	nextGeneration := m.policyGeneration + 1
+	if nextGeneration == 0 {
+		nextGeneration = 1
+	}
+	settings := runtimeSettings{
+		ActivePolicySlot: inactiveSlot,
+		PolicyGeneration: nextGeneration,
+	}
 	if policy.BlockEnabled {
 		settings.BlockEnabled = 1
 	}
@@ -231,19 +307,217 @@ func (m *Monitor) ApplyPolicy(policy PolicyConfig) error {
 	if policy.Egress.DefaultBlock {
 		settings.EgressDefaultBlock = 1
 	}
-	ruleIDs := make(map[uint32]string, len(egress.ruleIDs)+len(m.currentRuleIDs))
-	for ruleNumber, ruleID := range m.currentRuleIDs {
-		ruleIDs[ruleNumber] = ruleID
+	setPathSettings(&settings.ExecEnabled, &settings.ExecEnforce, &settings.ExecDefaultBlock, policy.Exec)
+	setPathSettings(&settings.FileEnabled, &settings.FileEnforce, &settings.FileDefaultBlock, policy.File)
+	setEgressSettings(&settings.BindEnabled, &settings.BindEnforce, &settings.BindDefaultBlock, policy.Bind)
+	setPathSettings(&settings.UnixEnabled, &settings.UnixEnforce, &settings.UnixDefaultBlock, policy.Unix)
+	if policy.Sockopt.Enabled {
+		settings.SockoptEnabled = 1
 	}
-	for ruleNumber, ruleID := range egress.ruleIDs {
-		ruleIDs[ruleNumber] = ruleID
+	if policy.Sockopt.Enforce {
+		settings.SockoptEnforce = 1
 	}
-	m.egressRuleIDs.Store(&ruleIDs)
-	if err := m.objects.Settings.Put(uint32(0), settings); err != nil {
-		return fmt.Errorf("commit policy settings: %w", err)
+	if policy.Sockopt.DefaultBlock {
+		settings.SockoptDefaultBlock = 1
 	}
-	m.currentRuleIDs = egress.ruleIDs
+	if err := m.objects.Settings.Put(uint32(inactiveSlot), settings); err != nil {
+		return fmt.Errorf("write immutable policy settings slot %d: %w", inactiveSlot, err)
+	}
+	selector := encodePolicySelector(inactiveSlot, nextGeneration)
+	if err := m.objects.PolicySelector.Put(uint32(0), selector); err != nil {
+		return fmt.Errorf("publish policy selector: %w", err)
+	}
 	m.activePolicySlot = inactiveSlot
+	m.policyGeneration = nextGeneration
+	return nil
+}
+
+func waitForPolicyReaders(readers *ebpf.Map, slot uint8) error {
+	if readers == nil {
+		return errors.New("policy reader map is unavailable")
+	}
+	possibleCPUs, err := ebpf.PossibleCPU()
+	if err != nil {
+		return fmt.Errorf("count possible CPUs: %w", err)
+	}
+	deadline := time.Now().Add(policyReaderDrainTimeout)
+	values := make([]uint64, possibleCPUs)
+	for {
+		clear(values)
+		if err := readers.Lookup(uint32(slot), &values); err != nil {
+			return fmt.Errorf("read slot counters: %w", err)
+		}
+		if !slices.ContainsFunc(values, func(value uint64) bool { return value != 0 }) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s with active kernel readers", policyReaderDrainTimeout)
+		}
+		time.Sleep(policyReaderPollInterval)
+	}
+}
+
+func setPathSettings(enabled, enforce, defaultBlock *uint8, policy PathPolicyConfig) {
+	if policy.Enabled {
+		*enabled = 1
+	}
+	if policy.Enforce {
+		*enforce = 1
+	}
+	if policy.DefaultBlock {
+		*defaultBlock = 1
+	}
+}
+
+func setEgressSettings(enabled, enforce, defaultBlock *uint8, policy EgressPolicyConfig) {
+	if policy.Enabled {
+		*enabled = 1
+	}
+	if policy.Enforce {
+		*enforce = 1
+	}
+	if policy.DefaultBlock {
+		*defaultBlock = 1
+	}
+}
+
+func mergeCompiledRuleIDs(groups ...map[uint32]string) (map[uint32]string, error) {
+	merged := make(map[uint32]string)
+	for _, group := range groups {
+		for number, id := range group {
+			if previous, exists := merged[number]; exists && previous != id {
+				return nil, fmt.Errorf("policy rule id hash collision between %q and %q", previous, id)
+			}
+			merged[number] = id
+		}
+	}
+	return merged, nil
+}
+
+func encodeRuleNames(ruleIDs map[uint32]string) (map[uint32]ruleNameValue, error) {
+	if len(ruleIDs) > policyMaxEntries {
+		return nil, fmt.Errorf("policy contains %d rule names, exceeds map capacity per slot %d", len(ruleIDs), policyMaxEntries)
+	}
+	encoded := make(map[uint32]ruleNameValue, len(ruleIDs))
+	for number, id := range ruleIDs {
+		if number == 0 {
+			return nil, fmt.Errorf("policy rule %q uses reserved rule number zero", id)
+		}
+		if len(id) == 0 || len(id) > maxPolicyRuleIDBytes || strings.IndexByte(id, 0) >= 0 {
+			return nil, fmt.Errorf("policy rule id %q must contain 1 to %d non-NUL bytes", id, maxPolicyRuleIDBytes)
+		}
+		var value ruleNameValue
+		copy(value.Name[:], id)
+		encoded[number] = value
+	}
+	return encoded, nil
+}
+
+func syncRuleNameMapSlot(m *ebpf.Map, next map[uint32]ruleNameValue, slot uint8) error {
+	if m == nil {
+		return errors.New("rule name map is unavailable")
+	}
+	if slot > 1 {
+		return fmt.Errorf("invalid policy slot %d", slot)
+	}
+
+	var stale []ruleNameKey
+	iter := m.Iterate()
+	var key ruleNameKey
+	var value ruleNameValue
+	for iter.Next(&key, &value) {
+		if key.PolicySlot == slot {
+			stale = append(stale, key)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	for _, key := range stale {
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	for number, value := range next {
+		key := ruleNameKey{PolicySlot: slot, RuleID: number}
+		if err := m.Put(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Monitor) validateEnforcementHooks(policy PolicyConfig) error {
+	const hostCgroupRoot = "/sys/fs/cgroup"
+	for _, domain := range []struct {
+		name, hook string
+		policy     PathPolicyConfig
+		attached   bool
+	}{
+		{name: "exec", hook: "bprm_check_security", policy: policy.Exec, attached: m.attachState.LSMExecAttached},
+		{name: "file", hook: "file_open", policy: policy.File, attached: m.attachState.LSMFileAttached},
+	} {
+		if !domain.policy.Enabled {
+			continue
+		}
+		if m.cgroupPath != hostCgroupRoot {
+			return fmt.Errorf("%s enforcement requires cgroup-path %s because LSM MAC is host-wide", domain.name, hostCgroupRoot)
+		}
+		if !domain.attached {
+			return fmt.Errorf("%s enforcement requested but LSM %s is not attached", domain.name, domain.hook)
+		}
+		if m.daemonNamespaceErr != nil {
+			return fmt.Errorf("%s enforcement requires the host PID and time namespaces so TraceGuard can exempt itself: %w", domain.name, m.daemonNamespaceErr)
+		}
+	}
+	if policy.Bind.Enabled {
+		require4, require6 := policy.Bind.DefaultBlock, policy.Bind.DefaultBlock
+		for _, rule := range policy.Bind.Rules {
+			if len(rule.CIDRs) == 0 {
+				require4, require6 = true, true
+			}
+			for _, prefix := range rule.CIDRs {
+				// IPv4-mapped and dual-stack wildcard binds reach IPv4 policy
+				// through bind6, so IPv4 rules need both hooks.
+				isIPv4 := prefix.Addr().Unmap().Is4()
+				require4 = require4 || isIPv4
+				require6 = true
+			}
+		}
+		if require4 && !m.attachState.Bind4Attached {
+			return errors.New("bind IPv4 enforcement requested but cgroup/bind4 is not attached")
+		}
+		if require6 && !m.attachState.Bind6Attached {
+			return errors.New("bind IPv6 enforcement requested but cgroup/bind6 is not attached")
+		}
+	}
+	if policy.Unix.Enabled {
+		// recvmsg is audit-only because cgroup/recvmsg_unix cannot deny, so a
+		// missing recvmsg attachment does not weaken enforcement.
+		requireConnect, requireSendmsg := policy.Unix.DefaultBlock, policy.Unix.DefaultBlock
+		for _, rule := range policy.Unix.Rules {
+			if len(rule.AccessOrOps) == 0 {
+				requireConnect, requireSendmsg = true, true
+			}
+			for _, operation := range rule.AccessOrOps {
+				switch operation {
+				case unixOpConnect:
+					requireConnect = true
+				case unixOpSendmsg:
+					requireSendmsg = true
+				}
+			}
+		}
+		if requireConnect && !m.attachState.UnixConnectAttached {
+			return errors.New("unix connect enforcement requested but cgroup/connect_unix is not attached")
+		}
+		if requireSendmsg && !m.attachState.UnixSendmsgAttached {
+			return errors.New("unix sendmsg enforcement requested but cgroup/sendmsg_unix is not attached")
+		}
+	}
+	if policy.Sockopt.Enabled && !m.attachState.SockoptAttached {
+		return errors.New("sockopt enforcement requested but cgroup/setsockopt is not attached")
+	}
 	return nil
 }
 

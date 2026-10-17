@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 )
 
 type ruleAction uint8
@@ -374,7 +376,11 @@ func normalizeIPPrefix(raw string) (netip.Prefix, bool) {
 	if err != nil {
 		return netip.Prefix{}, false
 	}
-	return prefix.Masked(), true
+	canonical, err := netprefix.Canonical(prefix)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return canonical, true
 }
 
 func normalizeEndpointHost(raw string) (string, bool) {

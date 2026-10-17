@@ -1,11 +1,14 @@
 package ebpf
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	cebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
+	ebpffeatures "github.com/cilium/ebpf/features"
 )
 
 const (
@@ -19,6 +22,7 @@ type KernelFeatures struct {
 	KernelAtLeast71     bool
 	BTFAvailable        bool
 	BPFLSMAvailable     bool
+	LSMProgramType      bool
 	EnhancedTelemetry   bool
 	SelectedFeatureSet  string
 	SelectedObject      string
@@ -32,7 +36,18 @@ func DetectKernelFeatures() KernelFeatures {
 		features.BTFAvailable = true
 	}
 	features.BPFLSMAvailable = detectBPFLSM()
+	features.LSMProgramType = featureAvailable(ebpffeatures.HaveProgramType(cebpf.LSM))
 	return features
+}
+
+func featureAvailable(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, cebpf.ErrNotSupported) {
+		return false
+	}
+	return false
 }
 
 func kernelFeaturesForRelease(release string, releaseErr error) KernelFeatures {
@@ -99,6 +114,7 @@ func (f KernelFeatures) FeatureGates() map[string]bool {
 		"kernel_at_least_7_1":  f.KernelAtLeast71,
 		"btf":                  f.BTFAvailable,
 		"bpf_lsm":              f.BPFLSMAvailable,
+		"lsm_program_type":     f.LSMProgramType,
 		"enhanced_telemetry":   f.EnhancedTelemetry,
 	}
 }

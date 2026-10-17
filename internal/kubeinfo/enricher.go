@@ -249,7 +249,7 @@ func addPodPage(pods map[string]Metadata, page []podItem) error {
 	return nil
 }
 
-func (e *Enricher) fetchPodsPage(ctx context.Context, continueToken string) ([]podItem, string, error) {
+func (e *Enricher) fetchPodsPage(ctx context.Context, continueToken string) (items []podItem, nextToken string, fetchErr error) {
 	token, err := readToken(e.tokenPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("read kubernetes token: %w", err)
@@ -281,7 +281,9 @@ func (e *Enricher) fetchPodsPage(ctx context.Context, continueToken string) ([]p
 	if err != nil {
 		return nil, "", fmt.Errorf("list kubernetes pods: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		fetchErr = errors.Join(fetchErr, resp.Body.Close())
+	}()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {

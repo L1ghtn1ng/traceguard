@@ -29,6 +29,10 @@ type Config struct {
 	CAPath         string
 	ClientCertPath string
 	ClientKeyPath  string
+	// Validate, when set, checks the merged bundle before a fetched remote
+	// document replaces the cache, conditional-request state, or the last
+	// known good remote base.
+	Validate func(Bundle) error
 }
 
 type LoadSource string
@@ -38,6 +42,9 @@ const (
 	LoadSourceRemote     LoadSource = "remote"
 	LoadSourceCache      LoadSource = "cache"
 	LoadSourceNotChanged LoadSource = "not_modified"
+	// LoadSourceLastKnown reuses the last validated remote document after a
+	// refresh failure, so local overlay changes can still be applied.
+	LoadSourceLastKnown LoadSource = "last_known"
 )
 
 type LoadMetadata struct {
@@ -66,10 +73,13 @@ func NewManager(cfg Config) (*Manager, error) {
 	if strings.TrimSpace(cfg.URL) != "" {
 		parsed, err := url.Parse(cfg.URL)
 		if err != nil {
-			return nil, fmt.Errorf("parse policy url: %w", err)
+			return nil, errors.New("policy url is not valid")
 		}
 		if parsed.Scheme != "https" || parsed.Host == "" {
 			return nil, errors.New("policy url must use https and include a host")
+		}
+		if parsed.User != nil {
+			return nil, errors.New("policy url must not contain user credentials; use the authorization header or mTLS")
 		}
 		if err := validatePath(cfg.CachePath, "policy cache path"); err != nil {
 			return nil, err
@@ -109,26 +119,31 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 
 	remote := Document{Version: Version}
 	metadata := LoadMetadata{RemoteSource: LoadSourceNone}
+	var fetched *remoteResponse
 	if strings.TrimSpace(m.cfg.URL) != "" {
-		document, payload, source, err := m.fetch(ctx)
+		document, response, source, err := m.fetch(ctx)
 		if err != nil {
 			fetchErr := err
-			document, err = m.readCache()
-			if err != nil {
-				return Bundle{}, metadata, fmt.Errorf("load remote policy and stale cache: %w", errors.Join(fetchErr, err))
+			if m.lastRemote != nil {
+				// Never roll back to an older on-disk cache once a remote
+				// document has been accepted, but keep the accepted base so
+				// local overlay edits still load during an outage.
+				document = *m.lastRemote
+				source = LoadSourceLastKnown
+			} else {
+				document, err = m.readCache()
+				if err != nil {
+					return Bundle{}, metadata, fmt.Errorf("load remote policy and stale cache: %w", errors.Join(fetchErr, err))
+				}
+				source = LoadSourceCache
 			}
-			source = LoadSourceCache
 			metadata.RemoteError = fetchErr.Error()
 			metadata.StaleFallback = true
 		} else if source == LoadSourceRemote {
-			if err := safefile.WriteFileAtomic(m.cfg.CachePath, payload, 0o600); err != nil {
-				metadata.CachePersistError = err.Error()
-			}
+			fetched = response
 		}
 		remote = document
 		metadata.RemoteSource = source
-		copy := document
-		m.lastRemote = &copy
 	}
 
 	local := Document{Version: Version}
@@ -148,7 +163,31 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 	if err != nil {
 		return Bundle{}, metadata, err
 	}
+	if m.cfg.Validate != nil {
+		if err := m.cfg.Validate(bundle); err != nil {
+			return Bundle{}, metadata, err
+		}
+	}
+	if strings.TrimSpace(m.cfg.URL) != "" {
+		// Commit remote state only after the effective policy validated, so a
+		// rejected document is neither cached nor suppressed by a later 304.
+		if fetched != nil {
+			if err := safefile.WriteFileAtomic(m.cfg.CachePath, fetched.payload, 0o600); err != nil {
+				metadata.CachePersistError = err.Error()
+			}
+			m.etag = fetched.etag
+			m.modified = fetched.modified
+		}
+		copy := remote
+		m.lastRemote = &copy
+	}
 	return bundle, metadata, nil
+}
+
+type remoteResponse struct {
+	payload  []byte
+	etag     string
+	modified string
 }
 
 func (m *Manager) Watch(ctx context.Context, apply func(Bundle, LoadMetadata, error)) {
@@ -169,7 +208,7 @@ func (m *Manager) Watch(ctx context.Context, apply func(Bundle, LoadMetadata, er
 	}
 }
 
-func (m *Manager) fetch(ctx context.Context) (Document, []byte, LoadSource, error) {
+func (m *Manager) fetch(ctx context.Context) (document Document, response *remoteResponse, source LoadSource, fetchErr error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cfg.URL, nil)
 	if err != nil {
 		return Document{}, nil, LoadSourceNone, fmt.Errorf("build request: %w", err)
@@ -188,9 +227,11 @@ func (m *Manager) fetch(ctx context.Context) (Document, []byte, LoadSource, erro
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return Document{}, nil, LoadSourceNone, err
+		return Document{}, nil, LoadSourceNone, safeRemoteRequestError(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		fetchErr = errors.Join(fetchErr, resp.Body.Close())
+	}()
 	if resp.StatusCode == http.StatusNotModified {
 		if m.lastRemote != nil {
 			return *m.lastRemote, nil, LoadSourceNotChanged, nil
@@ -208,13 +249,23 @@ func (m *Manager) fetch(ctx context.Context) (Document, []byte, LoadSource, erro
 	if int64(len(payload)) > MaxDocumentBytes {
 		return Document{}, nil, LoadSourceNone, fmt.Errorf("response exceeds %d bytes", MaxDocumentBytes)
 	}
-	document, err := Parse(payload)
+	document, err = Parse(payload)
 	if err != nil {
 		return Document{}, nil, LoadSourceNone, fmt.Errorf("parse response: %w", err)
 	}
-	m.etag = strings.TrimSpace(resp.Header.Get("ETag"))
-	m.modified = strings.TrimSpace(resp.Header.Get("Last-Modified"))
-	return document, payload, LoadSourceRemote, nil
+	return document, &remoteResponse{
+		payload:  payload,
+		etag:     strings.TrimSpace(resp.Header.Get("ETag")),
+		modified: strings.TrimSpace(resp.Header.Get("Last-Modified")),
+	}, LoadSourceRemote, nil
+}
+
+func safeRemoteRequestError(err error) error {
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return fmt.Errorf("remote policy HTTPS request failed (timeout=%t)", networkError.Timeout())
+	}
+	return fmt.Errorf("remote policy HTTPS request failed (%T)", err)
 }
 
 func (m *Manager) readCache() (Document, error) {

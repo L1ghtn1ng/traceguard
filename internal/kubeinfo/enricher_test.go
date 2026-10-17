@@ -19,7 +19,7 @@ import (
 func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
 	t.Parallel()
 
-	original, err := http.NewRequest(http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
+	original, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
 	if err != nil {
 		t.Fatalf("create original request: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			redirect, err := http.NewRequest(http.MethodGet, test.target, nil)
+			redirect, err := http.NewRequestWithContext(t.Context(), http.MethodGet, test.target, nil)
 			if err != nil {
 				t.Fatalf("create redirect request: %v", err)
 			}
@@ -44,11 +44,11 @@ func TestKubernetesRedirectsStayOnOriginalOrigin(t *testing.T) {
 			}
 		})
 	}
-	insecureOriginal, err := http.NewRequest(http.MethodGet, "http://kubernetes.default.svc/api/v1/pods", nil)
+	insecureOriginal, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://kubernetes.default.svc/api/v1/pods", nil)
 	if err != nil {
 		t.Fatalf("create insecure original request: %v", err)
 	}
-	redirect, err := http.NewRequest(http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
+	redirect, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://kubernetes.default.svc/api/v1/pods", nil)
 	if err != nil {
 		t.Fatalf("create redirect request: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestEnricherIndexesPodsByUID(t *testing.T) {
 		t.Fatalf("WriteFile token: %v", err)
 	}
 	caPath := filepath.Join(tempDir, "ca.crt")
-	if err := os.WriteFile(caPath, encodeCertPEM(t, server), 0o644); err != nil {
+	if err := os.WriteFile(caPath, encodeCertPEM(t, server), 0o600); err != nil {
 		t.Fatalf("WriteFile ca: %v", err)
 	}
 
@@ -146,7 +146,11 @@ func TestEnricherIndexesPodsByUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
-	defer enricher.Close()
+	t.Cleanup(func() {
+		if err := enricher.Close(); err != nil {
+			t.Errorf("close enricher: %v", err)
+		}
+	})
 
 	first, ok := enricher.Lookup("pod-uid-1")
 	if !ok {
@@ -248,7 +252,7 @@ func TestNewRejectsInvalidCA(t *testing.T) {
 		t.Fatalf("WriteFile token: %v", err)
 	}
 	caPath := filepath.Join(tempDir, "ca.crt")
-	if err := os.WriteFile(caPath, []byte("not-a-certificate"), 0o644); err != nil {
+	if err := os.WriteFile(caPath, []byte("not-a-certificate"), 0o600); err != nil {
 		t.Fatalf("WriteFile ca: %v", err)
 	}
 

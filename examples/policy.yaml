@@ -11,7 +11,8 @@ builtin_profiles:
   - baseline
 
 # IDs in this list are removed after remote and local policies are merged. It
-# can disable an egress rule, a custom detection, or a built-in detection.
+# can disable an egress, exec, file, bind, unix, sockopt, custom detection, or
+# built-in detection rule.
 # disabled_rule_ids:
 #   - baseline.policy-denial-burst
 #   - remote-rule-that-is-not-needed-on-this-host
@@ -55,12 +56,9 @@ egress:
   default: allow
 
   rules:
-    # Protect the cloud instance metadata endpoint for Kubernetes workloads.
+    # Protect the cloud instance metadata endpoint for every workload.
     - id: block-cloud-metadata
       action: block
-      selectors:
-        cgroup_prefixes:
-          - /kubepods.slice
       destinations:
         cidrs:
           - 169.254.169.254/32
@@ -85,8 +83,8 @@ egress:
     - id: block-batch-internet
       action: block
       selectors:
-        cgroup_prefixes:
-          - /system.slice/traceguard-batch
+        uids:
+          - 2000
       destinations:
         cidrs:
           - 0.0.0.0/0
@@ -96,8 +94,8 @@ egress:
     - id: allow-batch-dns
       action: allow
       selectors:
-        cgroup_prefixes:
-          - /system.slice/traceguard-batch
+        uids:
+          - 2000
       destinations:
         cidrs:
           - 192.0.2.10/32
@@ -111,8 +109,8 @@ egress:
     - id: allow-batch-api
       action: allow
       selectors:
-        cgroup_prefixes:
-          - /system.slice/traceguard-batch
+        uids:
+          - 2000
       destinations:
         cidrs:
           - 198.51.100.20/32
@@ -121,16 +119,14 @@ egress:
         protocols:
           - tcp
 
-    # When UID and cgroup selectors are both present, both must match. Values
-    # inside either list are alternatives.
+    # Values inside the UID list are alternatives. Cgroup selectors are
+    # reserved for fail-closed allow exceptions in block and dry-run modes.
     - id: block-service-admin-network
       action: block
       selectors:
         uids:
           - 1001
           - 1002
-        cgroup_paths:
-          - /system.slice/example-api.service
       destinations:
         cidrs:
           - 10.20.0.0/16
@@ -140,6 +136,59 @@ egress:
           - 3389
         protocols:
           - tcp
+
+# The following enforcement sections are intentionally commented out. Test
+# explicit block rules with `-dry-run` before enabling `-block`. Exec and file
+# use host-wide BPF LSM hooks and therefore require the root cgroup path.
+#
+# exec:
+#   default: allow
+#   rules:
+#     - id: block-shared-memory-exec
+#       action: block
+#       selectors:
+#         uids: [1000]
+#       match:
+#         path_globs: [/tmp/**, /dev/shm/**, /run/shm/**]
+#
+# file:
+#   default: allow
+#   rules:
+#     - id: block-sensitive-auth-write
+#       action: block
+#       match:
+#         path_globs: [/etc/shadow, /etc/sudoers, /etc/sudoers.d/**, /root/.ssh/**]
+#         access: [write]
+#
+# bind:
+#   default: allow
+#   rules:
+#     - id: block-workload-ssh-bind
+#       action: block
+#       selectors:
+#         uids: [2000]
+#       endpoints:
+#         cidrs: [0.0.0.0/0, "::/0"]
+#         ports: [22]
+#         protocols: [tcp]
+#
+# unix:
+#   default: allow
+#   rules:
+#     - id: block-docker-socket
+#       action: block
+#       match:
+#         path_globs: [/var/run/docker.sock]
+#         operations: [connect, sendmsg]
+#
+# sockopt:
+#   default: allow
+#   rules:
+#     - id: block-socket-mark
+#       action: block
+#       match:
+#         levels: [socket]
+#         optnames: [so_mark, so_reuseport]
 
 detections:
   # Alert after three metadata connection attempts by the same cgroup and
@@ -170,11 +219,13 @@ detections:
       - cloud
       - credential-access
 
-  # Immediate alert for execution from common temporary directories.
+  # Resolved paths are available on LSM enforcement decisions. Syscall exec
+  # events expose only the requested alias and cannot use path selectors.
   - id: execution-from-temporary-directory
     severity: warning
     events:
-      - exec
+      - exec_blocked
+      - exec_would_block
     match:
       executable_globs:
         - /tmp/**
@@ -185,8 +236,9 @@ detections:
       - execution
       - suspicious-path
 
-  # Detect egress denials generated in either enforcement or dry-run mode.
-  - id: batch-egress-denied
+  # Detect egress denials generated in either enforcement or dry-run mode,
+  # grouped by the event-time kernel cgroup ID.
+  - id: repeated-egress-denials
     severity: notice
     events:
       - egress_blocked
@@ -194,8 +246,6 @@ detections:
     match:
       directions:
         - outbound
-      cgroup_prefixes:
-        - /system.slice/traceguard-batch
     threshold:
       count: 5
       within: 2m
@@ -203,37 +253,17 @@ detections:
         - cgroup
         - destination
     cooldown: 10m
-    message: batch workload repeatedly attempted disallowed egress
+    message: a workload repeatedly attempted disallowed egress
     tags:
       - egress
       - policy
 
-  # Kubernetes match fields require Kubernetes enrichment to be enabled.
-  - id: production-download-tool
-    severity: warning
-    events:
-      - exec
-    match:
-      command_globs:
-        - "*curl*"
-        - "*wget*"
-      k8s_namespaces:
-        - production
-    exclude:
-      k8s_service_accounts:
-        - approved-deployer
-    cooldown: 5m
-    message: download utility executed in the production namespace
-    tags:
-      - kubernetes
-      - execution
-
-  # File audit detections require file auditing to be enabled.
+  # Canonical file paths are available on LSM enforcement decisions.
   - id: ssh-configuration-write
     severity: error
     events:
-      - file_access
-      - file_created
+      - file_blocked
+      - file_would_block
     match:
       file_path_globs:
         - /etc/ssh/**

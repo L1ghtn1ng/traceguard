@@ -11,6 +11,15 @@ import (
 	"testing"
 )
 
+func closeLoggingTestResource(t *testing.T, closer interface{ Close() error }) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := closer.Close(); err != nil {
+			t.Errorf("close test resource: %v", err)
+		}
+	})
+}
+
 func TestRotatingFileRotatesAndKeepsBackups(t *testing.T) {
 	t.Parallel()
 
@@ -26,7 +35,7 @@ func TestRotatingFileRotatesAndKeepsBackups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRotatingFile returned error: %v", err)
 	}
-	defer writer.Close()
+	closeLoggingTestResource(t, writer)
 
 	line := bytes.Repeat([]byte("x"), 20)
 	for range 8 {
@@ -43,7 +52,7 @@ func TestRotatingFileRotatesAndKeepsBackups(t *testing.T) {
 		if _, err := os.Stat(rotated); err != nil {
 			t.Fatalf("rotated log %d missing: %v", idx, err)
 		}
-		file, err := os.Open(rotated)
+		file, err := os.Open(rotated) //nolint:gosec // path is derived from t.TempDir
 		if err != nil {
 			t.Fatalf("open rotated log %d: %v", idx, err)
 		}
@@ -74,7 +83,7 @@ func TestRotatingFileRejectsSymlinkLogPath(t *testing.T) {
 
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.log")
-	if err := os.WriteFile(target, []byte("existing\n"), 0o640); err != nil {
+	if err := os.WriteFile(target, []byte("existing\n"), 0o600); err != nil {
 		t.Fatalf("write target: %v", err)
 	}
 	link := filepath.Join(dir, "traceguard.log")
@@ -98,7 +107,7 @@ func TestRotatingFileRejectsSymlinkedDirectory(t *testing.T) {
 
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
-	if err := os.Mkdir(target, 0o755); err != nil {
+	if err := os.Mkdir(target, 0o750); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
 	link := filepath.Join(root, "logs-link")
@@ -142,7 +151,7 @@ func TestOpenDirectoryAllowsFinalSymlink(t *testing.T) {
 
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
-	if err := os.Mkdir(target, 0o755); err != nil {
+	if err := os.Mkdir(target, 0o750); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
 	link := filepath.Join(root, "logs-link")
@@ -154,7 +163,7 @@ func TestOpenDirectoryAllowsFinalSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDirectoryAllowFinalSymlink returned error: %v", err)
 	}
-	defer dir.Close()
+	closeLoggingTestResource(t, dir)
 	info, err := dir.Stat()
 	if err != nil {
 		t.Fatalf("stat opened directory: %v", err)
@@ -170,7 +179,7 @@ func TestOpenDirectoryRejectsParentSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")
 	logs := filepath.Join(target, "logs")
-	if err := os.MkdirAll(logs, 0o755); err != nil {
+	if err := os.MkdirAll(logs, 0o750); err != nil {
 		t.Fatalf("mkdir logs: %v", err)
 	}
 	link := filepath.Join(root, "parent-link")
@@ -213,7 +222,7 @@ func TestRotatingFileKeepsStableDirectoryDuringRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRotatingFile returned error: %v", err)
 	}
-	defer writer.Close()
+	closeLoggingTestResource(t, writer)
 	if _, err := writer.Write([]byte("first\n")); err != nil {
 		t.Fatalf("first Write returned error: %v", err)
 	}

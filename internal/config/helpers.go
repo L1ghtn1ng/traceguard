@@ -11,6 +11,88 @@ import (
 	"time"
 )
 
+const redactedValue = "[REDACTED]"
+
+const maxSyslogTagBytes = 48
+
+var secretValueFlags = map[string]struct{}{
+	"policy-authorization":       {},
+	"event-export-authorization": {},
+}
+
+var urlValueFlags = map[string]struct{}{
+	"policy-url":         {},
+	"event-export-url":   {},
+	"event-syslog-url":   {},
+	"kubernetes-api-url": {},
+}
+
+// RedactCommandLine returns a copy that is safe to include in telemetry. It
+// understands both "-flag value" and "-flag=value" forms used by flag.FlagSet.
+func RedactCommandLine(args []string) []string {
+	redacted := make([]string, 0, len(args))
+	redactNext := false
+	sanitizeURLNext := false
+	for _, arg := range args {
+		if redactNext {
+			redacted = append(redacted, redactedValue)
+			redactNext = false
+			continue
+		}
+		if sanitizeURLNext {
+			redacted = append(redacted, SanitizeURL(arg))
+			sanitizeURLNext = false
+			continue
+		}
+
+		name, value, hasValue := splitFlag(arg)
+		if _, sensitive := secretValueFlags[name]; sensitive {
+			if hasValue {
+				redacted = append(redacted, arg[:len(arg)-len(value)]+redactedValue)
+			} else {
+				redacted = append(redacted, arg)
+				redactNext = true
+			}
+			continue
+		}
+		if _, isURL := urlValueFlags[name]; isURL {
+			if hasValue {
+				redacted = append(redacted, arg[:len(arg)-len(value)]+SanitizeURL(value))
+			} else {
+				redacted = append(redacted, arg)
+				sanitizeURLNext = true
+			}
+			continue
+		}
+		redacted = append(redacted, arg)
+	}
+	return redacted
+}
+
+func splitFlag(arg string) (name, value string, hasValue bool) {
+	trimmed := strings.TrimLeft(arg, "-")
+	if trimmed == arg || trimmed == "" {
+		return "", "", false
+	}
+	name, value, hasValue = strings.Cut(trimmed, "=")
+	return name, value, hasValue
+}
+
+// SanitizeURL removes userinfo, query parameters, and fragments while keeping
+// the origin and path useful for diagnostics. Invalid input is not echoed.
+func SanitizeURL(raw string) string {
+	parsed, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "[invalid-url]"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
+}
+
 func envString(key, fallback string) string {
 	value, ok := os.LookupEnv(key)
 	if !ok {
@@ -34,7 +116,7 @@ func envBool(key string, fallback bool) (bool, error) {
 func validateSyslogConfig(cfg Config) error {
 	parsed, err := neturl.Parse(strings.TrimSpace(cfg.EventSyslogURL))
 	if err != nil {
-		return fmt.Errorf("event-syslog-url: %w", err)
+		return errors.New("event-syslog-url is not a valid URL")
 	}
 	switch parsed.Scheme {
 	case "syslog+udp", "syslog+tcp", "syslog+tls":
@@ -44,11 +126,14 @@ func validateSyslogConfig(cfg Config) error {
 	if parsed.Hostname() == "" || parsed.Port() == "" {
 		return errors.New("event-syslog-url must include host and port")
 	}
+	if parsed.User != nil {
+		return errors.New("event-syslog-url must not contain user credentials")
+	}
 	if _, ok := syslogFacilityCode(cfg.EventSyslogFacility); !ok {
 		return errors.New("event-syslog-facility must be one of kern,user,mail,daemon,auth,syslog,lpr,news,uucp,cron,authpriv,ftp,local0-local7")
 	}
 	if !validSyslogTag(cfg.EventSyslogTag) {
-		return errors.New("event-syslog-tag must be non-empty and must not contain whitespace")
+		return fmt.Errorf("event-syslog-tag must be 1-%d bytes of printable US-ASCII (no whitespace or control characters)", maxSyslogTagBytes)
 	}
 	if cfg.EventSyslogTimeout <= 0 {
 		return errors.New("event-syslog-timeout must be positive")
@@ -103,9 +188,18 @@ func syslogFacilityCode(facility string) (int, bool) {
 	}
 }
 
+// validSyslogTag matches the RFC 5424 APP-NAME rules the syslog sink enforces.
 func validSyslogTag(tag string) bool {
 	tag = strings.TrimSpace(tag)
-	return tag != "" && !strings.ContainsAny(tag, " \t\r\n")
+	if tag == "" || len(tag) > maxSyslogTagBytes {
+		return false
+	}
+	for index := range len(tag) {
+		if tag[index] < 33 || tag[index] > 126 {
+			return false
+		}
+	}
+	return true
 }
 
 func detectKubernetesAPIURL() string {

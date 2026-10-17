@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
 )
@@ -24,6 +25,10 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.SetPolicySourceHealthy("remote", true)
 	registry.SetEgressRuleCounts(2, 3)
 	registry.IncEgressDecision("block", "dry-run")
+	registry.IncLSMDecision("exec", "block", "dry-run")
+	registry.IncBindDecision("block", "block")
+	registry.IncUnixDecision("block", "dry-run", "connect")
+	registry.IncSockoptDecision("block", "block")
 	registry.SetDetectionRules(4)
 	registry.SetDetectionStateGroups(7)
 	registry.IncDetectionAlert("metadata-burst", "warning")
@@ -49,6 +54,8 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.IncProcessMetadata("proc")
 	registry.IncProcessLSMMetadata("apparmor")
 	registry.SetEBPFAttachedPrograms(14)
+	registry.SetEBPFProgramStats("lsm_exec", 123*time.Nanosecond, 7, 2)
+	registry.SetHookHealthy("lsm-exec", true)
 	registry.SetKernelFeatures(map[string]bool{"enhanced_telemetry": true, "btf": false, "bpf_lsm": true})
 	registry.IncEBPFReadError()
 
@@ -77,6 +84,14 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`traceguard_egress_rules{action="allow"} 2`,
 		`traceguard_egress_rules{action="block"} 3`,
 		`traceguard_egress_decisions_total{decision="block",mode="dry-run"} 1`,
+		`traceguard_lsm_decisions_total{decision="block",domain="exec",mode="dry-run"} 1`,
+		`traceguard_bind_decisions_total{decision="block",mode="block"} 1`,
+		`traceguard_unix_decisions_total{decision="block",mode="dry-run",op="connect"} 1`,
+		`traceguard_sockopt_decisions_total{decision="block",mode="block"} 1`,
+		`traceguard_hook_healthy{hook="lsm-exec"} 1`,
+		`traceguard_ebpf_program_runtime_nanoseconds{program="lsm_exec"} 123`,
+		`traceguard_ebpf_program_run_count{program="lsm_exec"} 7`,
+		`traceguard_ebpf_program_recursion_misses{program="lsm_exec"} 2`,
 		`traceguard_detection_rules 4`,
 		`traceguard_detection_state_groups 7`,
 		`traceguard_detection_alerts_total{rule_id="metadata-burst",severity="warning"} 1`,
@@ -98,6 +113,19 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+}
+
+func TestHookHealthAffectsReadinessAndRecovers(t *testing.T) {
+	t.Parallel()
+	registry := NewRegistry()
+	registry.SetHookHealthy("unix", false)
+	if registry.Healthy() {
+		t.Fatal("registry stayed healthy after required hook failure")
+	}
+	registry.SetHookHealthy("unix", true)
+	if !registry.Healthy() {
+		t.Fatal("registry did not recover after hook became ready")
 	}
 }
 
@@ -151,7 +179,7 @@ func TestHealthEndpointReportsSinkFailure(t *testing.T) {
 
 	registry := NewRegistry()
 	registry.SetEventSinkHealthy("archive", false)
-	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/health", nil)
 	response := httptest.NewRecorder()
 	registry.httpHandler().ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "unhealthy\n" {
@@ -196,11 +224,15 @@ func TestRenderEscapesDirectMetricLabels(t *testing.T) {
 func TestStartServerReturnsListenError(t *testing.T) {
 	t.Parallel()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Listen returned error: %v", err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close test listener: %v", err)
+		}
+	})
 
 	logger, err := logging.NewLogger(io.Discard, "json")
 	if err != nil {

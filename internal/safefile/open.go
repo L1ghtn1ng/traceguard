@@ -26,8 +26,12 @@ func openAbsolute(path string, flags int, mode os.FileMode, openat2 openat2Func)
 		return nil, fmt.Errorf("path %q must be absolute", path)
 	}
 	cleaned := filepath.Clean(path)
+	openFlags, err := openHowFlags(flags)
+	if err != nil {
+		return nil, err
+	}
 	fd, err := openat2(unix.AT_FDCWD, cleaned, &unix.OpenHow{
-		Flags:   uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+		Flags:   openFlags,
 		Mode:    uint64(mode.Perm()),
 		Resolve: noSymlinks,
 	})
@@ -87,8 +91,12 @@ func OpenBeneath(dirfd int, name string, flags int, mode os.FileMode) (*os.File,
 	if !filepath.IsLocal(name) {
 		return nil, fmt.Errorf("path %q must be local", name)
 	}
+	openFlags, err := openHowFlags(flags)
+	if err != nil {
+		return nil, err
+	}
 	fd, err := unix.Openat2(dirfd, name, &unix.OpenHow{
-		Flags:   uint64(flags | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+		Flags:   openFlags,
 		Mode:    uint64(mode.Perm()),
 		Resolve: noSymlinks | unix.RESOLVE_BENEATH,
 	})
@@ -103,21 +111,25 @@ func OpenBeneath(dirfd int, name string, flags int, mode os.FileMode) (*os.File,
 	return file, nil
 }
 
-func ReadFile(path string, maxBytes int64) ([]byte, error) {
+func ReadFile(path string, maxBytes int64) (payload []byte, readErr error) {
 	file, err := OpenAbsolute(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		readErr = errors.Join(readErr, file.Close())
+	}()
 	return readRegular(file, maxBytes)
 }
 
-func ReadFileBeneath(dirfd int, name string, maxBytes int64) ([]byte, error) {
+func ReadFileBeneath(dirfd int, name string, maxBytes int64) (payload []byte, readErr error) {
 	file, err := OpenBeneath(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		readErr = errors.Join(readErr, file.Close())
+	}()
 	return readRegular(file, maxBytes)
 }
 
@@ -142,7 +154,7 @@ func readRegular(file *os.File, maxBytes int64) ([]byte, error) {
 	return payload, nil
 }
 
-func WriteFileAtomic(path string, payload []byte, mode os.FileMode) error {
+func WriteFileAtomic(path string, payload []byte, mode os.FileMode) (writeErr error) {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("path %q must be absolute", path)
 	}
@@ -156,7 +168,9 @@ func WriteFileAtomic(path string, payload []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() {
+		writeErr = errors.Join(writeErr, dir.Close())
+	}()
 
 	random := make([]byte, 12)
 	if _, err := rand.Read(random); err != nil {
@@ -189,4 +203,12 @@ func WriteFileAtomic(path string, payload []byte, mode os.FileMode) error {
 		return err
 	}
 	return unix.Fsync(int(dir.Fd()))
+}
+
+func openHowFlags(flags int) (uint64, error) {
+	flags |= unix.O_CLOEXEC | unix.O_NOFOLLOW
+	if flags < 0 {
+		return 0, errors.New("open flags must not be negative")
+	}
+	return uint64(flags), nil
 }
