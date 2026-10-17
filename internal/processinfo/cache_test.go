@@ -1,6 +1,7 @@
 package processinfo
 
 import (
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -295,8 +296,11 @@ func TestCacheUsesAndClosesPidfdForRealProc(t *testing.T) {
 func TestStoreEntryLockedClosesReplacedPidfd(t *testing.T) {
 	t.Parallel()
 
+	// O_CLOEXEC keeps processes started by parallel tests from inheriting the
+	// read end. Closing it is observed through the write end, because the
+	// descriptor number may be reused by another test as soon as it closes.
 	var fds [2]int
-	if err := unix.Pipe(fds[:]); err != nil {
+	if err := unix.Pipe2(fds[:], unix.O_CLOEXEC|unix.O_NONBLOCK); err != nil {
 		t.Fatalf("create pipe: %v", err)
 	}
 	t.Cleanup(func() {
@@ -308,8 +312,8 @@ func TestStoreEntryLockedClosesReplacedPidfd(t *testing.T) {
 	cache := NewCache(t.TempDir(), time.Minute)
 	cache.entries[100] = cacheEntry{pidfd: fds[0]}
 	cache.storeEntryLocked(100, cacheEntry{pidfd: -1})
-	if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0); err != unix.EBADF {
-		t.Fatalf("replaced pidfd error = %v, want EBADF", err)
+	if _, err := unix.Write(fds[1], []byte{0}); !errors.Is(err, unix.EPIPE) {
+		t.Fatalf("write after replacing pidfd error = %v, want EPIPE", err)
 	}
 }
 
