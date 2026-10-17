@@ -35,6 +35,16 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang
+
+      # The embedded eBPF objects are generated, not committed, and the
+      # bpf2go bindings fail type checking without them.
+      - name: Generate eBPF bindings
+        run: go generate ./internal/ebpf
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:

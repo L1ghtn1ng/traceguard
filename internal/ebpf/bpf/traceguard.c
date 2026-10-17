@@ -1892,16 +1892,37 @@ static __noinline int load_unix_path(struct bpf_sock_addr *ctx, char path[109], 
 	return *path_len > 0;
 }
 
+/*
+ * Kept out of evaluate_unix so the decision context does not occupy stack in
+ * the frame that stays live across the path lookup: evaluate_unix plus
+ * lookup_path_kind must fit the verifier's 512-byte combined stack limit.
+ */
+static __noinline void emit_unix_decision(const struct path_lookup_context *lookup, __u32 rule_id,
+	__u8 hook, __u8 enforce)
+{
+	const struct path_decision_context decision = {
+		.path = lookup->path,
+		.cgroup_id = lookup->cgroup_id,
+		.uid = lookup->uid,
+		.rule_id = rule_id,
+		.path_len = lookup->path_len,
+		.policy_slot = lookup->policy_slot,
+		.family = FAMILY_UNIX,
+		.hook = hook,
+		.operation = lookup->access_or_op,
+	};
+
+	emit_path_decision(enforce ? EVENT_UNIX_BLOCKED : EVENT_UNIX_WOULD_BLOCK,
+		EVENT_SOURCE_CGROUP_SOCK_ADDR, &decision);
+}
+
 static __always_inline int evaluate_unix(struct bpf_sock_addr *ctx, __u8 operation, __u8 hook)
 {
 	struct policy_guard guard = {0};
 	const struct settings *cfg;
 	char path[109] = {0};
-	__u32 path_len = 0;
-	__u32 uid;
-	__u64 cgroup_id;
 	__u32 rule_id = 0;
-	int deny;
+	__u8 enforce;
 	struct path_lookup_context lookup = {0};
 
 	if (!acquire_policy_guard(&guard)) {
@@ -1912,43 +1933,25 @@ static __always_inline int evaluate_unix(struct bpf_sock_addr *ctx, __u8 operati
 		release_policy_guard(&guard);
 		return 1;
 	}
-	if (!load_unix_path(ctx, path, &path_len)) {
+	if (!load_unix_path(ctx, path, &lookup.path_len)) {
 		release_policy_guard(&guard);
 		return 1;
 	}
-	uid = (__u32)bpf_get_current_uid_gid();
-	cgroup_id = bpf_get_current_cgroup_id();
 	lookup.path = path;
-	lookup.cgroup_id = cgroup_id;
-	lookup.uid = uid;
-	lookup.path_len = path_len;
+	lookup.cgroup_id = bpf_get_current_cgroup_id();
+	lookup.uid = (__u32)bpf_get_current_uid_gid();
 	lookup.domain = PATH_DOMAIN_UNIX;
 	lookup.policy_slot = cfg->active_policy_slot;
 	lookup.access_or_op = operation;
-	deny = path_policy_denies(&lookup, cfg->unix_default_block, &rule_id);
-	if (!deny) {
+	if (!path_policy_denies(&lookup, cfg->unix_default_block, &rule_id)) {
 		release_policy_guard(&guard);
 		return 1;
 	}
-	const struct path_decision_context decision = {
-		.path = path,
-		.cgroup_id = cgroup_id,
-		.uid = uid,
-		.rule_id = rule_id,
-		.path_len = path_len,
-		.policy_slot = cfg->active_policy_slot,
-		.family = FAMILY_UNIX,
-		.hook = hook,
-		.operation = operation,
-	};
 	/* cgroup/recvmsg_unix may only return 1, so recvmsg decisions are audit-only. */
-	__u8 enforce = cfg->unix_enforce && operation != UNIX_OP_RECVMSG;
-
-	emit_path_decision(enforce ? EVENT_UNIX_BLOCKED : EVENT_UNIX_WOULD_BLOCK,
-		EVENT_SOURCE_CGROUP_SOCK_ADDR, &decision);
-	deny = cgroup_verdict(enforce);
+	enforce = cfg->unix_enforce && operation != UNIX_OP_RECVMSG;
+	emit_unix_decision(&lookup, rule_id, hook, enforce);
 	release_policy_guard(&guard);
-	return deny;
+	return cgroup_verdict(enforce);
 }
 
 SEC("cgroup/connect_unix")
