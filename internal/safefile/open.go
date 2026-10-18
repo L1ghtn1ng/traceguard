@@ -9,11 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 const noSymlinks = unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS
+
+// MaxSecretBytes bounds credential files read by ReadSecret.
+const MaxSecretBytes = 8 * 1024
 
 func OpenAbsolute(path string, flags int, mode os.FileMode) (*os.File, error) {
 	return openAbsolute(path, flags, mode, unix.Openat2)
@@ -131,6 +135,41 @@ func ReadFileBeneath(dirfd int, name string, maxBytes int64) (payload []byte, re
 		readErr = errors.Join(readErr, file.Close())
 	}()
 	return readRegular(file, maxBytes)
+}
+
+// ReadSecret reads a single-line credential, such as a systemd
+// LoadCredential= file, from a regular file owned by root or the effective
+// user with no group or other permission bits. One trailing newline is removed.
+func ReadSecret(path string) (secret string, readErr error) {
+	file, err := OpenAbsolute(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		readErr = errors.Join(readErr, file.Close())
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("file mode %04o grants group or other access; use 0600 or 0400", perm)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || (stat.Uid != 0 && int(stat.Uid) != os.Geteuid()) {
+		return "", errors.New("file must be owned by root")
+	}
+	payload, err := readRegular(file, MaxSecretBytes)
+	if err != nil {
+		return "", err
+	}
+	secret = strings.TrimSuffix(strings.TrimSuffix(string(payload), "\n"), "\r")
+	if strings.ContainsAny(secret, "\r\n\x00") {
+		return "", errors.New("file must contain a single line")
+	}
+	if strings.TrimSpace(secret) == "" {
+		return "", errors.New("file is empty")
+	}
+	return secret, nil
 }
 
 func readRegular(file *os.File, maxBytes int64) ([]byte, error) {

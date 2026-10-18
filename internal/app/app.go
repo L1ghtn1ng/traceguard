@@ -130,14 +130,15 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	var yamlManager *policyconfig.Manager
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
 		yamlManager, err = policyconfig.NewManager(policyconfig.Config{
-			Path:           cfg.PolicyPath,
-			URL:            cfg.PolicyURL,
-			CachePath:      cfg.PolicyCachePath,
-			RefreshPeriod:  cfg.PolicyRefreshInterval,
-			Authorization:  cfg.PolicyAuthorization,
-			CAPath:         cfg.PolicyCAPath,
-			ClientCertPath: cfg.PolicyClientCert,
-			ClientKeyPath:  cfg.PolicyClientKey,
+			Path:              cfg.PolicyPath,
+			URL:               cfg.PolicyURL,
+			CachePath:         cfg.PolicyCachePath,
+			RefreshPeriod:     cfg.PolicyRefreshInterval,
+			Authorization:     cfg.PolicyAuthorization,
+			AuthorizationFile: cfg.PolicyAuthorizationFile,
+			CAPath:            cfg.PolicyCAPath,
+			ClientCertPath:    cfg.PolicyClientCert,
+			ClientKeyPath:     cfg.PolicyClientKey,
 			Validate: func(bundle policyconfig.Bundle) error {
 				return validateBundleForMode(cfg, bundle)
 			},

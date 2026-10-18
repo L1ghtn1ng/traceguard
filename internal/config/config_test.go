@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -684,6 +685,52 @@ func TestRedactCommandLineProtectsCredentialsAndURLQueries(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("redacted command line %q missing %q", rendered, want)
 		}
+	}
+}
+
+func TestRedactCommandLineProtectsMonitoredProcessCredentials(t *testing.T) {
+	t.Parallel()
+
+	args := []string{
+		"/usr/bin/tool",
+		"--password", "flag-secret",
+		"--db-password=equals-secret",
+		"-token", "token-secret",
+		"--api-key=key-secret",
+		"-H", "Authorization: Bearer header-secret",
+		"--header=X-Auth-Token: header-token-secret",
+		"-H", "Cookie: session=cookie-secret; theme=cookie-tail",
+		"AWS_SECRET_ACCESS_KEY=env-secret",
+		"postgres://admin:dsn-secret@db.example/app",
+		"https://api.example/v1?user=alice&access_token=query-secret",
+		"sh", "-c", "curl -H 'Authorization: Basic shell-secret' https://bob:shell-dsn-secret@api.example",
+	}
+	got := RedactCommandLine(args)
+	rendered := strings.Join(got, " ")
+	for _, secret := range []string{
+		"flag-secret", "equals-secret", "token-secret", "key-secret", "header-secret", "header-token-secret",
+		"cookie-secret", "cookie-tail", "env-secret", "dsn-secret", "query-secret", "shell-secret", "shell-dsn-secret",
+	} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("redacted command line retained %q: %q", secret, rendered)
+		}
+	}
+	for _, want := range []string{
+		"--password " + redactedValue,
+		"--db-password=" + redactedValue,
+		"Authorization: " + redactedValue,
+		"AWS_SECRET_ACCESS_KEY=" + redactedValue,
+		"postgres://" + redactedValue + "@db.example/app",
+		"https://api.example/v1?user=alice&access_token=" + redactedValue,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("redacted command line %q missing %q", rendered, want)
+		}
+	}
+
+	plain := []string{"/usr/bin/dig", "-p", "53", "--timeout=5", "example.com", "https://example.com/path?q=1", "/etc/passwd", "PATH=/usr/bin"}
+	if got := RedactCommandLine(plain); !slices.Equal(got, plain) {
+		t.Fatalf("RedactCommandLine(%q) = %q, want unchanged", plain, got)
 	}
 }
 

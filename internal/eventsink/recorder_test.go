@@ -765,6 +765,91 @@ func TestExportSinkSendsJSONBatchWithAuthorization(t *testing.T) {
 	}
 }
 
+func TestExportSinkSendsAuthorizationFromFile(t *testing.T) {
+	t.Parallel()
+
+	authorizationPath := filepath.Join(t.TempDir(), "event-export-authorization")
+	if err := os.WriteFile(authorizationPath, []byte("Bearer file-token\n"), 0o400); err != nil {
+		t.Fatalf("write authorization file: %v", err)
+	}
+	auth := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	sink, err := newExportSink(context.Background(), Config{
+		ExportURL:               server.URL,
+		ExportAuthorizationFile: authorizationPath,
+	}, telemetry.NewRegistry())
+	if err != nil {
+		t.Fatalf("newExportSink returned error: %v", err)
+	}
+	closeTestResource(t, sink)
+	trustTestServer(t, sink, server)
+
+	batch := []json.RawMessage{mustMarshalRecord(t, record{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Level: "info", Message: "one"})}
+	if err := sink.sendBatch(context.Background(), batch); err != nil {
+		t.Fatalf("sendBatch returned error: %v", err)
+	}
+	select {
+	case got := <-auth:
+		if got != "Bearer file-token" {
+			t.Fatalf("auth header = %q, want Bearer file-token", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for export request")
+	}
+}
+
+func TestExportSinkRejectsInvalidAuthorizationFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	authorizationPath := filepath.Join(dir, "event-export-authorization")
+	if err := os.WriteFile(authorizationPath, []byte("Bearer file-token\n"), 0o600); err != nil {
+		t.Fatalf("write authorization file: %v", err)
+	}
+	readablePath := filepath.Join(dir, "readable-authorization")
+	if err := os.WriteFile(readablePath, []byte("Bearer file-token\n"), 0o600); err != nil {
+		t.Fatalf("write authorization file: %v", err)
+	}
+	if err := os.Chmod(readablePath, 0o640); err != nil { //nolint:gosec // the test needs a group-readable file
+		t.Fatalf("chmod authorization file: %v", err)
+	}
+	for name, tt := range map[string]struct {
+		cfg  Config
+		want string
+	}{
+		"value and file": {
+			cfg:  Config{ExportAuthorization: "Bearer value", ExportAuthorizationFile: authorizationPath},
+			want: "must not both be set",
+		},
+		"group readable": {
+			cfg:  Config{ExportAuthorizationFile: readablePath},
+			want: "group or other",
+		},
+		"relative": {
+			cfg:  Config{ExportAuthorizationFile: "event-export-authorization"},
+			want: "must be an absolute path",
+		},
+	} {
+		tt.cfg.ExportURL = "https://collector.example/traceguard"
+		sink, err := newExportSink(context.Background(), tt.cfg, telemetry.NewRegistry())
+		if err == nil {
+			closeTestResource(t, sink)
+			t.Fatalf("%s: newExportSink succeeded, want %q", name, tt.want)
+		}
+		if !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("%s: newExportSink error = %v, want %q", name, err, tt.want)
+		}
+		if strings.Contains(err.Error(), "token") {
+			t.Fatalf("%s: newExportSink error %q exposes the authorization value", name, err)
+		}
+	}
+}
+
 func TestExportSinkKeepsLateEventsUntilClose(t *testing.T) {
 	t.Parallel()
 

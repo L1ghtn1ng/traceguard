@@ -385,6 +385,67 @@ func TestTraceDNSMultiQuestionFailsClosedInBlockMode(t *testing.T) {
 	}
 }
 
+func TestTraceDNSIPv6ExtensionHeaderChainsInBlockMode(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	retainIntegrationProgram(spec, "trace_dns")
+	var objects struct {
+		TraceDns       *ebpf.Program `ebpf:"trace_dns"`
+		Settings       *ebpf.Map     `ebpf:"settings"`
+		PolicySelector *ebpf.Map     `ebpf:"policy_selector"`
+		Blocklist      *ebpf.Map     `ebpf:"blocklist"`
+	}
+	if err := spec.LoadAndAssign(&objects, newCollectionOptions()); err != nil {
+		fatalVerifierError(t, "LoadAndAssign", err)
+	}
+	defer objects.TraceDns.Close()
+	defer objects.Settings.Close()
+	defer objects.PolicySelector.Close()
+	defer objects.Blocklist.Close()
+	blocked, err := encodeDomainKey("blocked.example")
+	if err != nil {
+		t.Fatalf("encode blocked question: %v", err)
+	}
+	if err := objects.Blocklist.Put(blocked, uint8(1)); err != nil {
+		t.Fatalf("install blocked question: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		packet    []byte
+		wantBlock uint32
+	}{
+		{"five headers allowed name", ipv6ExtensionHeaderDNSPacket(5, "allowed"), 1},
+		{"six headers allowed name", ipv6ExtensionHeaderDNSPacket(6, "allowed"), 1},
+		{"six headers blocked name", ipv6ExtensionHeaderDNSPacket(6, "blocked"), 0},
+		{"over-limit chain", ipv6ExtensionHeaderDNSPacket(7, "allowed"), 0},
+	}
+	publishIntegrationSettings(t, objects.Settings, objects.PolicySelector, 0, 1, runtimeSettings{})
+	for _, tc := range cases {
+		if result, _, err := objects.TraceDns.Test(tc.packet); err != nil {
+			t.Fatalf("test observe %s: %v", tc.name, err)
+		} else if result != 1 {
+			t.Fatalf("observe %s result = %d, want 1", tc.name, result)
+		}
+	}
+	publishIntegrationSettings(t, objects.Settings, objects.PolicySelector, 1, 2, runtimeSettings{BlockEnabled: 1})
+	for _, tc := range cases {
+		if result, _, err := objects.TraceDns.Test(tc.packet); err != nil {
+			t.Fatalf("test block %s: %v", tc.name, err)
+		} else if result != tc.wantBlock {
+			t.Fatalf("block %s result = %d, want %d", tc.name, result, tc.wantBlock)
+		}
+	}
+}
+
 func TestTraceDNSMalformedQuestionsFailClosedInBlockMode(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")
@@ -497,6 +558,40 @@ func malformedIPv6UDPDNSPacket() []byte {
 	binary.BigEndian.PutUint16(ip[40:42], 12345)
 	binary.BigEndian.PutUint16(ip[42:44], 53)
 	binary.BigEndian.PutUint16(ip[44:46], 9)
+	return withEthernetHeader(packet)
+}
+
+// ipv6ExtensionHeaderDNSPacket chains count 8-byte destination-options headers
+// between the IPv6 header and a UDP DNS query for label.example.
+func ipv6ExtensionHeaderDNSPacket(count int, label string) []byte {
+	const extensionHeaderLen = 8
+	dns := make([]byte, 12)
+	binary.BigEndian.PutUint16(dns[4:6], 1)
+	dns = append(dns, byte(len(label)))
+	dns = append(dns, label...)
+	dns = append(dns, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 0, 1, 0, 1)
+
+	transportOffset := 40 + count*extensionHeaderLen
+	packet := make([]byte, transportOffset+8+len(dns))
+	packet[0] = 0x60
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(packet)-40))
+	packet[6] = unix.IPPROTO_DSTOPTS
+	packet[7] = 64
+	packet[39] = 1
+	for index := range count {
+		offset := 40 + index*extensionHeaderLen
+		packet[offset] = unix.IPPROTO_DSTOPTS
+		if index == count-1 {
+			packet[offset] = unix.IPPROTO_UDP
+		}
+		// Hdr Ext Len 0 is one 8-byte unit; PadN fills the option area.
+		packet[offset+2] = 1
+		packet[offset+3] = 4
+	}
+	binary.BigEndian.PutUint16(packet[transportOffset:transportOffset+2], 12345)
+	binary.BigEndian.PutUint16(packet[transportOffset+2:transportOffset+4], 53)
+	binary.BigEndian.PutUint16(packet[transportOffset+4:transportOffset+6], uint16(8+len(dns)))
+	copy(packet[transportOffset+8:], dns)
 	return withEthernetHeader(packet)
 }
 

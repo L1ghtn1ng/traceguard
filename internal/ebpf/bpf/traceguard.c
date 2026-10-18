@@ -61,6 +61,7 @@
 #define DNS_PARSE_OK 0
 #define DNS_PARSE_PASS 1
 #define DNS_PARSE_DROP 2
+#define IPV6_EXT_HEADERS_EXHAUSTED -2
 #define SOCKET_HOOK_CGROUP_SKB 1
 #define SOCKET_HOOK_CGROUP_SENDMSG4 2
 #define SOCKET_HOOK_CGROUP_SENDMSG6 3
@@ -2730,7 +2731,11 @@ static __always_inline int parse_ipv6_transport(struct __sk_buff *skb, __u32 pac
 		return 0;
 	}
 
-	return -1;
+	if (*nexthdr == IPPROTO_HOPOPTS || *nexthdr == IPPROTO_ROUTING || *nexthdr == IPPROTO_DSTOPTS || *nexthdr == IPPROTO_AH ||
+		*nexthdr == IPPROTO_FRAGMENT) {
+		return IPV6_EXT_HEADERS_EXHAUSTED;
+	}
+	return 0;
 }
 
 static __always_inline int block_fragmented_ipv6_dns(struct __sk_buff *skb, __u32 transport_offset, __u32 packet_len, __u8 nexthdr, __u8 block_enabled)
@@ -3085,6 +3090,7 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 		__u8 fragmented;
 		__u32 kind;
 		__u32 decision;
+		int ext_parse;
 
 		if (packet_len < sizeof(ip6h)) {
 			return 1;
@@ -3093,7 +3099,12 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 			return 1;
 		}
 		nexthdr = ip6h.nexthdr;
-		if (parse_ipv6_transport(skb, packet_len, &nexthdr, &transport_offset, &fragmented) < 0) {
+		ext_parse = parse_ipv6_transport(skb, packet_len, &nexthdr, &transport_offset, &fragmented);
+		if (ext_parse == IPV6_EXT_HEADERS_EXHAUSTED) {
+			/* The transport is unknown, so a longer chain could hide DNS. */
+			return policy.block_enabled ? 0 : 1;
+		}
+		if (ext_parse < 0) {
 			return 1;
 		}
 		if (fragmented) {

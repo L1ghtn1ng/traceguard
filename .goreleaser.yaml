@@ -73,6 +73,10 @@ nfpms:
       - src: packaging/default/traceguard.env
         dst: /etc/traceguard/traceguard.env
         type: config|noreplace
+        file_info:
+          mode: 0600
+          owner: root
+          group: root
       - src: README.md
         dst: /usr/share/doc/traceguard/README.md
       - src: examples/policy.yaml

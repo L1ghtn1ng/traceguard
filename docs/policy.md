@@ -847,12 +847,41 @@ sudo ./traceguard -dry-run \
   -policy-url https://policy.example/traceguard/v1
 ```
 
-An authorization header, custom CA roots, and mTLS are supported:
+An authorization header, custom CA roots, and mTLS are supported. Set the
+authorization header value with `TRACEGUARD_POLICY_AUTHORIZATION`, for example
+in the root-only `/etc/traceguard/traceguard.env`, rather than with
+`-policy-authorization`: command-line values are visible to local users in
+process listings.
+
+To keep the value out of the environment too, store it in a file and set
+`-policy-authorization-file` or `TRACEGUARD_POLICY_AUTHORIZATION_FILE` to the
+file's absolute path. The file is read once at startup and must be a regular
+file, not a symlink, owned by root with no group or other permissions (`0600`
+or `0400`). It holds a single line of at most 8 KiB; one trailing newline is
+removed. Setting both the value and the file is rejected.
+
+With systemd, `LoadCredential=` copies the file into the service's credentials
+directory. systemd does not expand variables in `EnvironmentFile=` values, so
+TraceGuard expands a leading `${CREDENTIALS_DIRECTORY}` itself:
+
+```ini
+# /etc/systemd/system/traceguard.service.d/credentials.conf
+[Service]
+LoadCredential=policy-authorization:/etc/traceguard/credentials/policy-authorization
+```
+
+```bash
+# /etc/traceguard/traceguard.env
+TRACEGUARD_POLICY_AUTHORIZATION_FILE=${CREDENTIALS_DIRECTORY}/policy-authorization
+```
+
+An `Environment=TRACEGUARD_POLICY_AUTHORIZATION_FILE=%d/policy-authorization`
+line in the drop-in works too; `%d` is systemd's credentials directory
+specifier.
 
 ```bash
 sudo ./traceguard -dry-run \
   -policy-url https://policy.example/traceguard/v1 \
-  -policy-authorization 'Bearer token' \
   -policy-ca-path /etc/traceguard/policy-ca.crt \
   -policy-client-cert /etc/traceguard/policy-client.crt \
   -policy-client-key /etc/traceguard/policy-client.key
@@ -876,7 +905,8 @@ be absolute.
 | `-policy-url` | `TRACEGUARD_POLICY_URL` | Remote HTTPS base policy URL. |
 | `-policy-cache-path` | `TRACEGUARD_POLICY_CACHE_PATH` | Validated remote cache; defaults to `/var/lib/traceguard/policy.yaml`. |
 | `-policy-refresh-interval` | `TRACEGUARD_POLICY_REFRESH_INTERVAL` | Remote refresh interval; defaults to `5m`. |
-| `-policy-authorization` | `TRACEGUARD_POLICY_AUTHORIZATION` | Optional HTTP `Authorization` header value. |
+| `-policy-authorization` | `TRACEGUARD_POLICY_AUTHORIZATION` | Optional HTTP `Authorization` header value. Prefer the environment variable or the file; command-line values are visible in process listings. |
+| `-policy-authorization-file` | `TRACEGUARD_POLICY_AUTHORIZATION_FILE` | Optional absolute path to a root-only file holding the `Authorization` header value, such as `${CREDENTIALS_DIRECTORY}/policy-authorization`. Cannot be combined with `-policy-authorization`. |
 | `-policy-ca-path` | `TRACEGUARD_POLICY_CA_PATH` | Optional additional CA bundle. |
 | `-policy-client-cert` | `TRACEGUARD_POLICY_CLIENT_CERT` | Optional mTLS client certificate. |
 | `-policy-client-key` | `TRACEGUARD_POLICY_CLIENT_KEY` | Optional mTLS client key. |

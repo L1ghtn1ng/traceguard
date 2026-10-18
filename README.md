@@ -112,7 +112,7 @@ Notes:
 - file access auditing is enabled by default in packaged deployments; disable it with `TRACEGUARD_FILE_AUDIT=false` if open-style syscall volume is too high for the host
 - Kubernetes enrichment is optional, API-driven, and keyed by the observed pod UID
 - common IPv6 extension headers are parsed before DNS inspection
-- in block mode, TCP DNS payloads that are not exactly one complete length-prefixed message, fragmented IPv6 DNS packets, and unparseable IPv4 or IPv6 UDP DNS payloads are denied instead of allowed
+- in block mode, TCP DNS payloads that are not exactly one complete length-prefixed message, fragmented IPv6 DNS packets, IPv6 packets with more than six extension headers, and unparseable IPv4 or IPv6 UDP DNS payloads are denied instead of allowed
 - kernel policy refreshes are published atomically from immutable per-slot settings, so every enforcement hook sees either the previous complete policy or the next complete policy
 - failed scheduled or SIGHUP-triggered policy refreshes leave the last successfully committed policy active and are retried without stopping TraceGuard
 - event timestamps represent kernel event occurrence time and are converted from `CLOCK_BOOTTIME` to UTC wall time in userspace
@@ -298,14 +298,40 @@ sudo ./traceguard \
   -event-export-url https://collector.example/api/traceguard
 ```
 
-Production HTTPS batch export with auth and durable retry:
+Production HTTPS batch export with auth and durable retry. Keep the
+Authorization value in the root-only `/etc/traceguard/traceguard.env` rather
+than on the command line, where local users can read it from process listings:
 
 ```bash
-sudo ./traceguard \
-  -event-export-url https://siem.example/api/traceguard \
-  -event-export-authorization 'Bearer secret-token' \
-  -event-export-spool
+# /etc/traceguard/traceguard.env
+TRACEGUARD_EVENT_EXPORT_URL=https://siem.example/api/traceguard
+TRACEGUARD_EVENT_EXPORT_AUTHORIZATION=Bearer secret-token
+TRACEGUARD_EVENT_EXPORT_SPOOL=true
 ```
+
+To keep the value out of the environment too, put it in a root-owned `0600` or
+`0400` file and point `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE` (or
+`-event-export-authorization-file`) at it instead. The file holds a single line
+of at most 8 KiB, a trailing newline is removed, and symlinks are rejected. With
+systemd `LoadCredential=`, TraceGuard expands a leading
+`${CREDENTIALS_DIRECTORY}`, which systemd does not expand in the environment
+file:
+
+```ini
+# /etc/systemd/system/traceguard.service.d/credentials.conf
+[Service]
+LoadCredential=event-export-authorization:/etc/traceguard/credentials/event-export-authorization
+```
+
+```bash
+# /etc/traceguard/traceguard.env
+TRACEGUARD_EVENT_EXPORT_URL=https://siem.example/api/traceguard
+TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE=${CREDENTIALS_DIRECTORY}/event-export-authorization
+```
+
+`-policy-authorization-file` and `TRACEGUARD_POLICY_AUTHORIZATION_FILE` work
+the same way for the remote policy source. Setting both a value and a file for
+the same header is rejected.
 
 Use a private CA and mTLS for the HTTPS event collector:
 
@@ -342,6 +368,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_POLICY_CACHE_PATH`
 - `TRACEGUARD_POLICY_REFRESH_INTERVAL`
 - `TRACEGUARD_POLICY_AUTHORIZATION`
+- `TRACEGUARD_POLICY_AUTHORIZATION_FILE`
 - `TRACEGUARD_POLICY_CA_PATH`
 - `TRACEGUARD_POLICY_CLIENT_CERT`
 - `TRACEGUARD_POLICY_CLIENT_KEY`
@@ -352,6 +379,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_EVENT_ARCHIVE_PATH`
 - `TRACEGUARD_EVENT_EXPORT_URL`
 - `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION`
+- `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE`
 - `TRACEGUARD_EVENT_EXPORT_SPOOL`
 - `TRACEGUARD_EVENT_EXPORT_CA_PATH`
 - `TRACEGUARD_EVENT_EXPORT_CLIENT_CERT`
