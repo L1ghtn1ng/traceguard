@@ -288,6 +288,11 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 		if (event.Kind == ebpf.EventFileAccess || event.Kind == ebpf.EventFileChange) && event.PID == selfPID {
 			return
 		}
+		// File change hooks stay attached for file integrity monitoring;
+		// without file auditing, their events serve only that.
+		if event.Kind == ebpf.EventFileChange && !cfg.FileAudit && !integrity.Enabled() {
+			return
+		}
 		process, hit := lookupProcessForEvent(processCache, event)
 		metrics.IncProcessCache(hit)
 		metrics.IncProcessMetadata(process.Source)
@@ -459,8 +464,11 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			notifyIntegrity(integrity, "/proc", event, fields)
 		case ebpf.EventFileChange:
 			appendFileChangeFields(fields, event)
-			recorder.InfoAt(event.Timestamp, eventName, fields)
 			notifyIntegrity(integrity, "/proc", event, fields)
+			if !cfg.FileAudit {
+				return
+			}
+			recorder.InfoAt(event.Timestamp, eventName, fields)
 		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 			fields["direction"] = event.Direction
 			fields["peer_address"] = event.Address

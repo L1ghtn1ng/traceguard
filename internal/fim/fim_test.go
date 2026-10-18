@@ -40,9 +40,10 @@ func TestBaselineHashesWatchedFilesAndHonoursExclusions(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", filepath.Join(root, "etc/link")); err != nil {
 		t.Fatal(err)
 	}
-	integrity := policy.FileIntegrityPolicy{Paths: []string{"/etc/**"}, Exclude: []string{"/etc/mtab"}, MaxHashBytes: 12}
-	states, truncated := scanner{root: root, policy: integrity, maxSize: integrity.HashLimit()}.Baseline()
-	if truncated {
+	integrity := policy.FileIntegrityPolicy{Paths: []string{"/etc/**"}, Exclude: []string{"/etc/mtab"}, MaxHashBytes: new(int64(12))}
+	result := scanner{root: root, policy: integrity, maxSize: integrity.HashLimit()}.Baseline()
+	states := result.states
+	if result.truncated {
 		t.Fatal("small baseline reported truncated")
 	}
 	if _, ok := states["/etc/mtab"]; ok {
@@ -122,7 +123,7 @@ func newTestWatcher(t *testing.T, root string, integrity policy.FileIntegrityPol
 	watcher.mu.Lock()
 	watcher.rebuild = false
 	watcher.mu.Unlock()
-	watcher.install(false, output.emit)
+	watcher.install(true, output.emit)
 	return watcher, output
 }
 

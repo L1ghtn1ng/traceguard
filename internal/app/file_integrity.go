@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/fim"
+	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
@@ -78,6 +80,17 @@ func resolveRequestedPath(procRoot string, pid, dirfd uint32, path string) (stri
 	return filepath.Join(directory, path), true
 }
 
+// sharesMountNamespace reports whether pid is in the daemon's mount
+// namespace. When either namespace cannot be read, it assumes it is.
+func sharesMountNamespace(procRoot string, pid uint32) bool {
+	process, err := os.Readlink(fmt.Sprintf("%s/%d/ns/mnt", procRoot, pid))
+	if err != nil {
+		return true
+	}
+	daemon, err := os.Readlink(procRoot + "/self/ns/mnt")
+	return err != nil || process == daemon
+}
+
 // integrityActorFields are the triggering event's fields copied onto a file
 // integrity change, prefixed with actor_.
 var integrityActorFields = []string{
@@ -101,6 +114,11 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 			paths = append(paths, event.NewPath)
 		}
 	default:
+		return
+	}
+	if !sharesMountNamespace(procRoot, event.PID) {
+		// The paths name files in the process's own mount namespace, such
+		// as a container's /etc, not the host files that are watched.
 		return
 	}
 	actor := fim.Actor{}
@@ -212,4 +230,18 @@ func (w *integrityStatsWatcher) collect(time.Time) {
 		w.recorder.Error("file integrity baseline truncated", nil, map[string]any{"max_files": fim.MaxFiles})
 	}
 	w.truncated = stats.Truncated
+}
+
+// warnIntegrityWithoutAudit records that, with file auditing off, writes
+// through open files reach file integrity only through rescans.
+func warnIntegrityWithoutAudit(cfg config.Config, integrity policyconfig.FileIntegrityPolicy, recorder *eventsink.Recorder) {
+	if cfg.FileAudit || !integrity.Enabled() {
+		return
+	}
+	fields := map[string]any{"rescan_interval": integrity.Rescan().String()}
+	if integrity.Rescan() == 0 {
+		recorder.Error("file integrity sees no file writes: file audit and rescans are both disabled", nil, fields)
+		return
+	}
+	recorder.Error("file integrity finds file writes only by rescan because file audit is disabled", nil, fields)
 }

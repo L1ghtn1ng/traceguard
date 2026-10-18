@@ -74,6 +74,7 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 	}
 	if bundleChanged {
 		p.integrity.Configure(bundle.FileIntegrity)
+		warnIntegrityWithoutAudit(p.cfg, bundle.FileIntegrity, p.recorder)
 		p.detector.Install(detections)
 		p.metrics.SetDetectionRules(p.detector.RuleCount())
 		p.recorder.InfoIfChanged("detection policy loaded", map[string]any{

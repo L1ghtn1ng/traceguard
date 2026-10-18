@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
@@ -97,6 +99,49 @@ func TestResolveRequestedPath(t *testing.T) {
 	} {
 		if got, ok := resolveRequestedPath(procRoot, test.pid, test.dirfd, test.path); got != test.want || ok != test.ok {
 			t.Errorf("%s: resolveRequestedPath = %q, %t; want %q, %t", name, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestSharesMountNamespace(t *testing.T) {
+	t.Parallel()
+
+	procRoot := t.TempDir()
+	for pid, namespace := range map[string]string{"self": "mnt:[1]", "42": "mnt:[1]", "43": "mnt:[2]"} {
+		if err := os.MkdirAll(filepath.Join(procRoot, pid, "ns"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(namespace, filepath.Join(procRoot, pid, "ns", "mnt")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for pid, want := range map[uint32]bool{42: true, 43: false, 44: true} {
+		if got := sharesMountNamespace(procRoot, pid); got != want {
+			t.Errorf("sharesMountNamespace(%d) = %t, want %t", pid, got, want)
+		}
+	}
+}
+
+func TestWarnIntegrityWithoutAudit(t *testing.T) {
+	t.Parallel()
+
+	watched := policyconfig.FileIntegrityPolicy{Paths: []string{"/etc/**"}}
+	noRescan := policyconfig.FileIntegrityPolicy{Paths: []string{"/etc/**"}, RescanInterval: &policyconfig.Duration{}}
+	for name, test := range map[string]struct {
+		fileAudit bool
+		integrity policyconfig.FileIntegrityPolicy
+		want      string
+	}{
+		"audit on":         {true, watched, ""},
+		"integrity off":    {false, policyconfig.FileIntegrityPolicy{}, ""},
+		"rescan only":      {false, watched, "only by rescan"},
+		"nothing observes": {false, noRescan, "sees no file writes"},
+	} {
+		recorder, output := newTestRecorder(t)
+		warnIntegrityWithoutAudit(config.Config{FileAudit: test.fileAudit}, test.integrity, recorder)
+		logged := output.String()
+		if test.want == "" && logged != "" || test.want != "" && !strings.Contains(logged, test.want) {
+			t.Errorf("%s: logged %q, want %q", name, logged, test.want)
 		}
 	}
 }

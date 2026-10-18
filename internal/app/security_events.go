@@ -82,8 +82,8 @@ func appendSecurityEventFields(fields map[string]any, event ebpf.Event, procRoot
 		fields["target_pid"] = event.FileMode
 	case ebpf.EventModuleLoad:
 		fields["operation"] = operationName(moduleOperations, event.Operation)
-		if event.Filename != "" {
-			fields["module_params"] = event.Filename
+		if names := moduleParameterNames(event.Filename); len(names) > 0 {
+			fields["module_param_names"] = names
 		}
 		if event.Operation == 1 {
 			fields["module_fd"] = event.FileMode
@@ -205,4 +205,18 @@ func execDescriptor(event ebpf.Event) (int32, bool) {
 		return 0, false
 	}
 	return int32(fd), true
+}
+
+// moduleParameterNames returns the names in a module parameter string such
+// as "debug=1 key=secret flag". Values are dropped because parameters can
+// carry credentials.
+func moduleParameterNames(params string) []string {
+	var names []string
+	for field := range strings.FieldsSeq(params) {
+		name, _, _ := strings.Cut(field, "=")
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }

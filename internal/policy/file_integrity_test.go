@@ -71,4 +71,16 @@ func TestMergeFileIntegrityUnionsPathsAndPrefersOverlaySettings(t *testing.T) {
 	if integrity.HashEnabled() || integrity.HashLimit() != 4096 || integrity.Rescan() != 30*time.Minute {
 		t.Fatalf("settings = hash %t limit %d rescan %s", integrity.HashEnabled(), integrity.HashLimit(), integrity.Rescan())
 	}
+
+	restore, err := Parse([]byte("version: 1\nfile_integrity:\n  paths: [/etc/**]\n  max_hash_bytes: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err = Merge(base, restore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limit := bundle.FileIntegrity.HashLimit(); limit != DefaultFileIntegrityHashBytes {
+		t.Fatalf("overlay max_hash_bytes 0 limit = %d, want default %d", limit, DefaultFileIntegrityHashBytes)
+	}
 }
