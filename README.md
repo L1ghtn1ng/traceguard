@@ -473,7 +473,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - local event archive disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` is set
 - durable HTTPS batch export disabled unless `TRACEGUARD_EVENT_EXPORT_URL` is set
 - HTTPS export sends batches of 50 events or every 5 seconds
-- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit per event schema. Batches are stored as encoded, so each `-event-schema` has its own spool files and a batch is resent only while its schema is configured
+- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit per event schema. Batches are stored as encoded, so each `-event-schema` has its own spool files and a batch is resent only while its schema is configured; at startup TraceGuard records `export spool holds batches in another event schema` with their count
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
