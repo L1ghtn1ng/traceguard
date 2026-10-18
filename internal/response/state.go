@@ -62,6 +62,9 @@ func (r *Responder) Recover() {
 		})
 		return
 	}
+	// Track every record before thawing any, because each thaw rewrites the
+	// state file from what is tracked; a crash mid-way must not lose the rest.
+	recovered := make([]actionKey, 0, len(records))
 	for _, frozen := range records {
 		key := actionKey{action: policy.ResponseFreezeCgroup, target: fmt.Sprint(frozen.CgroupID)}
 		if r.freezer == nil {
@@ -74,7 +77,12 @@ func (r *Responder) Recover() {
 		}
 		action := &active{owners: map[string]owner{}, until: r.options.Now(), applied: true, cgroupID: frozen.CgroupID, cgroupPath: frozen.Path}
 		r.active[key] = action
-		r.revertLocked(key, action, "restart")
+		recovered = append(recovered, key)
+	}
+	for _, key := range recovered {
+		if action, ok := r.active[key]; ok {
+			r.revertLocked(key, action, "restart")
+		}
 	}
 	r.persistLocked()
 }

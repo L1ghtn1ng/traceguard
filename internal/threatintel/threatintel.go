@@ -138,6 +138,8 @@ func unmappedBits(prefix netip.Prefix) int {
 // Enforce returns bundle with every blocking feed added to its DNS suffix
 // block rules or as egress block rules, validated against policy limits.
 func Enforce(bundle policy.Bundle, feeds []Feed) (policy.Bundle, error) {
+	// Clone once so appending never writes into the caller's backing array.
+	bundle.Egress.Rules = slices.Clone(bundle.Egress.Rules)
 	for _, feed := range feeds {
 		if !feed.Config.Block {
 			continue
@@ -149,7 +151,7 @@ func Enforce(bundle policy.Bundle, feeds []Feed) (policy.Bundle, error) {
 			for _, prefix := range chunk {
 				cidrs = append(cidrs, prefix.String())
 			}
-			bundle.Egress.Rules = append(slices.Clone(bundle.Egress.Rules), policy.EgressRule{
+			bundle.Egress.Rules = append(bundle.Egress.Rules, policy.EgressRule{
 				ID:           fmt.Sprintf("%s.%d", feed.Config.RuleID(), start/blockRuleCIDRs+1),
 				Action:       "block",
 				Destinations: policy.EgressDestinations{CIDRs: cidrs},

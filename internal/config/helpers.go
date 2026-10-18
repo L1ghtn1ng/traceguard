@@ -175,7 +175,7 @@ func validateSyslogConfig(cfg Config) error {
 	if parsed.User != nil {
 		return errors.New("event-syslog-url must not contain user credentials")
 	}
-	if _, ok := syslogFacilityCode(cfg.EventSyslogFacility); !ok {
+	if _, ok := SyslogFacilityCode(cfg.EventSyslogFacility); !ok {
 		return errors.New("event-syslog-facility must be one of kern,user,mail,daemon,auth,syslog,lpr,news,uucp,cron,authpriv,ftp,local0-local7")
 	}
 	if !validSyslogTag(cfg.EventSyslogTag) {
@@ -187,7 +187,8 @@ func validateSyslogConfig(cfg Config) error {
 	return nil
 }
 
-func syslogFacilityCode(facility string) (int, bool) {
+// SyslogFacilityCode returns the RFC 5424 code of a syslog facility name.
+func SyslogFacilityCode(facility string) (int, bool) {
 	switch strings.ToLower(strings.TrimSpace(facility)) {
 	case "kern":
 		return 0, true

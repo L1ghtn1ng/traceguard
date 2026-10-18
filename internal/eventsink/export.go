@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -207,7 +208,9 @@ func (e *exportSink) run(ctx context.Context) {
 			if e.spool == nil {
 				continue
 			}
-			_ = e.spool.Replay(func(payload []byte) error {
+			// Bound each replay so live events keep draining from the queue
+			// while a large spool is sent.
+			_ = e.spool.ReplayUntil(time.Now().Add(exportReplayBudget), func(payload []byte) error {
 				if err := e.sendPayload(ctx, payload); err != nil {
 					e.metrics.IncEventExport("replay_error")
 					e.metrics.SetEventExportLastError()
@@ -264,6 +267,8 @@ func (e *exportSink) sendPayload(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Drain a short reply so the connection returns to the keep-alive pool.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainedResponseBytes))
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("unexpected status %s", resp.Status)
@@ -466,6 +471,14 @@ func (s *spoolStore) usage(files []string) (int64, error) {
 }
 
 func (s *spoolStore) Replay(send func([]byte) error) error {
+	return s.ReplayUntil(time.Time{}, send)
+}
+
+// ReplayUntil sends spooled batches oldest first until one fails to send or,
+// with a non-zero deadline, the deadline passes; the rest wait for the next
+// call. A file that cannot be read is left in place and skipped, so it does
+// not hold back the files after it.
+func (s *spoolStore) ReplayUntil(deadline time.Time, send func([]byte) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -473,19 +486,24 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 	if err != nil {
 		return err
 	}
+	var unreadable error
 	for _, file := range files {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			break
+		}
 		payload, err := safefile.ReadFileBeneath(int(s.dir.Fd()), file, maxSpoolPayloadBytes)
 		if err != nil {
-			return err
+			unreadable = errors.Join(unreadable, fmt.Errorf("read spool entry %q: %w", file, err))
+			continue
 		}
 		if err := send(payload); err != nil {
-			return err
+			return errors.Join(unreadable, err)
 		}
 		if err := unix.Unlinkat(int(s.dir.Fd()), file, 0); err != nil {
-			return err
+			return errors.Join(unreadable, err)
 		}
 	}
-	return nil
+	return unreadable
 }
 
 func (s *spoolStore) files() (files []string, listErr error) {

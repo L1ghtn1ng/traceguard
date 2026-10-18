@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
@@ -62,7 +63,7 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry,
 	if parsed.User != nil {
 		return nil, errors.New("event syslog url must not contain user credentials")
 	}
-	facility, ok := syslogFacilityCode(cfg.SyslogFacility)
+	facility, ok := config.SyslogFacilityCode(cfg.SyslogFacility)
 	if !ok {
 		return nil, fmt.Errorf("unsupported event syslog facility %q", cfg.SyslogFacility)
 	}
@@ -138,6 +139,14 @@ func (s *syslogSink) Enqueue(entry record) {
 }
 
 func (s *syslogSink) run(ctx context.Context) {
+	// One connection carries every message, so a burst does not pay a TCP or
+	// TLS handshake per record; it is redialed after a failed write.
+	var conn net.Conn
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,7 +155,9 @@ func (s *syslogSink) run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if err := s.send(ctx, payload); err != nil {
+			var err error
+			conn, err = s.send(ctx, conn, payload)
+			if err != nil {
 				s.metrics.IncEventSyslog("error")
 				continue
 			}
@@ -155,30 +166,43 @@ func (s *syslogSink) run(ctx context.Context) {
 	}
 }
 
-func (s *syslogSink) send(ctx context.Context, payload []byte) (sendErr error) {
-	dialer := &net.Dialer{Timeout: s.timeout}
-	var conn net.Conn
-	var err error
-	if s.tlsConfig != nil {
-		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: s.tlsConfig}
-		conn, err = tlsDialer.DialContext(ctx, s.network, s.address)
-	} else {
-		conn, err = dialer.DialContext(ctx, s.network, s.address)
-	}
-	if err != nil {
-		return err
-	}
-	defer func() {
-		sendErr = errors.Join(sendErr, conn.Close())
-	}()
-	if err := conn.SetDeadline(time.Now().Add(s.timeout)); err != nil {
-		return err
-	}
+// send writes payload over conn, dialing when conn is nil, and returns the
+// connection to reuse. A write on a reused connection that fails, as one the
+// collector closed while idle does, is retried once on a new connection.
+func (s *syslogSink) send(ctx context.Context, conn net.Conn, payload []byte) (net.Conn, error) {
 	if s.network == "tcp" {
 		payload = fmt.Appendf(nil, "%d %s", len(payload), payload)
 	}
-	_, err = conn.Write(payload)
-	return err
+	for attempt := 0; ; attempt++ {
+		reused := conn != nil
+		if conn == nil {
+			var err error
+			if conn, err = s.dial(ctx); err != nil {
+				return nil, err
+			}
+		}
+		err := conn.SetWriteDeadline(time.Now().Add(s.timeout))
+		if err == nil {
+			_, err = conn.Write(payload)
+		}
+		if err == nil {
+			return conn, nil
+		}
+		_ = conn.Close()
+		conn = nil
+		if !reused || attempt > 0 {
+			return nil, err
+		}
+	}
+}
+
+func (s *syslogSink) dial(ctx context.Context) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: s.timeout}
+	if s.tlsConfig != nil {
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: s.tlsConfig}
+		return tlsDialer.DialContext(ctx, s.network, s.address)
+	}
+	return dialer.DialContext(ctx, s.network, s.address)
 }
 
 func (s *syslogSink) message(entry record) ([]byte, error) {
@@ -294,53 +318,6 @@ func syslogNetwork(scheme string) (network string, tlsEnabled bool, err error) {
 		return "tcp", true, nil
 	default:
 		return "", false, errors.New("event syslog url must use syslog+udp://, syslog+tcp://, or syslog+tls://")
-	}
-}
-
-func syslogFacilityCode(facility string) (int, bool) {
-	switch strings.ToLower(strings.TrimSpace(facility)) {
-	case "kern":
-		return 0, true
-	case "user":
-		return 1, true
-	case "mail":
-		return 2, true
-	case "daemon":
-		return 3, true
-	case "auth":
-		return 4, true
-	case "syslog":
-		return 5, true
-	case "lpr":
-		return 6, true
-	case "news":
-		return 7, true
-	case "uucp":
-		return 8, true
-	case "cron":
-		return 9, true
-	case "authpriv":
-		return 10, true
-	case "ftp":
-		return 11, true
-	case "local0":
-		return 16, true
-	case "local1":
-		return 17, true
-	case "local2":
-		return 18, true
-	case "local3":
-		return 19, true
-	case "local4":
-		return 20, true
-	case "local5":
-		return 21, true
-	case "local6":
-		return 22, true
-	case "local7":
-		return 23, true
-	default:
-		return 0, false
 	}
 }
 

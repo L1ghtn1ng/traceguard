@@ -1,7 +1,10 @@
 package eventsink
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -138,5 +141,91 @@ func TestSyslogMessageHeaderTokensArePrintUSASCII(t *testing.T) {
 	}
 	if strings.Count(string(message), "\n") != 0 {
 		t.Fatalf("syslog message contains newline: %q", message)
+	}
+}
+
+func TestSyslogSendReusesTCPConnection(t *testing.T) {
+	t.Parallel()
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	closeTestResource(t, listener)
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn
+		}
+	}()
+
+	sink := &syslogSink{network: "tcp", address: listener.Addr().String(), timeout: time.Second}
+	var conn net.Conn
+	for _, message := range []string{"first", "second"} {
+		if conn, err = sink.send(t.Context(), conn, []byte(message)); err != nil {
+			t.Fatalf("send %q returned error: %v", message, err)
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	server := <-accepted
+	defer func() { _ = server.Close() }()
+	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(server)
+	for _, want := range []string{"5 first", "6 second"} {
+		got := make([]byte, len(want))
+		if _, err := io.ReadFull(reader, got); err != nil || string(got) != want {
+			t.Fatalf("frame = %q, %v; want %q", got, err, want)
+		}
+	}
+	select {
+	case extra := <-accepted:
+		_ = extra.Close()
+		t.Fatal("send opened a second connection instead of reusing the first")
+	default:
+	}
+}
+
+func TestSyslogSendRedialsAfterFailedWrite(t *testing.T) {
+	t.Parallel()
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	closeTestResource(t, listener)
+	received := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buffer := make([]byte, 64)
+		n, _ := conn.Read(buffer)
+		received <- string(buffer[:n])
+	}()
+
+	sink := &syslogSink{network: "tcp", address: listener.Addr().String(), timeout: time.Second}
+	stale, peer := net.Pipe()
+	_ = peer.Close()
+	_ = stale.Close()
+	conn, err := sink.send(t.Context(), stale, []byte("retry"))
+	if err != nil {
+		t.Fatalf("send over a broken connection returned error: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	select {
+	case message := <-received:
+		if message != "5 retry" {
+			t.Fatalf("redialed frame = %q, want %q", message, "5 retry")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the redialed frame")
 	}
 }

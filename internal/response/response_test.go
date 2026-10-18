@@ -51,6 +51,8 @@ type fakeFreezer struct {
 	refuse   bool
 	already  bool
 	thawedID map[uint64]bool
+	// onThaw, when set, runs before each thaw.
+	onThaw func(id uint64)
 }
 
 func (f *fakeFreezer) Check(id uint64) (string, error) {
@@ -72,6 +74,9 @@ func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
 }
 
 func (f *fakeFreezer) Thaw(id uint64, path string) error {
+	if f.onThaw != nil {
+		f.onThaw(id)
+	}
 	if f.thawErr != nil {
 		return f.thawErr
 	}
@@ -488,6 +493,34 @@ func TestSelfCgroup(t *testing.T) {
 	}
 	if self, err := SelfCgroup(path); err != nil || self != "/system.slice/traceguard.service" {
 		t.Fatalf("SelfCgroup = %q, %v", self, err)
+	}
+}
+
+func TestRecoverKeepsUnthawedRecordsWhileThawing(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	first := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	for _, id := range []uint64{7, 8, 9} {
+		first.responder.Handle(alertFor("runtime.process-memory-write", 1, map[string]any{"cgroup_id": id}))
+	}
+
+	again := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	again.freezer.onThaw = func(id uint64) {
+		// A crash now must leave every cgroup not yet thawed recorded.
+		payload, err := os.ReadFile(state) //nolint:gosec // test path
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, other := range []uint64{7, 8, 9} {
+			if !again.freezer.thawedID[other] && other != id && !strings.Contains(string(payload), fmt.Sprintf(`"cgroup_id":%d`, other)) {
+				t.Errorf("while thawing %d the state file dropped unthawed cgroup %d: %s", id, other, payload)
+			}
+		}
+	}
+	again.responder.Recover()
+	if len(again.freezer.thawedID) != 3 || again.responder.Active() != 0 {
+		t.Fatalf("recover thawed %v with %d active, want all three thawed", again.freezer.thawedID, again.responder.Active())
 	}
 }
 

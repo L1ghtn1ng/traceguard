@@ -3,6 +3,8 @@ package eventsink
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -206,5 +208,41 @@ func TestOversizedOCSFRecordKeepsItsEventName(t *testing.T) {
 	unmapped, _ := decoded["unmapped"].(map[string]any)
 	if unmapped["event"] != "egress_blocked" || unmapped["telemetry_truncated"] != true {
 		t.Fatalf("unmapped = %v, want the event name kept with the truncation marker", unmapped)
+	}
+}
+
+func TestSpoolReplaySkipsUnreadableEntries(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := newSpoolStore(dir, SchemaTraceGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	// Sorts before every batch Write names by its timestamp.
+	if err := os.WriteFile(filepath.Join(dir, "0-oversized.json"), make([]byte, maxSpoolPayloadBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write([]json.RawMessage{json.RawMessage(`{"event":"dns"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	var sent []string
+	err = store.Replay(func(payload []byte) error {
+		sent = append(sent, string(payload))
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "0-oversized.json") {
+		t.Errorf("Replay error = %v, want the unreadable entry reported", err)
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], `"event"`) {
+		t.Fatalf("Replay sent %v, want the batch after the unreadable entry", sent)
+	}
+	files, err := store.files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "0-oversized.json" {
+		t.Fatalf("spool files = %v, want only the unreadable entry left in place", files)
 	}
 }
