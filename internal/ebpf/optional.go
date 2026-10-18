@@ -177,6 +177,7 @@ func optionalMapReplacements(o monitorObjects, lsmPath *ebpf.Map) map[string]*eb
 		"policy_readers": o.PolicyReaders, "daemon_identity": o.DaemonIdentity,
 		"rule_names": o.RuleNames, "events": o.Events, "ringbuf_drops": o.RingbufDrops,
 		"socket_info": o.SocketInfo, "listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
+		"sockops_quiet":    o.SockopsQuiet,
 		"exec_allow_paths": o.ExecAllowPaths, "exec_block_paths": o.ExecBlockPaths,
 		"file_allow_paths": o.FileAllowPaths, "file_block_paths": o.FileBlockPaths,
 		"unix_allow_paths": o.UnixAllowPaths, "unix_block_paths": o.UnixBlockPaths,

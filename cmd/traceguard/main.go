@@ -44,6 +44,15 @@ func run() (exitCode int) {
 		}
 		return 0
 	}
+	if cfg.NoisyRules {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := telemetry.ReportNoisyRules(ctx, telemetry.NoisyRulesConfig{MetricsAddr: cfg.MetricsAddr, Window: cfg.NoisyRulesWindow}, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if cfg.ReplayPath != "" {
 		summary, err := replay.Run(replay.Config{ArchivePath: cfg.ReplayPath, PolicyPath: cfg.PolicyPath}, os.Stdout)
 		if err != nil {

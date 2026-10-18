@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	neturl "net/url"
 	"os"
@@ -293,4 +294,80 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a duration: %w", key, err)
 	}
 	return parsed, nil
+}
+
+func envFloat(key string, fallback float64) (float64, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a number: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func envByteSize(key string, fallback uint64) (uint64, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := ParseByteSize(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return parsed, nil
+}
+
+var byteSizeUnits = map[string]uint64{
+	"": 1, "b": 1,
+	"k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+	"m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+	"g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+}
+
+// ParseByteSize parses a whole number of bytes with an optional binary unit
+// suffix, such as 4096, 512KiB, or 64MiB. K, M, and G and their KB, MB, and GB
+// spellings are binary units too.
+func ParseByteSize(value string) (uint64, error) {
+	trimmed := strings.TrimSpace(value)
+	digits := strings.IndexFunc(trimmed, func(r rune) bool { return r < '0' || r > '9' })
+	if digits < 0 {
+		digits = len(trimmed)
+	}
+	if digits == 0 {
+		return 0, fmt.Errorf("byte size %q must start with a whole number", value)
+	}
+	unit, ok := byteSizeUnits[strings.ToLower(strings.TrimSpace(trimmed[digits:]))]
+	if !ok {
+		return 0, fmt.Errorf("byte size %q has an unknown unit; use B, KiB, MiB, or GiB", value)
+	}
+	number, err := strconv.ParseUint(trimmed[:digits], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("byte size %q: %w", value, err)
+	}
+	if number > math.MaxUint64/unit {
+		return 0, fmt.Errorf("byte size %q overflows", value)
+	}
+	return number * unit, nil
+}
+
+// byteSizeFlag is a flag.Value holding a byte count parsed by ParseByteSize.
+type byteSizeFlag struct{ value *uint64 }
+
+func (f byteSizeFlag) String() string {
+	if f.value == nil {
+		return "0"
+	}
+	return strconv.FormatUint(*f.value, 10)
+}
+
+func (f byteSizeFlag) Set(value string) error {
+	parsed, err := ParseByteSize(value)
+	if err != nil {
+		return err
+	}
+	*f.value = parsed
+	return nil
 }

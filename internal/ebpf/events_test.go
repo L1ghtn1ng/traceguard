@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestEventTimestampAtConvertsBootClockToWallTime(t *testing.T) {
@@ -642,5 +644,34 @@ func TestDecodeDescriptorFileChangeIdentity(t *testing.T) {
 	}
 	if event.FileDevice != 8<<20|1 || event.FileInode != 1234 || event.LocalAddress != "" {
 		t.Fatalf("FileDevice = %#x FileInode = %d LocalAddress = %q", event.FileDevice, event.FileInode, event.LocalAddress)
+	}
+}
+
+func TestDecodeSockOpsCloseCarriesByteCounts(t *testing.T) {
+	t.Parallel()
+
+	encode := func(raw rawEvent) Event {
+		t.Helper()
+		var encoded bytes.Buffer
+		if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+			t.Fatal(err)
+		}
+		event, err := decodeEvent(encoded.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	closing := rawEvent{Kind: EventSockOps, FileFlags: unix.BPF_SOCK_OPS_STATE_CB, FileMode: unix.BPF_TCP_CLOSE}
+	binary.NativeEndian.PutUint64(closing.Domain[:8], 3<<20)
+	binary.NativeEndian.PutUint64(closing.Domain[8:16], 4096)
+	if event := encode(closing); event.BytesAcked != 3<<20 || event.BytesReceived != 4096 || event.Domain != "" {
+		t.Fatalf("close bytes = %d/%d domain %q, want %d/4096 and no domain", event.BytesAcked, event.BytesReceived, event.Domain, 3<<20)
+	}
+
+	established := closing
+	established.FileFlags, established.FileMode = unix.BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB, 0
+	if event := encode(established); event.BytesAcked != 0 || event.BytesReceived != 0 {
+		t.Fatalf("established event decoded byte counts %d/%d", event.BytesAcked, event.BytesReceived)
 	}
 }

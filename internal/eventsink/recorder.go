@@ -73,7 +73,11 @@ type Recorder struct {
 	errorStates  map[recordFingerprint]errorDedupeState
 	infoStates   map[recordFingerprint]errorDedupeState
 	changeStates map[recordFingerprint]recordFingerprint
-	nextPruneAt  time.Time
+	// firstSeenDNS and firstSeenFileAudit are bounded apart, so one mode's
+	// churn cannot evict the other's contexts.
+	firstSeenDNS       map[recordFingerprint]struct{}
+	firstSeenFileAudit map[recordFingerprint]struct{}
+	nextPruneAt        time.Time
 }
 
 type recordFingerprint [sha256.Size]byte
@@ -94,13 +98,15 @@ type errorDedupeState struct {
 
 func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry.Registry, cfg Config) (*Recorder, error) {
 	recorder := &Recorder{
-		logger:       logger,
-		hostname:     logger.Hostname(),
-		metrics:      metrics,
-		now:          time.Now,
-		errorStates:  make(map[recordFingerprint]errorDedupeState),
-		infoStates:   make(map[recordFingerprint]errorDedupeState),
-		changeStates: make(map[recordFingerprint]recordFingerprint),
+		logger:             logger,
+		hostname:           logger.Hostname(),
+		metrics:            metrics,
+		now:                time.Now,
+		errorStates:        make(map[recordFingerprint]errorDedupeState),
+		infoStates:         make(map[recordFingerprint]errorDedupeState),
+		changeStates:       make(map[recordFingerprint]recordFingerprint),
+		firstSeenDNS:       make(map[recordFingerprint]struct{}),
+		firstSeenFileAudit: make(map[recordFingerprint]struct{}),
 	}
 	if strings.TrimSpace(cfg.ArchivePath) != "" {
 		archive, err := newArchiveSink(cfg.ArchivePath, metrics)
@@ -198,6 +204,39 @@ func (r *Recorder) InfoDedupFileAudit(msg string, fields map[string]any, ttl tim
 
 func (r *Recorder) InfoDedupFileAuditAt(timestamp time.Time, msg string, fields map[string]any, ttl time.Duration) {
 	r.infoDedupWithKey(msg, fields, ttl, fingerprintFileAuditRecord(msg, fields), timestamp.UTC())
+}
+
+// InfoFirstSeenFileAuditAt records a file audit event only the first time
+// its request and process context are seen, and reports whether it did.
+// Contexts are tracked up to a bound; one evicted from it is recorded again.
+func (r *Recorder) InfoFirstSeenFileAuditAt(timestamp time.Time, msg string, fields map[string]any) bool {
+	return r.infoFirstSeen(r.firstSeenFileAudit, msg, fields, fingerprintFileAuditRecord(msg, fields), timestamp.UTC())
+}
+
+// InfoFirstSeenDNSAt records a DNS query event only the first time its
+// domain, decision, and process context are seen, and reports whether it did.
+func (r *Recorder) InfoFirstSeenDNSAt(timestamp time.Time, msg string, fields map[string]any) bool {
+	return r.infoFirstSeen(r.firstSeenDNS, msg, fields, fingerprintDNSRecord(msg, fields), timestamp.UTC())
+}
+
+func (r *Recorder) infoFirstSeen(seen map[recordFingerprint]struct{}, msg string, fields map[string]any, key recordFingerprint, timestamp time.Time) bool {
+	r.dedupeMu.Lock()
+	if _, ok := seen[key]; ok {
+		r.dedupeMu.Unlock()
+		return false
+	}
+	seen[key] = struct{}{}
+	for len(seen) > maxDedupeStates {
+		for evicted := range seen {
+			if evicted != key {
+				delete(seen, evicted)
+				break
+			}
+		}
+	}
+	r.dedupeMu.Unlock()
+	r.emitAt("info", msg, fields, timestamp)
+	return true
 }
 
 func (r *Recorder) infoDedupWithKey(msg string, fields map[string]any, ttl time.Duration, key recordFingerprint, timestamp time.Time) {
@@ -478,6 +517,46 @@ func fingerprintFileAuditRecord(msg string, fields map[string]any) recordFingerp
 		for _, key := range []string{"pid", "ppid"} {
 			if value, ok := fields[key]; ok {
 				stable[key] = value
+			}
+		}
+	}
+	return fingerprintRecord("info", msg, stable)
+}
+
+// fingerprintDNSRecord keys a DNS query by its domain, decision, and the
+// querying process's context. It leaves out per-query, per-process, and
+// per-socket values, such as the transport of a UDP query retried over TCP,
+// and folds the kernel, socket-cache, and observed spellings of each identity
+// field into one, so the same workload's repeat queries match however they
+// were attributed.
+func fingerprintDNSRecord(msg string, fields map[string]any) recordFingerprint {
+	stable := make(map[string]any, 24)
+	for _, key := range []string{
+		"event", "domain", "policy", "mode",
+		"current_exe", "current_uid", "current_cgroup", "current_service", "current_container_id", "current_pod_uid",
+		"current_runtime", "current_lsm_label", "current_k8s_namespace", "current_k8s_pod", "current_k8s_service_account",
+		"current_k8s_owner_kind", "current_k8s_owner", "current_k8s_app",
+	} {
+		if value, ok := fields[key]; ok {
+			stable[key] = value
+		}
+	}
+	identity := map[string][]string{
+		"uid":     {"uid", "cached_uid"},
+		"program": {"program", "cached_program", "observed_program"},
+		"cgroup":  {"cgroup_id", "cached_cgroup_id"},
+	}
+	if !hasNonEmptyField(fields, "current_exe") {
+		// Without an executable, a domain's first query from one process
+		// must not hide the first from another.
+		identity["pid"] = []string{"pid"}
+		identity["start"] = []string{"process_start_ticks", "cached_process_start_ticks", "observed_process_start_ticks"}
+	}
+	for name, keys := range identity {
+		for _, key := range keys {
+			if value, ok := fields[key]; ok {
+				stable["identity_"+name] = fmt.Sprint(value)
+				break
 			}
 		}
 	}

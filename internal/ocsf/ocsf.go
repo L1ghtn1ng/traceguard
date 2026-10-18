@@ -344,6 +344,18 @@ func mapNetwork(event map[string]any, c *converter) {
 		event["src_endpoint"] = source
 	}
 	event["dst_endpoint"] = destination
+	sent, hasSent := c.take("bytes_acked")
+	received, hasReceived := c.take("bytes_received")
+	if hasSent || hasReceived {
+		traffic := map[string]any{}
+		if out, ok := sent.(uint64); ok {
+			traffic["bytes_out"] = out
+		}
+		if in, ok := received.(uint64); ok {
+			traffic["bytes_in"] = in
+		}
+		event["traffic"] = traffic
+	}
 	if len(info) > 0 {
 		event["connection_info"] = info
 	}

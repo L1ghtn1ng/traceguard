@@ -43,26 +43,46 @@ type ringBufferStatsSource interface {
 	RingBufferStats() (ebpf.RingBufferStats, error)
 }
 
+// ringBufferHealthComponent names the ring buffer in
+// traceguard_component_healthy.
+const ringBufferHealthComponent = "ringbuf"
+
 // ringBufferWatcher publishes ring buffer occupancy and drop counters, and
 // records an error when drops grow. A kind's first successful reading only
 // establishes its baseline, so drops already counted in adopted pinned maps,
 // or before a failed read, are exported but not reported as new loss.
+//
+// With a positive unhealthyDropRate, the watcher also marks health degraded
+// while drops between two complete collections exceed that many events per
+// second, and restores it after one at or below the rate. A failed or partial
+// read leaves health alone; its drops count toward the next complete one.
 type ringBufferWatcher struct {
-	source   ringBufferStatsSource
-	metrics  *telemetry.Registry
-	recorder *eventsink.Recorder
+	source            ringBufferStatsSource
+	metrics           *telemetry.Registry
+	recorder          *eventsink.Recorder
+	unhealthyDropRate float64
 
-	mu       sync.Mutex
-	baseline map[uint32]uint64
-	dropped  uint64
-	unread   int
+	mu        sync.Mutex
+	baseline  map[uint32]uint64
+	dropped   uint64
+	unread    int
+	collected time.Time
+	pending   uint64
+	degraded  bool
 }
 
-func newRingBufferWatcher(source ringBufferStatsSource, metrics *telemetry.Registry, recorder *eventsink.Recorder) *ringBufferWatcher {
-	return &ringBufferWatcher{source: source, metrics: metrics, recorder: recorder}
+func newRingBufferWatcher(source ringBufferStatsSource, metrics *telemetry.Registry, recorder *eventsink.Recorder, unhealthyDropRate float64) *ringBufferWatcher {
+	if unhealthyDropRate > 0 {
+		metrics.SetComponentHealthy(ringBufferHealthComponent, true)
+	}
+	return &ringBufferWatcher{source: source, metrics: metrics, recorder: recorder, unhealthyDropRate: unhealthyDropRate}
 }
 
 func (w *ringBufferWatcher) collect() {
+	w.collectAt(time.Now())
+}
+
+func (w *ringBufferWatcher) collectAt(now time.Time) {
 	stats, err := w.source.RingBufferStats()
 	if err != nil {
 		w.recorder.ErrorDedup("collect eBPF ring buffer statistics", err, nil, time.Minute)
@@ -86,6 +106,7 @@ func (w *ringBufferWatcher) collect() {
 	w.baseline = next
 	w.dropped += total
 	w.unread = stats.UnreadBytes
+	rate, transition := w.updateHealthLocked(now, total, err == nil)
 	w.mu.Unlock()
 
 	// Report every kind's latest good reading, so a kind whose lookup failed
@@ -101,6 +122,60 @@ func (w *ringBufferWatcher) collect() {
 		fields["ringbuf_unread_bytes"] = stats.UnreadBytes
 		w.recorder.Error("eBPF ring buffer full; events dropped", nil, fields)
 	}
+	switch transition {
+	case healthDegraded:
+		w.metrics.SetComponentHealthy(ringBufferHealthComponent, false)
+		w.recorder.Error("eBPF ring buffer drop rate above threshold; health degraded", nil, map[string]any{
+			"drop_rate": rate, "unhealthy_drop_rate": w.unhealthyDropRate, "ringbuf_size_bytes": stats.SizeBytes,
+		})
+	case healthRestored:
+		w.metrics.SetComponentHealthy(ringBufferHealthComponent, true)
+		w.recorder.Info("eBPF ring buffer drop rate back within threshold; health restored", map[string]any{
+			"drop_rate": rate, "unhealthy_drop_rate": w.unhealthyDropRate,
+		})
+	case healthUnchanged:
+	}
+}
+
+type healthTransition uint8
+
+const (
+	healthUnchanged healthTransition = iota
+	healthDegraded
+	healthRestored
+)
+
+// updateHealthLocked compares the drop rate since the previous complete
+// collection with the threshold. The first complete collection only starts
+// the interval. An incomplete one, whose missing counters would read as no
+// drops, keeps the current verdict and carries its drops forward, so the next
+// complete collection measures the whole span.
+func (w *ringBufferWatcher) updateHealthLocked(now time.Time, dropped uint64, complete bool) (float64, healthTransition) {
+	if w.unhealthyDropRate <= 0 {
+		return 0, healthUnchanged
+	}
+	w.pending += dropped
+	if !complete {
+		return 0, healthUnchanged
+	}
+	previous := w.collected
+	w.collected = now
+	elapsed := now.Sub(previous).Seconds()
+	if previous.IsZero() || elapsed <= 0 {
+		w.pending = 0
+		return 0, healthUnchanged
+	}
+	rate := float64(w.pending) / elapsed
+	w.pending = 0
+	degraded := rate > w.unhealthyDropRate
+	if degraded == w.degraded {
+		return rate, healthUnchanged
+	}
+	w.degraded = degraded
+	if degraded {
+		return rate, healthDegraded
+	}
+	return rate, healthRestored
 }
 
 // status returns events dropped since the baseline and the unread bytes seen
@@ -109,6 +184,13 @@ func (w *ringBufferWatcher) status() (dropped uint64, unreadBytes int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.dropped, w.unread
+}
+
+// isDegraded reports whether the drop rate last exceeded the threshold.
+func (w *ringBufferWatcher) isDegraded() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.degraded
 }
 
 // runEvery calls collect at each interval until ctx is done.

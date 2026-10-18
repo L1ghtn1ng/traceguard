@@ -131,7 +131,7 @@ func KnownRuleIDs(bundle policy.Bundle) map[string]struct{} {
 // a disabled rule or one from a profile that is not enabled, but not one that
 // is neither built in nor defined.
 func Compile(bundle policy.Bundle) (CompiledRules, error) {
-	custom, exceptions := bundle.DetectionRules, bundle.DetectionExceptions
+	custom, exceptions := bundle.DetectionRules, effectiveExceptions(bundle.BuiltinProfiles, bundle.DetectionExceptions)
 	rules, err := compileRules(effectiveRules(bundle.BuiltinProfiles, custom, bundle.DisabledRuleIDs))
 	if err != nil {
 		return CompiledRules{}, err
@@ -488,6 +488,7 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchUint16Field(match.LocalPorts, fields, "local_port") &&
 		matchCanonicalPathGlobs(match.ExecutableGlobs, stringField(fields, "exe"), boolField(fields, "path_truncated")) &&
 		matchGlobs(match.CommandGlobs, commandLineField(fields)) &&
+		matchGlobs(match.Programs, stringField(fields, "program")) &&
 		matchCanonicalPathGlobs(match.FilePathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchLiteralPathGlobs(match.UnixPathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchStrings(match.FileAccess, stringField(fields, "file_access")) &&

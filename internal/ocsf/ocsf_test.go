@@ -375,3 +375,21 @@ func TestConvertDirectoryRemovalIsAFolder(t *testing.T) {
 		t.Fatalf("rmdir file = %v activity = %v, want a deleted folder", file, event["activity_id"])
 	}
 }
+
+func TestConvertMapsTCPCloseBytesToTraffic(t *testing.T) {
+	t.Parallel()
+
+	event := convert(t, "info", map[string]any{
+		"event": "tcp_sockops", "peer_address": "192.0.2.10", "peer_port": uint16(443),
+		"bytes_acked": uint64(2 << 20), "bytes_received": uint64(512),
+	})
+	traffic, ok := event["traffic"].(map[string]any)
+	if !ok || traffic["bytes_out"] != uint64(2<<20) || traffic["bytes_in"] != uint64(512) {
+		t.Fatalf("traffic = %#v", event["traffic"])
+	}
+	if unmapped, ok := event["unmapped"].(map[string]any); ok {
+		if _, leaked := unmapped["bytes_acked"]; leaked {
+			t.Fatalf("mapped byte count also left unmapped: %#v", unmapped)
+		}
+	}
+}

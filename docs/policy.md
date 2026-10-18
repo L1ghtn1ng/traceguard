@@ -73,7 +73,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | Field | Purpose |
 | --- | --- |
 | `version` | Policy format version. The only supported value is `1`. |
-| `builtin_profiles` | Built-in detection profiles: `baseline`, always enabled, and the opt-in `runtime` profile. |
+| `builtin_profiles` | Built-in detection profiles: `baseline`, always enabled, the opt-in `runtime` rules, and the opt-in `platform` exceptions. |
 | `disabled_rule_ids` | Removes enforcement, custom detection, or built-in detection rule IDs after policy sources are merged. |
 | `dns` | Domain and encrypted-resolver block/allow entries. |
 | `egress` | Outbound TCP/UDP policy, including the default action. |
@@ -658,7 +658,7 @@ excluded.
 | `bind_blocked`, `bind_would_block` | Local inet bind denied or evaluated in dry-run mode. |
 | `unix_blocked`, `unix_would_block` | AF_UNIX operation denied or evaluated in dry-run mode. |
 | `sockopt_blocked`, `sockopt_would_block` | Socket option denied or evaluated in dry-run mode. |
-| `tcp_sockops` | Observe-only TCP established, listen, retransmit, or close lifecycle signal. |
+| `tcp_sockops` | Observe-only TCP established, listen, retransmit, or close lifecycle signal. A close carries the socket's `bytes_acked` and `bytes_received`. |
 | `memfd_create` | Anonymous memory file created, a common first step of fileless execution. |
 | `ptrace` | Ptrace attach, seize, traceme, or poke request. |
 | `process_vm` | `process_vm_readv` or `process_vm_writev` against another process. |
@@ -690,6 +690,7 @@ excluded.
 | `executable_globs` | Kernel-resolved executable path globs; valid only with `exec_blocked` and `exec_would_block`. |
 | `command_globs` | Globs over the redacted command line joined with spaces, where `*` also matches `/`; valid only with `exec`. See [exec command lines](#exec-command-lines). |
 | `exec_sources` | `path`, or `fd` for an executable named by file descriptor; valid only with `exec`. |
+| `programs` | Globs over the event-time kernel comm, the `program` field, which the kernel cuts to 15 bytes; valid only in [detection exceptions](#detection-exceptions), and only for events with event-time process identity. A literal longer than 15 bytes is rejected because it can never match. |
 | `mount_fstypes` | Requested filesystem type, such as `debugfs`; valid only with `mount`. |
 | `capabilities` | Matches when any listed capability is in a `capset` request's `requested_capabilities`; valid only with `privilege_change`. Names are lowercase without the `cap_` prefix, such as `sys_admin`. |
 | `file_path_globs` | Resolved file path globs; valid only with `file_blocked`, `file_would_block`, and `file_integrity`. |
@@ -964,6 +965,56 @@ runtime and version, before copying the glob.
 Measure a profile's noise on recorded events with
 [replay](#testing-rules-with-replay) before enabling it on a fleet.
 
+### Platform exception profile
+
+The opt-in `platform` profile adds [exceptions](#detection-exceptions) for the
+routine activity of common cloud guest agents, container runtimes, CNI
+plugins, and BPF-based networking. It adds no rules and is off by default:
+
+```yaml
+version: 1
+builtin_profiles: [runtime, platform]
+```
+
+| Exception ID | Rule | Matches, as root (`uids: [0]`) |
+| --- | --- | --- |
+| `platform.cloud-guest-agent-imds` | `baseline.cloud-metadata-access` | Programs `amazon-ssm-agen`, `ssm-agent-worke`, `google_guest_ag`, and `google_osconfig`: the AWS SSM agent and worker, and the Google guest and OS Config agents, as the kernel truncates their names. |
+| `platform.container-runtime-setns` | `runtime.namespace-join` | `setns` by `runc` and its `runc:*` init stages, `crun`, `containerd`, `containerd-shim`, `dockerd`, and the `bridge`, `loopback`, `portmap`, `calico`, and `cilium-cni` CNI plugins. |
+| `platform.bpf-loaders` | `runtime.bpf-program-load` | Programs `systemd`, `runc`, `runc:*`, `crun`, `cilium-agent`, and `calico-node`, which load cgroup device, firewall, and datapath programs. |
+| `platform.runc-self-reexec` | `runtime.fileless-exec` | A file-descriptor exec whose command line is `runc init` or `*/runc init`. |
+
+Exceptions for `runtime` rules apply only while that profile is enabled too.
+They are reported like any other exception, so
+`traceguard_detection_suppressed_total{exception}` and
+[`-noisy-rules`](#ranking-noisy-rules-on-a-live-daemon) show how much each
+suppresses.
+
+A program name is the process's comm, which any process can change with
+`prctl(PR_SET_NAME)`, and a command line is chosen by whoever calls exec. Each
+exception is limited to root, so an unprivileged process cannot use it, but a
+root process that renames itself can. Enable the profile where that trade is
+acceptable, and prefer your own narrower exceptions where it is not.
+
+To change a platform exception, define one with the same ID in your policy; it
+replaces the built-in one. For example, to except only the Google agent:
+
+```yaml
+version: 1
+builtin_profiles: [platform]
+detection_exceptions:
+  - id: platform.cloud-guest-agent-imds
+    rules: [baseline.cloud-metadata-access]
+    reason: only the Google guest agent runs on these hosts
+    match:
+      uids: [0]
+      programs: [google_guest_ag]
+```
+
+The profile has no exceptions for log shippers or kubelet: no built-in rule
+fires on their routine activity. Azure's `waagent` and `cloud-init` run as
+`python3`, so they cannot be excepted by name; write an exception for your own
+images if their metadata access is noisy.
+
 ### Detection exceptions
 
 An exception suppresses named rules for matching events, with a recorded reason
@@ -1072,8 +1123,8 @@ a live `detection_alert`. A summary goes to standard error: records read,
 evaluated, skipped, and malformed, then every rule that alerted with its alert
 count, noisiest first, and each exception's suppressed count and expiry state.
 
-`-policy-path` supplies detection rules, `disabled_rule_ids`, and exceptions;
-without it only the built-in baseline runs. Archives ending in `.gz` are read
+`-policy-path` supplies detection rules, `disabled_rule_ids`, exceptions, and
+`builtin_profiles`; without it only the built-in baseline runs. Archives ending in `.gz` are read
 as gzip. Records that are not kernel events, such as alerts, heartbeats, and
 daemon status, are skipped. Replay sees fields only as the archive recorded
 them: strings over the 4 KiB telemetry limit are truncated and fields beyond a
@@ -1081,6 +1132,23 @@ record's limits are dropped, so rules matching such values can count
 differently than they did live, where detection runs before those limits.
 Replayed alerts are recorded with the live alert envelope,
 `message=detection-alert` and `level=info`.
+
+### Ranking noisy rules on a live daemon
+
+`-noisy-rules` reads `traceguard_detection_alerts_total` and
+`traceguard_detection_suppressed_total` from a running daemon's
+`-metrics-addr` endpoint, prints each rule's alerts, share, rate per hour, and
+severity, busiest first, then each exception's suppressed events, and exits:
+
+```bash
+traceguard -noisy-rules -metrics-addr 127.0.0.1:9091
+```
+
+Counts run from daemon start. With `-noisy-rules-window 10m`, TraceGuard
+scrapes twice, ten minutes apart, and ranks by the alerts raised in between,
+which reflects current noise rather than history. If the daemon restarts
+between the scrapes, the report falls back to counts since that restart. Use
+it to find the rules to tune, then test a candidate exception with replay.
 
 ### Detection alert output
 
@@ -1582,6 +1650,16 @@ Retransmit signals, like connection events, are deduplicated for
 `-connection-dedupe-window`, one minute by default. RTT and TCP-connect
 callbacks are intentionally not enabled, and sockops never denies traffic.
 
+Close signals carry the socket's acknowledged sent bytes as `bytes_acked` and
+its received bytes as `bytes_received`. With `-connection-dedupe-min-bytes`
+set, such as `1MiB`, established signals to a peer already seen within the
+dedupe window are suppressed, keyed by the peer address and service port: the
+remote port of an outbound connection, the local port of an inbound one. That
+socket's close is suppressed too unless the connection moved at least that
+many bytes in total. A close is never suppressed when its established signal
+was recorded, and listen signals are never deduplicated. Sockops callbacks
+carry no process identity, so this deduplication is host-wide.
+
 `-ebpf-stats` enables `BPF_STATS_RUN_TIME` and polls every loaded program at
 startup and every 15 seconds. It exports runtime nanoseconds, run count, and
 recursion misses under a `program` label. Kernel runtime accounting has a
@@ -1616,12 +1694,23 @@ Its fields are:
 | `unavailable_hooks` | Optional eBPF hooks that failed to load or attach. |
 | `ringbuf_dropped_events` | Events lost to a full ring buffer since startup. |
 | `ringbuf_unread_bytes` | Ring buffer bytes waiting to be read at the last sample. |
+| `ringbuf_degraded` | Whether the ring buffer drop rate last exceeded `-ringbuf-unhealthy-drop-rate`; always `false` when that is `0`. |
 | `detection_rules`, `detection_state_groups` | Active detection rules, and threshold groups plus in-progress sequence keys. |
 | `detection_exceptions`, `expired_detection_exceptions` | Installed exception count and the IDs that have expired. |
 
 A host whose heartbeats stop, whose digest differs from its peers, or whose
 `unavailable_hooks` is not empty needs attention, and a SIEM can alert on each
 without a central TraceGuard manager.
+
+`-ringbuf-unhealthy-drop-rate` (default `0`, disabled) marks the daemon
+unhealthy while ring buffer drops exceed that many events per second between
+two five-second checks. `/health` then returns 503, `traceguard_healthy` and
+`traceguard_component_healthy{component="ringbuf"}` are `0`, and the heartbeat
+reports `healthy=false` and `ringbuf_degraded=true`. A check at or below the
+rate restores health. Because `/health` then fails, use it for readiness or
+alerting rather than a liveness probe that restarts the daemon: a restart
+drops more events than it saves. To stop drops, enlarge the ring buffer with
+`-ringbuf-size`; see the README's ring buffer sizing section.
 
 ## Validation rules and limits
 

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
@@ -133,7 +134,9 @@ func closePinnedMapHandles(maps map[string]*ebpf.Map) error {
 	return errors.Join(errs...)
 }
 
-func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPrograms) error {
+// pinLoadedObjects pins every loaded map and program. Existing map pins are
+// kept, as the maps were adopted from them, except those named in replace.
+func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPrograms, replace []string) error {
 	if !opts.PinEBPF {
 		return nil
 	}
@@ -155,6 +158,12 @@ func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPro
 			continue
 		}
 		if pinExists(path) {
+			if !slices.Contains(replace, name) {
+				continue
+			}
+			if err := replacePinnedMap(path, target); err != nil {
+				return fmt.Errorf("replace pinned map %s: %w", name, err)
+			}
 			continue
 		}
 		if err := target.Pin(path); err != nil {
@@ -213,6 +222,51 @@ func writePinMetadata(root, selectedObject string) error {
 		return fmt.Errorf("pin eBPF metadata: %w", err)
 	}
 	return nil
+}
+
+// discardResizedRingBuffer stops adopting a pinned events ring buffer whose
+// size differs from the requested one, and returns the pins that
+// pinLoadedObjects must then replace. The old pin stays in place until the
+// new buffer has loaded. Programs still attached keep the old buffer until
+// their links are updated; events queued in it are lost.
+func discardResizedRingBuffer(pinned map[string]*ebpf.Map, size uint32) ([]string, error) {
+	events, ok := pinned["events"]
+	if !ok || !ringBufferResized(events.MaxEntries(), size) {
+		return nil, nil
+	}
+	delete(pinned, "events")
+	if err := events.Close(); err != nil {
+		return nil, fmt.Errorf("release resized pinned ring buffer: %w", err)
+	}
+	return []string{"events"}, nil
+}
+
+// replacePinnedMap pins target beside the existing pin and renames it over
+// that pin, so the path names the old map until the new one is pinned.
+func replacePinnedMap(path string, target interface{ Pin(string) error }) error {
+	staging := stagedPinPath(path)
+	if err := os.Remove(staging); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale staged pin %s: %w", staging, err)
+	}
+	if err := target.Pin(staging); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, path); err != nil {
+		return errors.Join(err, os.Remove(staging))
+	}
+	return nil
+}
+
+// ringBufferResized reports whether a pinned ring buffer of pinnedSize bytes
+// must be replaced to honour a requested size, where zero keeps any size.
+func ringBufferResized(pinnedSize, requested uint32) bool {
+	return requested != 0 && pinnedSize != requested
+}
+
+// stagedPinPath names the temporary pin a replacement is staged at. bpffs
+// rejects names containing a dot, so the suffix uses an underscore.
+func stagedPinPath(path string) string {
+	return path + "_staged"
 }
 
 func pinExists(path string) bool {
@@ -311,7 +365,7 @@ func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*
 	return map[string]*ebpf.Map{
 		"allowlist": o.Allowlist, "allow_suffixes": o.AllowSuffixes, "block_suffixes": o.BlockSuffixes,
 		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "exec_argv_scratch": o.ExecArgvScratch, "socket_info": o.SocketInfo,
-		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
+		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe, "sockops_quiet": o.SockopsQuiet,
 		"endpoint4_allow_rules": o.Endpoint4AllowRules, "endpoint4_cidr_allow_rules": o.Endpoint4CidrAllowRules,
 		"endpoint4_cidr_rules": o.Endpoint4CidrRules, "endpoint4_rules": o.Endpoint4Rules,
 		"endpoint6_allow_rules": o.Endpoint6AllowRules, "endpoint6_cidr_allow_rules": o.Endpoint6CidrAllowRules,

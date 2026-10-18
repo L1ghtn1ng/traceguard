@@ -224,6 +224,12 @@ func (r *Registry) SetResponseStats(active int, egressDrops, ingressDrops uint64
 	r.counters[metricKey1("traceguard_response_peer_drops_total", "direction", "ingress")] = boundedMetricUint64(ingressDrops)
 }
 
+// IncFirstSeenSuppressed counts an event left unrecorded because a
+// first-seen mode had already recorded its context.
+func (r *Registry) IncFirstSeenSuppressed(event string) {
+	r.incCounter(metricKey1("traceguard_first_seen_suppressed_total", "event", event))
+}
+
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
 	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
 }
@@ -335,6 +341,13 @@ func (r *Registry) SetEventSinkHealthy(sink string, healthy bool) {
 
 func (r *Registry) SetHookHealthy(hook string, healthy bool) {
 	r.setComponentHealthy("hook:"+hook, "traceguard_hook_healthy", "hook", hook, healthy)
+}
+
+// SetComponentHealthy reports a daemon component's health as
+// traceguard_component_healthy{component}; an unhealthy component makes
+// /health and traceguard_healthy report the daemon unhealthy.
+func (r *Registry) SetComponentHealthy(component string, healthy bool) {
+	r.setComponentHealthy("component:"+component, "traceguard_component_healthy", "component", component, healthy)
 }
 
 func (r *Registry) setComponentHealthy(component, metric, label, value string, healthy bool) {

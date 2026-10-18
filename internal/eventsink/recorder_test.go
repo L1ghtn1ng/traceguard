@@ -1759,3 +1759,122 @@ func TestStrandedSpoolWarningReachesSyslog(t *testing.T) {
 	}
 	t.Fatal("the stranded-batch warning never reached syslog")
 }
+
+func TestRecorderFirstSeenRecordsEachFileAuditContextOnce(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	fields := func(path string, pid uint32) map[string]any {
+		return map[string]any{
+			"event": "file_access", "requested_path": path, "file_access": "read",
+			"current_exe": "/usr/bin/cat", "current_cmdline": []string{"cat", path}, "pid": pid,
+		}
+	}
+
+	if !recorder.InfoFirstSeenFileAuditAt(timestamp, "file_access", fields("/etc/hosts", 1)) {
+		t.Fatal("first request not recorded")
+	}
+	// A later repeat by another process of the same binary is not recorded,
+	// however much time passes.
+	if recorder.InfoFirstSeenFileAuditAt(timestamp.Add(48*time.Hour), "file_access", fields("/etc/hosts", 2)) {
+		t.Fatal("repeat request recorded")
+	}
+	if !recorder.InfoFirstSeenFileAuditAt(timestamp, "file_access", fields("/etc/passwd", 3)) {
+		t.Fatal("new path not recorded")
+	}
+	if lines := decodeLogLines(t, buffer); len(lines) != 2 {
+		t.Fatalf("log line count = %d, want 2", len(lines))
+	}
+}
+
+func TestRecorderFirstSeenDNSKeysOnDomainAndWorkload(t *testing.T) {
+	t.Parallel()
+
+	recorder, buffer := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	query := func(domain, exe string, pid uint32, cookie uint64) map[string]any {
+		fields := map[string]any{"event": "dns", "domain": domain, "pid": pid, "socket_cookie": cookie, "transport": "udp"}
+		if exe != "" {
+			fields["current_exe"] = exe
+		}
+		return fields
+	}
+	for _, test := range []struct {
+		fields map[string]any
+		want   bool
+	}{
+		{query("example.com", "/usr/bin/curl", 10, 1), true},
+		{query("example.com", "/usr/bin/curl", 11, 2), false}, // same workload, new process and socket
+		{query("example.org", "/usr/bin/curl", 10, 1), true},
+		{query("example.com", "/usr/bin/wget", 12, 3), true},
+		{query("example.com", "", 13, 4), true}, // unattributed queries key on the process
+		{query("example.com", "", 13, 5), false},
+		{query("example.com", "", 14, 6), true},
+	} {
+		if got := recorder.InfoFirstSeenDNSAt(timestamp, "dns", test.fields); got != test.want {
+			t.Errorf("InfoFirstSeenDNSAt(%v) = %t, want %t", test.fields, got, test.want)
+		}
+	}
+	if lines := decodeLogLines(t, buffer); len(lines) != 5 {
+		t.Fatalf("log line count = %d, want 5", len(lines))
+	}
+}
+
+func TestRecorderFirstSeenDNSIgnoresTransportAndAttributionSource(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	kernel := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"uid_source": "kernel", "uid": uint32(1000), "program": "curl", "cgroup_id": uint64(7),
+	}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", kernel) {
+		t.Fatal("first query not recorded")
+	}
+	retry := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "tcp", "current_exe": "/usr/bin/curl",
+		"uid_source": "kernel", "uid": uint32(1000), "program": "curl", "cgroup_id": uint64(7),
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", retry) {
+		t.Fatal("a TCP retry of the same query was recorded again")
+	}
+	cached := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"identity_source": "socket-cache", "cached_uid": uint32(1000), "cached_program": "curl", "cached_cgroup_id": uint64(7),
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", cached) {
+		t.Fatal("the same query attributed from the socket cache was recorded again")
+	}
+	other := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"identity_source": "socket-cache", "cached_uid": uint32(1001), "cached_program": "curl", "cached_cgroup_id": uint64(7),
+	}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", other) {
+		t.Fatal("a query from another user was suppressed")
+	}
+}
+
+func TestRecorderFirstSeenModesAreBoundedApart(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	query := map[string]any{"event": "dns", "domain": "example.com", "current_exe": "/usr/bin/curl"}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", query) {
+		t.Fatal("first query not recorded")
+	}
+	// Fill the file audit set past its bound; the DNS context must survive.
+	for index := range maxDedupeStates + 10 {
+		recorder.InfoFirstSeenFileAuditAt(timestamp, "file_access", map[string]any{
+			"event": "file_access", "requested_path": fmt.Sprintf("/tmp/%d", index), "current_exe": "/usr/bin/cat",
+		})
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", query) {
+		t.Fatal("file audit churn evicted a DNS context")
+	}
+	if got := len(recorder.firstSeenFileAudit); got != maxDedupeStates {
+		t.Fatalf("file audit contexts = %d, want the %d bound", got, maxDedupeStates)
+	}
+}

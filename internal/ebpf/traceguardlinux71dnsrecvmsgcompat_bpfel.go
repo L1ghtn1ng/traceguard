@@ -262,6 +262,7 @@ const (
 	traceguardLinux71DNSRecvmsgCompatMapRuleNames                = "rule_names"
 	traceguardLinux71DNSRecvmsgCompatMapSettings                 = "settings"
 	traceguardLinux71DNSRecvmsgCompatMapSocketInfo               = "socket_info"
+	traceguardLinux71DNSRecvmsgCompatMapSockopsQuiet             = "sockops_quiet"
 	traceguardLinux71DNSRecvmsgCompatMapSockoptAllow             = "sockopt_allow"
 	traceguardLinux71DNSRecvmsgCompatMapSockoptBlock             = "sockopt_block"
 	traceguardLinux71DNSRecvmsgCompatMapUnixAllowPaths           = "unix_allow_paths"
@@ -328,6 +329,7 @@ const (
 	traceguardLinux71DNSRecvmsgCompatProgTraceUnlink             = "trace_unlink"
 	traceguardLinux71DNSRecvmsgCompatProgTraceUnlinkat           = "trace_unlinkat"
 	traceguardLinux71DNSRecvmsgCompatProgTraceUnshare            = "trace_unshare"
+	traceguardLinux71DNSRecvmsgCompatVarConnectionDedupeMinBytes = "connection_dedupe_min_bytes"
 	traceguardLinux71DNSRecvmsgCompatVarConnectionDedupeWindowNs = "connection_dedupe_window_ns"
 )
 
@@ -480,6 +482,7 @@ type traceguardLinux71DNSRecvmsgCompatMapSpecs struct {
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
+	SockopsQuiet            *ebpf.MapSpec `ebpf:"sockops_quiet"`
 	SockoptAllow            *ebpf.MapSpec `ebpf:"sockopt_allow"`
 	SockoptBlock            *ebpf.MapSpec `ebpf:"sockopt_block"`
 	UnixAllowPaths          *ebpf.MapSpec `ebpf:"unix_allow_paths"`
@@ -490,6 +493,7 @@ type traceguardLinux71DNSRecvmsgCompatMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardLinux71DNSRecvmsgCompatVariableSpecs struct {
+	ConnectionDedupeMinBytes *ebpf.VariableSpec `ebpf:"connection_dedupe_min_bytes"`
 	ConnectionDedupeWindowNs *ebpf.VariableSpec `ebpf:"connection_dedupe_window_ns"`
 }
 
@@ -552,6 +556,7 @@ type traceguardLinux71DNSRecvmsgCompatMaps struct {
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
+	SockopsQuiet            *ebpf.Map `ebpf:"sockops_quiet"`
 	SockoptAllow            *ebpf.Map `ebpf:"sockopt_allow"`
 	SockoptBlock            *ebpf.Map `ebpf:"sockopt_block"`
 	UnixAllowPaths          *ebpf.Map `ebpf:"unix_allow_paths"`
@@ -599,6 +604,7 @@ func (m *traceguardLinux71DNSRecvmsgCompatMaps) Close() error {
 		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,
+		m.SockopsQuiet,
 		m.SockoptAllow,
 		m.SockoptBlock,
 		m.UnixAllowPaths,
@@ -610,6 +616,7 @@ func (m *traceguardLinux71DNSRecvmsgCompatMaps) Close() error {
 //
 // It can be passed to loadTraceguardLinux71DNSRecvmsgCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardLinux71DNSRecvmsgCompatVariables struct {
+	ConnectionDedupeMinBytes *ebpf.Variable `ebpf:"connection_dedupe_min_bytes"`
 	ConnectionDedupeWindowNs *ebpf.Variable `ebpf:"connection_dedupe_window_ns"`
 }
 

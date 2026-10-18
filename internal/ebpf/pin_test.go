@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,5 +129,54 @@ func TestRemoveFreshPinsOnlyRemovesUncommittedPinSet(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("fresh pin set still exists after failed startup: %v", err)
+	}
+}
+
+type filePinner struct {
+	content string
+	err     error
+}
+
+func (p filePinner) Pin(path string) error {
+	if p.err != nil {
+		return p.err
+	}
+	return os.WriteFile(path, []byte(p.content), 0o600)
+}
+
+func TestReplacePinnedMapSwapsOnlyAfterPinning(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "events")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacePinnedMap(path, filePinner{err: errors.New("pin failed")}); err == nil {
+		t.Fatal("a failed pin was reported as replaced")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "old" { //nolint:gosec // path is rooted in t.TempDir
+		t.Fatalf("failed replacement changed the old pin: %q, %v", got, err)
+	}
+
+	if err := os.WriteFile(stagedPinPath(path), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacePinnedMap(path, filePinner{content: "new"}); err != nil {
+		t.Fatalf("replacePinnedMap: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "new" { //nolint:gosec // path is rooted in t.TempDir
+		t.Fatalf("pin after replacement = %q, %v; want new", got, err)
+	}
+	if _, err := os.Stat(stagedPinPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged pin left behind: %v", err)
+	}
+}
+
+func TestStagedPinPathIsAValidBPFFSName(t *testing.T) {
+	t.Parallel()
+
+	// bpffs refuses to create any name containing a dot.
+	if name := filepath.Base(stagedPinPath("/sys/fs/bpf/traceguard/maps/events")); strings.Contains(name, ".") {
+		t.Fatalf("staged pin name %q contains a dot", name)
 	}
 }

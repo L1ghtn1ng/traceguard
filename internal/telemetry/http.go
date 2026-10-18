@@ -88,6 +88,11 @@ func (r *Registry) Render() string {
 	lines := make([]string, 0, 3*(len(r.counters)+len(r.gauges)+1))
 	emittedMetadata := make(map[string]struct{}, len(r.counters)+len(r.gauges)+1)
 	lines = appendMetric(lines, emittedMetadata, "traceguard_uptime_seconds", int64(time.Since(r.started).Seconds()))
+	healthy := int64(0)
+	if len(r.unhealthy) == 0 {
+		healthy = 1
+	}
+	lines = appendMetric(lines, emittedMetadata, "traceguard_healthy", healthy)
 
 	counterKeys := make([]string, 0, len(r.counters))
 	for key := range r.counters {

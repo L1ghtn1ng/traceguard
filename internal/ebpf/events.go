@@ -146,6 +146,10 @@ type Event struct {
 	// the open's dirfd.
 	NewPath string
 	Value   uint64
+	// BytesAcked and BytesReceived are a TCP socket's acknowledged sent and
+	// received bytes, carried by sockops close events.
+	BytesAcked    uint64
+	BytesReceived uint64
 	// MountNamespace is the mount namespace inode number of a file audit or
 	// file change event's process, captured in the kernel; 0 when unknown.
 	MountNamespace uint32
@@ -241,6 +245,10 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 			event.MountFSType = zeroTerminated(raw.Domain[mountSourceSize:])
 		}
 		return event, nil
+	}
+	if raw.Kind == EventSockOps && IsSockOpsClose(raw.FileFlags, raw.FileMode) {
+		event.BytesAcked = byteOrder.Uint64(raw.Domain[:8])
+		event.BytesReceived = byteOrder.Uint64(raw.Domain[8:16])
 	}
 	if isDNSPolicyEvent(raw.Kind) {
 		event.Domain = decodeQName(raw.Domain[:])
@@ -620,4 +628,10 @@ func uidSourceName(code uint32) string {
 	default:
 		return ""
 	}
+}
+
+// IsSockOpsClose reports whether a sockops event's operation and new TCP
+// state, its file_flags and file_mode, describe a socket closing.
+func IsSockOpsClose(operation, state uint32) bool {
+	return operation == unix.BPF_SOCK_OPS_STATE_CB && state == unix.BPF_TCP_CLOSE
 }

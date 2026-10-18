@@ -261,6 +261,13 @@ type Options struct {
 	// ConnectionDedupeWindow suppresses repeated connection and TCP
 	// retransmit events for the same flow; zero disables suppression.
 	ConnectionDedupeWindow time.Duration
+	// RingBufferSize is the events ring buffer's size in bytes; zero keeps
+	// the compiled-in 16 MiB.
+	RingBufferSize uint32
+	// ConnectionDedupeMinBytes, when positive with a dedupe window, also
+	// deduplicates TCP established events to the same peer and their
+	// closes, except closes that moved at least this many bytes.
+	ConnectionDedupeMinBytes uint64
 }
 
 type AttachState struct {
@@ -304,6 +311,7 @@ type monitorObjects struct {
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
+	SockopsQuiet            *ebpf.Map `ebpf:"sockops_quiet"`
 	Endpoint4AllowRules     *ebpf.Map `ebpf:"endpoint4_allow_rules"`
 	Endpoint4CidrAllowRules *ebpf.Map `ebpf:"endpoint4_cidr_allow_rules"`
 	Endpoint4CidrRules      *ebpf.Map `ebpf:"endpoint4_cidr_rules"`
@@ -367,6 +375,7 @@ func (o *monitorObjects) Close() error {
 		o.SocketInfo,
 		o.ListenerInfo,
 		o.ConnectionDedupe,
+		o.SockopsQuiet,
 		o.Endpoint4AllowRules,
 		o.Endpoint4CidrAllowRules,
 		o.Endpoint4CidrRules,
@@ -438,11 +447,24 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return errors.Join(cause, statsCloser.Close())
 	}
 
-	constants := loadConstants{connectionDedupeWindow: opts.ConnectionDedupeWindow}
+	constants := loadConstants{
+		connectionDedupeWindow: opts.ConnectionDedupeWindow, connectionDedupeMinBytes: opts.ConnectionDedupeMinBytes,
+		ringBufferSize: opts.RingBufferSize,
+	}
+	// Reject an unusable size before touching pinned state.
+	if opts.RingBufferSize != 0 {
+		if err := validRingBufferSize(opts.RingBufferSize); err != nil {
+			return nil, closeStatsOnError(err)
+		}
+	}
 	loadOptions := newCollectionOptions()
 	pinnedMaps, pinLayout, err := preparePinnedMaps(opts)
 	if err != nil {
 		return nil, closeStatsOnError(err)
+	}
+	replacedPins, err := discardResizedRingBuffer(pinnedMaps, opts.RingBufferSize)
+	if err != nil {
+		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps)))
 	}
 	loadOptions.MapReplacements = pinnedMaps
 	objects, features, err := loadMonitorObjects(loadOptions, constants)
@@ -490,7 +512,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return closeStatsOnError(cause)
 	}
 	loadOptions.MapReplacements = nil
-	if err := pinLoadedObjects(opts, objects, optional); err != nil {
+	if err := pinLoadedObjects(opts, objects, optional, replacedPins); err != nil {
 		return nil, failAfterPin(errors.Join(err, optional.Close(), objects.Close()))
 	}
 

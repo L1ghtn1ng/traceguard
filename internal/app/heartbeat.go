@@ -43,6 +43,7 @@ func (s heartbeatStatus) fields(now time.Time) map[string]any {
 		"unavailable_hooks":            hooks,
 		"ringbuf_dropped_events":       dropped,
 		"ringbuf_unread_bytes":         unread,
+		"ringbuf_degraded":             s.ringBuffer.isDegraded(),
 		"detection_rules":              s.detector.RuleCount(),
 		"detection_state_groups":       s.detector.StateCount(),
 		"detection_exceptions":         len(exceptions),

@@ -256,6 +256,11 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_STRICT_HOOKS",
 		"TRACEGUARD_HEARTBEAT_INTERVAL",
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
+		"TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES",
+		"TRACEGUARD_RINGBUF_SIZE",
+		"TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE",
+		"TRACEGUARD_DNS_FIRST_SEEN",
+		"TRACEGUARD_FILE_AUDIT_FIRST_SEEN",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
 		"TRACEGUARD_EVENT_SCHEMA",
@@ -311,6 +316,78 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	if cfg.StrictHooks || cfg.HeartbeatInterval != 5*time.Minute || cfg.ConnectionDedupeWindow != time.Minute || cfg.PolicySigningKey != "" {
 		t.Fatalf("self-monitoring defaults = strict %t heartbeat %s dedupe %s signing key %q, want packaged defaults", cfg.StrictHooks, cfg.HeartbeatInterval, cfg.ConnectionDedupeWindow, cfg.PolicySigningKey)
 	}
+	if cfg.RingBufferSize != 16<<20 || cfg.RingBufferUnhealthyDropRate != 0 || cfg.ConnectionDedupeMinBytes != 0 || cfg.DNSFirstSeen || cfg.FileAuditFirstSeen {
+		t.Fatalf("volume defaults = ringbuf %d drop rate %g min bytes %d dns first-seen %t file first-seen %t, want 16 MiB and disabled",
+			cfg.RingBufferSize, cfg.RingBufferUnhealthyDropRate, cfg.ConnectionDedupeMinBytes, cfg.DNSFirstSeen, cfg.FileAuditFirstSeen)
+	}
+}
+
+func TestParseVolumeAndRingBufferOptions(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-ringbuf-size", "64MiB", "-ringbuf-unhealthy-drop-rate", "2.5",
+		"-connection-dedupe-min-bytes", "1MiB", "-dns-first-seen", "-file-audit-first-seen"}
+	clearPolicyEnv(t)
+	clearTypedEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.RingBufferSize != 64<<20 || cfg.RingBufferUnhealthyDropRate != 2.5 || cfg.ConnectionDedupeMinBytes != 1<<20 || !cfg.DNSFirstSeen || !cfg.FileAuditFirstSeen {
+		t.Fatalf("options = ringbuf %d drop rate %g min bytes %d dns %t file %t", cfg.RingBufferSize, cfg.RingBufferUnhealthyDropRate, cfg.ConnectionDedupeMinBytes, cfg.DNSFirstSeen, cfg.FileAuditFirstSeen)
+	}
+}
+
+func TestParseRingBufferSizeFromEnvironment(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard"}
+	clearPolicyEnv(t)
+	clearTypedEnv(t)
+	t.Setenv("TRACEGUARD_RINGBUF_SIZE", "128m")
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.RingBufferSize != 128<<20 {
+		t.Fatalf("RingBufferSize = %d, want 128 MiB", cfg.RingBufferSize)
+	}
+}
+
+func TestParseNoisyRulesSkipsServiceValidation(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-noisy-rules", "-noisy-rules-window", "30s", "-block"}
+	clearPolicyEnv(t)
+	clearTypedEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.NoisyRules || cfg.NoisyRulesWindow != 30*time.Second || cfg.MetricsAddr != "127.0.0.1:9091" {
+		t.Fatalf("noisy rules = %t window %s addr %q", cfg.NoisyRules, cfg.NoisyRulesWindow, cfg.MetricsAddr)
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]uint64{
+		"4096": 4096, "512KiB": 512 << 10, "64MiB": 64 << 20, "1G": 1 << 30, " 2 mb ": 2 << 20, "7b": 7,
+	} {
+		got, err := ParseByteSize(input)
+		if err != nil || got != want {
+			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"", "MiB", "1.5MiB", "10 parsecs", "-1", "99999999999999999999G"} {
+		if _, err := ParseByteSize(input); err == nil {
+			t.Errorf("ParseByteSize(%q) succeeded, want an error", input)
+		}
+	}
 }
 
 func TestParseSelfMonitoringOptions(t *testing.T) {
@@ -335,12 +412,19 @@ func TestParseRejectsInvalidSelfMonitoringOptions(t *testing.T) {
 		args []string
 		want string
 	}{
-		"negative heartbeat":      {[]string{"-heartbeat-interval", "-1s"}, "heartbeat-interval"},
-		"negative dedupe":         {[]string{"-connection-dedupe-window", "-1s"}, "connection-dedupe-window"},
-		"oversized dedupe":        {[]string{"-connection-dedupe-window", "2h"}, "connection-dedupe-window"},
-		"relative signing key":    {[]string{"-policy-url", "https://policy.example/p.yaml", "-policy-signing-key", "policy.pub"}, "absolute"},
-		"signing key without url": {[]string{"-policy-signing-key", "/etc/traceguard/policy.pub"}, "requires policy-url"},
-		"relative replay path":    {[]string{"-replay", "events.jsonl"}, "replay"},
+		"negative heartbeat":       {[]string{"-heartbeat-interval", "-1s"}, "heartbeat-interval"},
+		"negative dedupe":          {[]string{"-connection-dedupe-window", "-1s"}, "connection-dedupe-window"},
+		"oversized dedupe":         {[]string{"-connection-dedupe-window", "2h"}, "connection-dedupe-window"},
+		"relative signing key":     {[]string{"-policy-url", "https://policy.example/p.yaml", "-policy-signing-key", "policy.pub"}, "absolute"},
+		"signing key without url":  {[]string{"-policy-signing-key", "/etc/traceguard/policy.pub"}, "requires policy-url"},
+		"relative replay path":     {[]string{"-replay", "events.jsonl"}, "replay"},
+		"ringbuf not power of two": {[]string{"-ringbuf-size", "24MiB"}, "power of two"},
+		"ringbuf too small":        {[]string{"-ringbuf-size", "4KiB"}, "ringbuf-size"},
+		"ringbuf too large":        {[]string{"-ringbuf-size", "2GiB"}, "ringbuf-size"},
+		"ringbuf bad unit":         {[]string{"-ringbuf-size", "16 furlongs"}, "unknown unit"},
+		"negative drop rate":       {[]string{"-ringbuf-unhealthy-drop-rate", "-1"}, "ringbuf-unhealthy-drop-rate"},
+		"min bytes without window": {[]string{"-connection-dedupe-window", "0", "-connection-dedupe-min-bytes", "1MiB"}, "connection-dedupe-min-bytes"},
+		"negative noisy window":    {[]string{"-noisy-rules", "-noisy-rules-window", "-1s"}, "noisy-rules-window"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -737,6 +821,11 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_STRICT_HOOKS",
 		"TRACEGUARD_HEARTBEAT_INTERVAL",
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
+		"TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES",
+		"TRACEGUARD_RINGBUF_SIZE",
+		"TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE",
+		"TRACEGUARD_DNS_FIRST_SEEN",
+		"TRACEGUARD_FILE_AUDIT_FIRST_SEEN",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
 		"TRACEGUARD_EVENT_SCHEMA",

@@ -142,8 +142,10 @@ Notes:
 - the detection engine is alert-only, caps state at 16,384 threshold groups and 65,536 retained timestamps, and enables three baseline rules by default
 - bpffs pinning is disabled by default and requires real `bpf_link` attachments; unpinned startup rejects an existing TraceGuard pin root until `traceguard -unpin` removes it, and host-wide LSM links remain lifecycle-bound
 - eBPF runtime statistics are disabled by default because kernel runtime accounting has a system-wide performance cost
-- events that cannot be queued because the 16 MiB event ring buffer is full are counted in the kernel per event kind and exported as `traceguard_ringbuf_dropped_total{kind}`, with `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` for occupancy; any new drops are also recorded as an `eBPF ring buffer full; events dropped` error event with `dropped_events` and `dropped_<kind>` counts, checked every five seconds. Enforcement decisions are unaffected by drops; only their telemetry is lost
+- events that cannot be queued because the event ring buffer (16 MiB by default; see [sizing the ring buffer](#sizing-the-ring-buffer)) is full are counted in the kernel per event kind and exported as `traceguard_ringbuf_dropped_total{kind}`, with `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` for occupancy; any new drops are also recorded as an `eBPF ring buffer full; events dropped` error event with `dropped_events` and `dropped_<kind>` counts, checked every five seconds. Enforcement decisions are unaffected by drops; only their telemetry is lost
 - the ring buffer reader starts before the initial YAML policy is loaded, so a slow remote policy fetch at startup does not leave attached programs filling an unread buffer
+- with `-ringbuf-unhealthy-drop-rate` set, drops above that many events per second between two five-second checks mark the daemon unhealthy: `/health` returns 503, `traceguard_healthy` and `traceguard_component_healthy{component="ringbuf"}` are `0`, the heartbeat reports `healthy=false` and `ringbuf_degraded=true`, and an `eBPF ring buffer drop rate above threshold; health degraded` error is recorded. Health returns after a check at or below the rate
+- `traceguard_healthy` is `1` while every hook, event sink, policy source, and component is healthy, matching `/health`
 
 ## Build
 
@@ -263,6 +265,19 @@ Run diagnostics:
 ```bash
 ./traceguard -doctor
 ```
+
+Rank detection rules by alert volume on a running daemon, from its
+`-metrics-addr` endpoint:
+
+```bash
+./traceguard -noisy-rules
+./traceguard -noisy-rules -noisy-rules-window 10m
+```
+
+Without a window the counts run from daemon start; with one, TraceGuard scrapes
+twice and ranks by the alerts raised in between. The report lists each rule's
+alerts, share, rate per hour, and severity, then each detection exception's
+suppressed events. `-replay` gives the same ranking offline for an archive.
 
 Enable file access auditing when running the binary without the packaged env file:
 
@@ -458,6 +473,11 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_HEARTBEAT_INTERVAL`
 - `TRACEGUARD_POLICY_SIGNING_KEY`
 - `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
+- `TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES`
+- `TRACEGUARD_RINGBUF_SIZE`
+- `TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE`
+- `TRACEGUARD_DNS_FIRST_SEEN`
+- `TRACEGUARD_FILE_AUDIT_FIRST_SEEN`
 - `TRACEGUARD_SECURITY_EVENTS`
 - `TRACEGUARD_EVENT_SCHEMA`
 - `TRACEGUARD_RESPONSE_MODE`
@@ -484,7 +504,9 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
 - security events enabled: `TRACEGUARD_SECURITY_EVENTS=true`
 - HTTPS export and syslog records in the TraceGuard format: `TRACEGUARD_EVENT_SCHEMA=traceguard`
-- connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
+- connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`, without TCP lifecycle deduplication: `TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES=0`
+- every DNS query and a file audit event every five minutes per request: `TRACEGUARD_DNS_FIRST_SEEN=false`, `TRACEGUARD_FILE_AUDIT_FIRST_SEEN=false`
+- a 16 MiB event ring buffer that never marks health degraded: `TRACEGUARD_RINGBUF_SIZE=16MiB`, `TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE=0`
 - policy responses recorded but not applied: `TRACEGUARD_RESPONSE_MODE=dry-run`
 - strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
 - remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
@@ -504,6 +526,57 @@ Example JSON output:
 {"timestamp":"2026-03-16T08:17:20.123456Z","level":"info","message":"dns","hostname":"worker-1","event":"dns","program":"dig","pid":31742,"process_start_ticks":819400,"uid":1000,"cgroup_id":7451,"current_exe":"/usr/bin/dig","current_cmdline":["/usr/bin/dig","example.com"],"domain":"example.com","transport":"udp"}
 {"timestamp":"2026-03-16T08:17:23.123456Z","level":"info","message":"file_access","hostname":"worker-1","event":"file_access","program":"cat","pid":31900,"uid":1000,"current_exe":"/usr/bin/cat","requested_path":"/etc/passwd","path_source":"syscall-requested","file_flags":0,"file_mode":0,"file_access":"read"}
 ```
+
+### Sizing the ring buffer
+
+Kernel events reach userspace through one shared ring buffer, 16 MiB by
+default. Each event takes 632 bytes plus an 8-byte header, so 16 MiB holds
+about 26,000 events, a little over a second at 20,000 events per second if the
+reader stalls. Set `-ringbuf-size` / `TRACEGUARD_RINGBUF_SIZE` to a power of
+two from `64KiB` to `1GiB`, for example `64MiB` (about 100,000 events):
+
+```bash
+sudo ./traceguard -ringbuf-size 64MiB
+```
+
+Size it from the peak event rate times the longest stall to absorb: a reader
+pause for log rotation, a slow sink, or CPU contention. Raise it when
+`traceguard_ringbuf_dropped_total` grows or `traceguard_ringbuf_unread_bytes`
+approaches `traceguard_ringbuf_size_bytes`; reducing volume with file audit and
+DNS [first-seen modes](#reducing-event-volume) also helps. The buffer is kernel
+memory charged to TraceGuard's memory cgroup, so allow for it in any
+`MemoryMax=` limit.
+
+With `-pin-ebpf`, a size change takes effect at the next start: the pinned
+buffer is replaced, and events still queued in it are lost.
+
+### Reducing event volume
+
+- `-connection-dedupe-window` (default `1m`) suppresses repeated connection
+  and TCP retransmit events for one flow.
+- `-connection-dedupe-min-bytes` / `TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES`,
+  such as `1MiB`, also suppresses TCP established events to a peer already
+  seen within the window: the peer's address and service port, which is the
+  remote port of an outbound connection and the local port of an inbound one.
+  A suppressed connection's close is suppressed too, unless it moved at least
+  that many bytes, so large transfers are still recorded. Every recorded
+  `tcp_sockops` close carries `bytes_acked` and `bytes_received`, which OCSF
+  maps to `traffic.bytes_out` and `traffic.bytes_in`. TCP lifecycle
+  deduplication is host-wide, not per process, because sockops callbacks carry
+  no process identity.
+- `-dns-first-seen` / `TRACEGUARD_DNS_FIRST_SEEN` records a `dns` query event
+  only the first time a process context queries a domain with that decision:
+  the same executable, user, cgroup, service, container, and pod, or, without
+  an executable, the same process. Blocked and dry-run would-block queries are
+  always recorded.
+- `-file-audit-first-seen` / `TRACEGUARD_FILE_AUDIT_FIRST_SEEN` records a file
+  audit event only the first time a process context makes that request,
+  instead of once every five minutes with a `suppressed_count`.
+
+Detection rules, threat intelligence, and responses still see every event.
+First-seen modes track up to 65,536 contexts each and record an evicted one
+again; suppressed events are counted in
+`traceguard_first_seen_suppressed_total{event}`.
 
 ## Packaging
 

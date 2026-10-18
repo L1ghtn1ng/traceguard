@@ -88,6 +88,9 @@ func (s SequenceStep) validate() error {
 	if err := s.Match.validate(); err != nil {
 		return fmt.Errorf("match: %w", err)
 	}
+	if err := rejectExceptionOnlySelectors(s.Match, s.Exclude); err != nil {
+		return err
+	}
 	if err := s.Exclude.validate(); err != nil {
 		return fmt.Errorf("exclude: %w", err)
 	}
