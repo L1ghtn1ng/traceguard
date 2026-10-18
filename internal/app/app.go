@@ -460,6 +460,9 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			fields["file_flags"] = event.FileFlags
 			fields["file_mode"] = event.FileMode
 			fields["file_access"] = fileAccessName(event.FileFlags)
+			if dirfd := uint32(event.Value); dirfd != atFDCWD { //nolint:gosec // the low word is the dirfd
+				fields["requested_dirfd"] = int32(dirfd) //nolint:gosec // dirfd is a signed descriptor carried unsigned
+			}
 			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
 			notifyIntegrity(integrity, "/proc", event, fields)
 		case ebpf.EventFileChange:

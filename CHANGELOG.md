@@ -34,6 +34,7 @@ All notable changes to TraceGuard are documented in this file.
 
 - Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
 - File audit no longer reports TraceGuard's own file opens, which file integrity hashing would otherwise flood it with.
+- `file_access` and `file_created` records carry `requested_dirfd` when `openat` or `openat2` names a path relative to a directory descriptor.
 - The ring buffer reader now starts before the initial YAML policy is loaded and applied, so events from the already-attached programs are consumed while a remote policy fetch is in progress instead of accumulating until the buffer fills. Detection holds up to 8,192 of those events until the policy is installed and then evaluates them in order, so they are judged by the configured rules.
 - Bumped the eBPF pin layout to version 6 for the new drop-counter map. With `-pin-ebpf`, the first start after upgrading discards the previous pins and attaches fresh programs.
 - Updated `docs/policy.md` to document pin layout version 6.
