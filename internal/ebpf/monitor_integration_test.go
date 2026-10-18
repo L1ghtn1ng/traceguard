@@ -414,7 +414,8 @@ func TestTraceDNSIPv6ExtensionHeaderChainsInBlockMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode blocked question: %v", err)
 	}
-	if err := objects.Blocklist.Put(blocked, uint8(1)); err != nil {
+	// Policy values are slot masks; observe publishes slot 0 and block slot 1.
+	if err := objects.Blocklist.Put(blocked, uint8(0b11)); err != nil {
 		t.Fatalf("install blocked question: %v", err)
 	}
 
