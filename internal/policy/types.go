@@ -191,9 +191,11 @@ type DetectionMatch struct {
 	DomainSuffixes      []string `yaml:"domain_suffixes,omitempty"`
 	DestinationCIDRs    []string `yaml:"destination_cidrs,omitempty"`
 	Ports               []uint16 `yaml:"ports,omitempty"`
+	LocalPorts          []uint16 `yaml:"local_ports,omitempty"`
 	ExecutableGlobs     []string `yaml:"executable_globs,omitempty"`
 	CommandGlobs        []string `yaml:"command_globs,omitempty"`
 	FilePathGlobs       []string `yaml:"file_path_globs,omitempty"`
+	UnixPathGlobs       []string `yaml:"unix_path_globs,omitempty"`
 	FileAccess          []string `yaml:"file_access,omitempty"`
 	CgroupPrefixes      []string `yaml:"cgroup_prefixes,omitempty"`
 	Services            []string `yaml:"services,omitempty"`
@@ -498,9 +500,11 @@ func (m DetectionMatch) validate() error {
 		"domain suffixes":       len(m.DomainSuffixes),
 		"destination cidrs":     len(m.DestinationCIDRs),
 		"ports":                 len(m.Ports),
+		"local ports":           len(m.LocalPorts),
 		"executable globs":      len(m.ExecutableGlobs),
 		"command globs":         len(m.CommandGlobs),
 		"file path globs":       len(m.FilePathGlobs),
+		"unix path globs":       len(m.UnixPathGlobs),
 		"file access":           len(m.FileAccess),
 		"cgroup prefixes":       len(m.CgroupPrefixes),
 		"services":              len(m.Services),
@@ -535,6 +539,11 @@ func (m DetectionMatch) validate() error {
 	for _, pattern := range append(slices.Clone(m.ExecutableGlobs), m.FilePathGlobs...) {
 		if err := validateDetectionPathPattern(pattern); err != nil {
 			return err
+		}
+	}
+	for _, pattern := range m.UnixPathGlobs {
+		if err := validateEnforcedPathGlob(pattern, true); err != nil {
+			return fmt.Errorf("invalid unix path glob: %w", err)
 		}
 	}
 	for _, protocol := range m.Protocols {
@@ -617,6 +626,20 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 			}
 		}
 	}
+	if len(match.UnixPathGlobs) > 0 {
+		for _, event := range events {
+			if event != "unix_blocked" && event != "unix_would_block" {
+				return fmt.Errorf("unix_path_globs require only unix_blocked or unix_would_block events; %q is unsupported", event)
+			}
+		}
+	}
+	if len(match.LocalPorts) > 0 {
+		for _, event := range events {
+			if !slices.Contains(localPortDetectionEvents, event) {
+				return fmt.Errorf("local_ports require events that carry a local port; %q is unsupported", event)
+			}
+		}
+	}
 	return nil
 }
 
@@ -676,7 +699,7 @@ var supportedDetectionEvents = []string{
 }
 
 var supportedGroupFields = []string{
-	"cgroup", "executable", "program", "uid", "domain", "destination", "path",
+	"cgroup", "executable", "program", "uid", "domain", "destination", "peer", "path",
 }
 
 var processIdentityGroupFields = []string{
@@ -685,6 +708,11 @@ var processIdentityGroupFields = []string{
 
 var eventsWithoutProcessIdentity = []string{
 	"dns", "blocked", "tcp_sockops",
+}
+
+var localPortDetectionEvents = []string{
+	"connection", "egress_blocked", "egress_would_block",
+	"bind_blocked", "bind_would_block", "tcp_sockops",
 }
 
 var resolvedPathDetectionEvents = []string{

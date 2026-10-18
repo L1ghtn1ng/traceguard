@@ -337,11 +337,11 @@
             "within": {"$ref": "#/$defs/duration"},
             "group_by": {
               "type": "array",
-              "maxItems": 7,
+              "maxItems": 8,
               "uniqueItems": true,
               "description": "Process-identity fields require contemporaneous identity on every selected event; DNS, blocked DNS, sockops, and inbound TCP connection cache attribution are not eligible.",
               "items": {
-                "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "path"]
+                "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "peer", "path"]
               }
             }
           }
@@ -370,9 +370,17 @@
         "domains": {"$ref": "#/$defs/string_list"},
         "domain_suffixes": {"$ref": "#/$defs/string_list"},
         "destination_cidrs": {"$ref": "#/$defs/string_list"},
-        "ports": {"$ref": "#/$defs/port_list"},
+        "ports": {"$ref": "#/$defs/port_list", "description": "Peer port; for inbound connections this is the remote source port."},
+        "local_ports": {
+          "$ref": "#/$defs/port_list",
+          "description": "Local port; valid only with connection, egress, bind, and tcp_sockops events."
+        },
         "executable_globs": {"$ref": "#/$defs/string_list"},
         "file_path_globs": {"$ref": "#/$defs/string_list"},
+        "unix_path_globs": {
+          "$ref": "#/$defs/string_list",
+          "description": "Requested AF_UNIX socket paths: exact absolute or @abstract names, or /** subtrees; valid only with unix_blocked and unix_would_block."
+        },
         "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}}
       }
     }

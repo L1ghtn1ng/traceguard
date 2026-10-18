@@ -15,7 +15,7 @@ func TestBaselineRulesEnabledAndDisableable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := engine.RuleCount(), 3; got != want {
+	if got, want := engine.RuleCount(), 4; got != want {
 		t.Fatalf("rule count = %d, want %d", got, want)
 	}
 	alerts := engine.Evaluate(Event{
@@ -387,5 +387,137 @@ func TestMissingNumericIdentityDoesNotMatchZeroOrCollapseGroups(t *testing.T) {
 	})
 	if first == second {
 		t.Fatal("events without cgroup IDs collapsed into one threshold group")
+	}
+}
+
+func TestInboundSSHBruteForceBaselineGroupsByPeerAndLocalPort(t *testing.T) {
+	t.Parallel()
+	engine, err := New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := func(at int64, peer string, localPort uint16) []Alert {
+		return engine.Evaluate(Event{
+			Timestamp: time.Unix(at, 0),
+			Name:      "connection",
+			Fields: map[string]any{
+				"event": "connection", "direction": "inbound", "socket_protocol": "tcp",
+				"peer_address": peer, "peer_port": uint16(40000), "local_port": localPort,
+			},
+		})
+	}
+	for index := range int64(19) {
+		if alerts := attempt(index+1, "198.51.100.7", 22); len(alerts) != 0 {
+			t.Fatalf("attempt %d alerts = %#v, want none below threshold", index+1, alerts)
+		}
+		// Other peers and other local ports must not add to the group.
+		if alerts := attempt(index+1, "198.51.100.8", 2222); len(alerts) != 0 {
+			t.Fatalf("non-SSH local port alerts = %#v", alerts)
+		}
+	}
+	if alerts := attempt(20, "203.0.113.9", 22); len(alerts) != 0 {
+		t.Fatalf("different peer alerts = %#v, want none", alerts)
+	}
+	alerts := attempt(21, "198.51.100.7", 22)
+	if len(alerts) != 1 || alerts[0].RuleID != "baseline.inbound-ssh-bruteforce" {
+		t.Fatalf("alerts = %#v, want inbound SSH brute-force alert", alerts)
+	}
+	if alerts := attempt(22, "198.51.100.7", 22); len(alerts) != 0 {
+		t.Fatalf("alerts during cooldown = %#v, want none", alerts)
+	}
+}
+
+func TestLocalPortSelectorMatchesBindDenials(t *testing.T) {
+	t.Parallel()
+
+	enabled := true
+	engine, err := New([]policy.DetectionRule{{
+		ID: "privileged-bind", Enabled: &enabled, Severity: "warning",
+		Events:  []string{"bind_blocked", "bind_would_block"},
+		Match:   policy.DetectionMatch{LocalPorts: []uint16{22, 80}},
+		Exclude: policy.DetectionMatch{Ports: []uint16{22}},
+		Message: "bind to a privileged port",
+	}}, []string{
+		"baseline.cloud-metadata-access", "baseline.direct-email-egress",
+		"baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := func(port any) int {
+		return len(engine.Evaluate(Event{
+			Timestamp: time.Unix(1, 0), Name: "bind_blocked",
+			Fields: map[string]any{"local_address": "0.0.0.0", "local_port": port},
+		}))
+	}
+	if got := bind(uint16(80)); got != 1 {
+		t.Fatalf("bind to 80 alerts = %d, want 1", got)
+	}
+	if got := bind(uint16(22)); got != 1 {
+		t.Fatalf("bind to 22 alerts = %d, want 1; peer-port exclude must not read local_port", got)
+	}
+	if got := bind(uint16(8080)); got != 0 {
+		t.Fatalf("bind to 8080 alerts = %d, want 0", got)
+	}
+	if got := bind(nil); got != 0 {
+		t.Fatalf("bind without local port alerts = %d, want 0", got)
+	}
+}
+
+func TestUnixPathSelectorMatchesLiteralSocketPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		patterns  []string
+		path      string
+		truncated bool
+		want      bool
+	}{
+		{name: "exact", patterns: []string{"/run/docker.sock"}, path: "/run/docker.sock", want: true},
+		{name: "exact sibling", patterns: []string{"/run/docker.sock"}, path: "/run/docker.sock2", want: false},
+		{name: "subtree", patterns: []string{"/run/containerd/**"}, path: "/run/containerd/containerd.sock", want: true},
+		{name: "subtree root", patterns: []string{"/run/containerd/**"}, path: "/run/containerd", want: true},
+		{name: "subtree prefix sibling", patterns: []string{"/run/containerd/**"}, path: "/run/containerd2/x.sock", want: false},
+		{name: "abstract", patterns: []string{"@/tmp/.X11-unix/X0"}, path: "@/tmp/.X11-unix/X0", want: true},
+		{name: "abstract metacharacters are literal", patterns: []string{"@agent[1]"}, path: "@agent1", want: false},
+		{name: "abstract metacharacters exact", patterns: []string{"@agent[1]"}, path: "@agent[1]", want: true},
+		{name: "truncated exact", patterns: []string{"/run/docker.sock"}, path: "/run/docker.sock", truncated: true, want: false},
+		{name: "missing path", patterns: []string{"/run/docker.sock"}, path: "", want: false},
+	} {
+		fields := map[string]any{"unix_op": "connect"}
+		if test.path != "" {
+			fields["path"] = test.path
+		}
+		if test.truncated {
+			fields["path_truncated"] = true
+		}
+		context := eventMatchContext{fields: fields}
+		if got := matches(policy.DetectionMatch{UnixPathGlobs: test.patterns}, nil, &context); got != test.want {
+			t.Errorf("%s: matches = %t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+func TestPeerGroupFieldUsesPeerAddress(t *testing.T) {
+	t.Parallel()
+
+	first := makeGroupKey("rule", []string{"peer"}, map[string]any{"peer_address": "198.51.100.7", "peer_port": uint16(1)})
+	samePeer := makeGroupKey("rule", []string{"peer"}, map[string]any{"peer_address": "198.51.100.7", "peer_port": uint16(2)})
+	otherPeer := makeGroupKey("rule", []string{"peer"}, map[string]any{"peer_address": "198.51.100.8", "peer_port": uint16(1)})
+	if first != samePeer {
+		t.Fatal("peer grouping depended on the ephemeral peer port")
+	}
+	if first == otherPeer {
+		t.Fatal("peer grouping collapsed distinct peer addresses")
+	}
+}
+
+func TestBaselineRulesPassPolicyValidation(t *testing.T) {
+	t.Parallel()
+
+	bundle := policy.Bundle{DetectionRules: BaselineRules()}
+	if err := bundle.Validate(); err != nil {
+		t.Fatalf("baseline rules failed policy validation: %v", err)
 	}
 }

@@ -661,10 +661,12 @@ excluded.
 | `uids` | Event-time kernel UID. |
 | `domains` | Exact domain, case-insensitive and without a trailing dot. |
 | `domain_suffixes` | A suffix and all its subdomains. A leading `*.` is optional. |
-| `destination_cidrs` | Destination IPv4 or IPv6 address ranges. |
-| `ports` | Destination ports. |
+| `destination_cidrs` | Peer IPv4 or IPv6 address ranges. For inbound connections this is the remote source address. |
+| `ports` | Peer ports. For inbound connections this is the remote source port, not the listening port. |
+| `local_ports` | Local ports, such as the listening port of an inbound connection or the requested port of a bind decision; valid only with `connection`, `egress_blocked`, `egress_would_block`, `bind_blocked`, `bind_would_block`, and `tcp_sockops`. |
 | `executable_globs` | Kernel-resolved executable path globs; valid only with `exec_blocked` and `exec_would_block`. |
 | `file_path_globs` | Kernel-resolved file path globs; valid only with `file_blocked` and `file_would_block`. |
+| `unix_path_globs` | AF_UNIX socket paths; valid only with `unix_blocked` and `unix_would_block`. |
 | `file_access` | `read`, `write`, or `unknown`. |
 
 Detection path patterns must be either a clean absolute exact path or a clean
@@ -673,6 +675,39 @@ is always complete in the event ABI. For example, `/etc/ssh/**` matches
 `/etc/ssh` and descendants even when the remainder of a very long canonical
 path is truncated. Other wildcard shapes are rejected. Truncated enforcement
 events include `path_truncated=true`, and never satisfy an exact-path selector.
+
+`unix_path_globs` use the same patterns as `unix.rules[].match.path_globs`: a
+clean absolute exact path, an abstract name beginning with `@`, or either form
+ending in `/**`. They match the socket address the caller supplied, which is
+the same value Unix enforcement evaluates; it is not resolved through
+symlinks. Characters such as `[` and `?` are literal, because abstract names may
+contain them.
+
+Inbound TCP `connection` events are emitted once per received SYN, so a
+threshold on them counts connection attempts. For example, this alerts when one
+remote address opens ten SSH connections to port 2222 within a minute:
+
+```yaml
+version: 1
+detections:
+  - id: inbound-ssh-bruteforce-alt-port
+    severity: warning
+    events: [connection]
+    match:
+      directions: [inbound]
+      protocols: [tcp]
+      local_ports: [2222]
+    threshold:
+      count: 10
+      within: 1m
+      group_by: [peer]
+    cooldown: 10m
+    message: a remote address opened repeated SSH connections
+```
+
+SSH clients can try several passwords on one connection, up to the server's
+`MaxAuthTries`, so a connection count detects scanning and high-rate guessing
+rather than every authentication failure.
 
 When a hook runs in a current-task context, `program`, `uid`, `cgroup_id`, and
 `process_start_ticks` are captured together in the kernel. Socket metadata
@@ -724,7 +759,8 @@ Supported `group_by` values are:
 | `program` | Process command name. |
 | `uid` | Event-time kernel UID. |
 | `domain` | DNS domain. |
-| `destination` | Peer/destination address. |
+| `destination` | Peer address. |
+| `peer` | Peer address; the remote source address for inbound connections. Equivalent to `destination`. |
 | `path` | Kernel-resolved enforcement path. |
 
 Policy loading rejects process-identity group fields for event scopes without
@@ -746,6 +782,7 @@ The baseline rules are enabled by default:
 | --- | --- |
 | `baseline.cloud-metadata-access` | An outbound connection on port 80 or 443 to a cloud metadata or credential endpoint: `169.254.169.254`, AWS IPv6 IMDS `fd00:ec2::254`, AWS ECS `169.254.170.2`, AWS EKS Pod Identity `169.254.170.23` and `fd00:ec2::23`, or Alibaba Cloud `100.100.100.200`. Alerts are grouped by cgroup and executable with a one-hour cooldown, so a polling guest agent cannot hide another process's first access. |
 | `baseline.direct-email-egress` | A direct outbound TCP connection on SMTP/submission ports 25, 465, or 587. |
+| `baseline.inbound-ssh-bruteforce` | Twenty inbound TCP connection attempts to local port 22 from the same remote address within one minute, with a ten-minute cooldown per address. Redefine it with your SSH port or threshold, or disable it on bastion hosts that legitimately receive many connections from one address. |
 | `baseline.policy-denial-burst` | Five resolver, egress, exec, file, bind, Unix, or sockopt denials within one minute for the same cgroup and executable. Plaintext DNS packet decisions are excluded because their process identity may be cache-only. |
 
 Disable a baseline rule:

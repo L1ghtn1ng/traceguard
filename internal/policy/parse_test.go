@@ -402,6 +402,12 @@ func TestDetectionRejectsMutableOrNonCanonicalIdentitySelectors(t *testing.T) {
 		{name: "lsm label", events: []string{"connection"}, match: DetectionMatch{LSMLabels: []string{"label"}}},
 		{name: "requested executable", events: []string{"exec"}, match: DetectionMatch{ExecutableGlobs: []string{"/tmp/**"}}},
 		{name: "requested file", events: []string{"file_access"}, match: DetectionMatch{FilePathGlobs: []string{"/etc/shadow"}}},
+		{name: "unix path on file event", events: []string{"file_blocked"}, match: DetectionMatch{UnixPathGlobs: []string{"/run/docker.sock"}}},
+		{name: "relative unix path", events: []string{"unix_blocked"}, match: DetectionMatch{UnixPathGlobs: []string{"docker.sock"}}},
+		{name: "wildcard unix path", events: []string{"unix_blocked"}, match: DetectionMatch{UnixPathGlobs: []string{"/run/*.sock"}}},
+		{name: "empty abstract unix path", events: []string{"unix_blocked"}, match: DetectionMatch{UnixPathGlobs: []string{"@"}}},
+		{name: "local port on dns", events: []string{"dns"}, match: DetectionMatch{LocalPorts: []uint16{53}}},
+		{name: "local port on unix", events: []string{"unix_blocked"}, match: DetectionMatch{LocalPorts: []uint16{22}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -510,6 +516,14 @@ func TestDetectionAcceptsKernelResolvedPathSelectors(t *testing.T) {
 	for _, rule := range []DetectionRule{
 		{ID: "exec-path", Severity: "warning", Events: []string{"exec_blocked", "exec_would_block"}, Match: DetectionMatch{ExecutableGlobs: []string{"/tmp/**"}}, Message: "resolved exec"},
 		{ID: "file-path", Severity: "warning", Events: []string{"file_blocked", "file_would_block"}, Match: DetectionMatch{FilePathGlobs: []string{"/etc/**"}}, Message: "resolved file"},
+		{ID: "unix-path", Severity: "warning", Events: []string{"unix_blocked", "unix_would_block"}, Match: DetectionMatch{UnixPathGlobs: []string{"/run/docker.sock", "/run/containerd/**", "@/tmp/.X11-unix/X0"}}, Message: "unix socket"},
+		{ID: "bind-port", Severity: "warning", Events: []string{"bind_blocked", "bind_would_block"}, Match: DetectionMatch{LocalPorts: []uint16{22}}, Message: "bind port"},
+		{
+			ID: "inbound-ssh", Severity: "warning", Events: []string{"connection"},
+			Match:     DetectionMatch{Directions: []string{"inbound"}, Protocols: []string{"tcp"}, LocalPorts: []uint16{22}},
+			Threshold: Threshold{Count: 10, Within: Duration{Duration: time.Minute}, GroupBy: []string{"peer"}},
+			Message:   "inbound ssh",
+		},
 	} {
 		if err := rule.validate(); err != nil {
 			t.Fatalf("DetectionRule.validate rejected kernel-resolved selectors: %v", err)

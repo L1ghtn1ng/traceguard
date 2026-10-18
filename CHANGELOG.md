@@ -4,6 +4,17 @@ All notable changes to TraceGuard are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added the `local_ports` detection selector for the local port of connection, egress, bind, and sockops events, so rules can match connections to a listening port and bind decisions by port.
+- Added the `unix_path_globs` detection selector for `unix_blocked` and `unix_would_block` socket paths, including `@` abstract names.
+- Added the `peer` threshold group field as a clearer name for the peer address of inbound connections.
+- Added the `baseline.inbound-ssh-bruteforce` detection: 20 inbound TCP connection attempts to port 22 from one address within a minute.
+
+### Changed
+
+- Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
+
 ## [1.7.0] - 2026-10-17
 
 ### Upgrade notes

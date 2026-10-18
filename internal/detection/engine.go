@@ -306,9 +306,11 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchSuffixes(match.DomainSuffixes, stringField(fields, "domain")) &&
 		matchAddress(cidrs, stringField(fields, "peer_address", "address")) &&
 		matchUint16Field(match.Ports, fields, "peer_port", "port") &&
+		matchUint16Field(match.LocalPorts, fields, "local_port") &&
 		matchCanonicalPathGlobs(match.ExecutableGlobs, stringField(fields, "exe"), boolField(fields, "path_truncated")) &&
 		len(match.CommandGlobs) == 0 &&
 		matchCanonicalPathGlobs(match.FilePathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
+		matchLiteralPathGlobs(match.UnixPathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchStrings(match.FileAccess, stringField(fields, "file_access")) &&
 		matchPrefixes(match.CgroupPrefixes, stringField(fields, "cgroup")) &&
 		matchStrings(match.Services, stringField(fields, "service")) &&
@@ -426,6 +428,24 @@ func matchCanonicalPathGlobs(patterns []string, candidate string, truncated bool
 	return false
 }
 
+// matchLiteralPathGlobs matches exact paths and /** subtrees without glob
+// metacharacters, because abstract Unix socket names may contain them.
+func matchLiteralPathGlobs(patterns []string, candidate string, truncated bool) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, pattern := range patterns {
+		if stem, ok := strings.CutSuffix(pattern, "/**"); ok {
+			if candidate == stem || strings.HasPrefix(candidate, stem+"/") {
+				return true
+			}
+		} else if !truncated && candidate == pattern {
+			return true
+		}
+	}
+	return false
+}
+
 func matchPrefixes(prefixes []string, candidate string) bool {
 	if len(prefixes) == 0 {
 		return true
@@ -529,7 +549,7 @@ func makeGroupKey(ruleID string, fields []string, values map[string]any) groupKe
 		_, _ = io.WriteString(hash, field)
 		_, _ = hash.Write([]byte{'='})
 		switch field {
-		case "destination":
+		case "destination", "peer":
 			_, _ = io.WriteString(hash, stringField(values, "peer_address", "address"))
 		case "executable":
 			_, _ = io.WriteString(hash, actingExecutable(values))
@@ -559,7 +579,8 @@ func makeGroupKey(ruleID string, fields []string, values map[string]any) groupKe
 func emptyMatch(match policy.DetectionMatch) bool {
 	return len(match.Actions)+len(match.Directions)+len(match.Transports)+len(match.Protocols)+
 		len(match.UIDs)+len(match.Domains)+len(match.DomainSuffixes)+len(match.DestinationCIDRs)+
-		len(match.Ports)+len(match.ExecutableGlobs)+len(match.CommandGlobs)+len(match.FilePathGlobs)+
+		len(match.Ports)+len(match.LocalPorts)+len(match.ExecutableGlobs)+len(match.CommandGlobs)+
+		len(match.FilePathGlobs)+len(match.UnixPathGlobs)+
 		len(match.FileAccess)+len(match.CgroupPrefixes)+len(match.Services)+len(match.ContainerIDs)+
 		len(match.PodUIDs)+len(match.KubernetesNamespace)+len(match.KubernetesPods)+
 		len(match.KubernetesAccounts)+len(match.KubernetesOwners)+len(match.KubernetesApps)+
