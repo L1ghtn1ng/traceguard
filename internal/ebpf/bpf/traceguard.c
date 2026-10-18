@@ -4305,7 +4305,10 @@ static __always_inline int emit_file_change(__u32 operation, __u64 dirfd, const 
 	event->file_flags = (__u32)flags;
 	event->socket_cookie = value;
 	set_event_mnt_ns(event);
-	bpf_probe_read_user_str(event->filename, sizeof(event->filename), path);
+	/* A descriptor-based request has no path; dirfd is the file itself. */
+	if (path) {
+		bpf_probe_read_user_str(event->filename, sizeof(event->filename), path);
+	}
 	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
@@ -4488,6 +4491,18 @@ int trace_fchmodat2(struct trace_event_raw_sys_enter *ctx)
 static __always_inline __u64 owner_value(__u64 uid, __u64 gid)
 {
 	return (uid & 0xffffffffULL) | ((gid & 0xffffffffULL) << 32);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmod")
+int trace_fchmod(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], 0, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchown")
+int trace_fchown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, ctx->args[0], 0, 0, owner_value(ctx->args[1], ctx->args[2]));
 }
 
 SEC("tracepoint/syscalls/sys_enter_chown")

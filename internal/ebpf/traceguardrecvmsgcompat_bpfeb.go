@@ -282,8 +282,10 @@ const (
 	traceguardRecvmsgCompatProgTraceDns                = "trace_dns"
 	traceguardRecvmsgCompatProgTraceExecve             = "trace_execve"
 	traceguardRecvmsgCompatProgTraceExecveat           = "trace_execveat"
+	traceguardRecvmsgCompatProgTraceFchmod             = "trace_fchmod"
 	traceguardRecvmsgCompatProgTraceFchmodat           = "trace_fchmodat"
 	traceguardRecvmsgCompatProgTraceFchmodat2          = "trace_fchmodat2"
+	traceguardRecvmsgCompatProgTraceFchown             = "trace_fchown"
 	traceguardRecvmsgCompatProgTraceFchownat           = "trace_fchownat"
 	traceguardRecvmsgCompatProgTraceFinitModule        = "trace_finit_module"
 	traceguardRecvmsgCompatProgTraceInitModule         = "trace_init_module"
@@ -387,8 +389,10 @@ type traceguardRecvmsgCompatProgramSpecs struct {
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.ProgramSpec `ebpf:"trace_fchmod"`
 	TraceFchmodat          *ebpf.ProgramSpec `ebpf:"trace_fchmodat"`
 	TraceFchmodat2         *ebpf.ProgramSpec `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.ProgramSpec `ebpf:"trace_fchown"`
 	TraceFchownat          *ebpf.ProgramSpec `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.ProgramSpec `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
@@ -629,8 +633,10 @@ type traceguardRecvmsgCompatPrograms struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.Program `ebpf:"trace_fchmod"`
 	TraceFchmodat          *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceFchmodat2         *ebpf.Program `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.Program `ebpf:"trace_fchown"`
 	TraceFchownat          *ebpf.Program `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.Program `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
@@ -693,8 +699,10 @@ func (p *traceguardRecvmsgCompatPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceFchmod,
 		p.TraceFchmodat,
 		p.TraceFchmodat2,
+		p.TraceFchown,
 		p.TraceFchownat,
 		p.TraceFinitModule,
 		p.TraceInitModule,
