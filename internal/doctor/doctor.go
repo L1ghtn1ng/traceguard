@@ -18,6 +18,7 @@ import (
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 var defaultChecks = environmentChecks{
@@ -253,6 +254,7 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
 	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
 	check(true, "lsm-program-type", enabledDetail(features.LSMProgramType))
+	check(true, "task-storage-map", enabledDetail(features.TaskStorage))
 	info("INFO", "lsm-exec-attached", "verified by the real optional attach at daemon startup")
 	info("INFO", "lsm-file-attached", "verified by the real optional attach at daemon startup")
 	info("INFO", "cgroup-bind", "bind4 and bind6 are verified independently at daemon startup")
@@ -261,13 +263,29 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "kernel-bpf-object", emptyDetail(features.SelectedObject, "none"))
 	check(true, "kernel-enhanced-telemetry", enhancedTelemetryDetail(features))
 	if effective, ok := effectivePolicy(remotePolicy, localPolicy, check); ok {
+		if feeds := effective.ThreatIntel.Feeds; len(feeds) > 0 {
+			if loaded, err := threatintel.Load(feeds); err != nil {
+				check(false, "threat-intel-feeds", err.Error())
+			} else if _, err := threatintel.Enforce(effective, loaded); err != nil {
+				check(false, "threat-intel-feeds", err.Error())
+			} else {
+				indicators := 0
+				for _, count := range threatintel.NewMatcher(loaded).Indicators() {
+					indicators += count
+				}
+				check(true, "threat-intel-feeds", fmt.Sprintf("feeds=%d indicators=%d", len(loaded), indicators))
+			}
+		}
 		execBlocks := policyBlockRuleCount(effective.Exec.Rules, func(rule policyconfig.PathRule) string { return rule.Action })
 		fileBlocks := policyBlockRuleCount(effective.File.Rules, func(rule policyconfig.FileRule) string { return rule.Action })
 		lsmScopeOK := execBlocks+fileBlocks == 0 || filepath.Clean(cfg.CgroupPath) == "/sys/fs/cgroup"
 		check(lsmScopeOK, "lsm-scope", "exec/file MAC enforcement is host-wide and requires cgroup-path /sys/fs/cgroup")
 		if cfg.Block && !cfg.DryRun {
-			check(execBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "exec-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
-			check(fileBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "file-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
+			// The daemon loads the exec and file LSM programs only with
+			// task storage support as well.
+			lsmReady := features.BPFLSMAvailable && features.LSMProgramType && features.TaskStorage
+			check(execBlocks == 0 || lsmReady, "exec-enforce-ready", enabledDetail(lsmReady))
+			check(fileBlocks == 0 || lsmReady, "file-enforce-ready", enabledDetail(lsmReady))
 		}
 		for _, rule := range effective.Exec.Rules {
 			if rule.Action == "block" && len(rule.Selectors.UIDs) == 0 && len(rule.Selectors.CgroupPaths) == 0 && len(rule.Selectors.CgroupPrefixes) == 0 {
@@ -286,6 +304,9 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "file-audit", enabledDetail(cfg.FileAudit))
 	check(true, "selinux", selinuxStatus(env))
 	check(true, "apparmor", apparmorStatus(env))
+	for _, finding := range hostPosture(env.readFile, features) {
+		info(finding.level, finding.name, finding.detail)
+	}
 	if cfg.KubernetesEnrich {
 		parsed, err := url.Parse(cfg.KubernetesAPIURL)
 		check(err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil,

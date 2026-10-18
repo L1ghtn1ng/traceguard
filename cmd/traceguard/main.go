@@ -16,6 +16,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/hardening"
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
+	"github.com/L1ghtn1ng/traceguard/internal/replay"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/version"
 )
@@ -38,6 +39,18 @@ func run() (exitCode int) {
 	}
 	if cfg.Doctor {
 		if err := doctor.Run(cfg, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if cfg.ReplayPath != "" {
+		summary, err := replay.Run(replay.Config{ArchivePath: cfg.ReplayPath, PolicyPath: cfg.PolicyPath}, os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := replay.WriteSummary(summary, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -123,6 +136,7 @@ func run() (exitCode int) {
 		SyslogTag:               cfg.EventSyslogTag,
 		SyslogTimeout:           cfg.EventSyslogTimeout,
 		SyslogCAPath:            cfg.EventSyslogCAPath,
+		Schema:                  cfg.EventSchema,
 	})
 	if err != nil {
 		reportLoggerError(logger, "initialize event recorder", err)

@@ -35,11 +35,11 @@ func newCollectionOptions() *ebpf.CollectionOptions {
 	return opts
 }
 
-func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, KernelFeatures, error) {
+func loadMonitorObjects(loadOptions *ebpf.CollectionOptions, constants loadConstants) (monitorObjects, KernelFeatures, error) {
 	features := DetectKernelFeatures()
 	release := features.Release
 	if features.KernelAtLeast71 {
-		objects, nextFeatures, err := loadLinux71MonitorObjects(loadOptions, features)
+		objects, nextFeatures, err := loadLinux71MonitorObjects(loadOptions, constants, features)
 		if err == nil {
 			return objects, nextFeatures, nil
 		}
@@ -47,13 +47,13 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 	}
 
 	if isLinux612x(release) {
-		objects, err := loadMonitorVariant(loadTraceguardDNSCompat, loadOptions)
+		objects, err := loadMonitorVariant(constants.specLoader(loadTraceguardDNSCompat), loadOptions)
 		if err == nil {
 			features.SelectedObject = "traceguardDNSCompat"
 			return objects, features, nil
 		}
 		if isRecvmsgContextVerifierError(err) {
-			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+			compatObjects, compatErr := loadMonitorVariant(constants.specLoader(loadTraceguardDNSRecvmsgCompat), loadOptions)
 			if compatErr != nil {
 				return monitorObjects{}, features, fmt.Errorf("load eBPF objects for kernel %s: %w", release, errors.Join(
 					fmt.Errorf("dns compat load failed: %w", err),
@@ -64,7 +64,7 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 			return compatObjects, features, nil
 		}
 		if isDNSHelperVerifierError(err) {
-			compatObjects, compatErr := loadMonitorVariant(loadTraceguardDNSRecvmsgCompat, loadOptions)
+			compatObjects, compatErr := loadMonitorVariant(constants.specLoader(loadTraceguardDNSRecvmsgCompat), loadOptions)
 			if compatErr == nil {
 				features.SelectedObject = "traceguardDNSRecvmsgCompat"
 				return compatObjects, features, nil
@@ -74,10 +74,10 @@ func loadMonitorObjects(loadOptions *ebpf.CollectionOptions) (monitorObjects, Ke
 	}
 
 	objects, variant, err := loadCompatibleMonitorObjects(loadOptions, monitorVariantLoaders{
-		defaultVariant:   variantLoader(loadTraceguard),
-		dnsCompat:        variantLoader(loadTraceguardDNSCompat),
-		recvmsgCompat:    variantLoader(loadTraceguardRecvmsgCompat),
-		dnsRecvmsgCompat: variantLoader(loadTraceguardDNSRecvmsgCompat),
+		defaultVariant:   variantLoader(constants.specLoader(loadTraceguard)),
+		dnsCompat:        variantLoader(constants.specLoader(loadTraceguardDNSCompat)),
+		recvmsgCompat:    variantLoader(constants.specLoader(loadTraceguardRecvmsgCompat)),
+		dnsRecvmsgCompat: variantLoader(constants.specLoader(loadTraceguardDNSRecvmsgCompat)),
 	})
 	if err != nil {
 		return monitorObjects{}, features, fmt.Errorf("load eBPF objects: %w", err)
@@ -93,12 +93,12 @@ type monitorVariantLoaders struct {
 	dnsRecvmsgCompat func(*ebpf.CollectionOptions) (monitorObjects, error)
 }
 
-func loadLinux71MonitorObjects(loadOptions *ebpf.CollectionOptions, features KernelFeatures) (monitorObjects, KernelFeatures, error) {
+func loadLinux71MonitorObjects(loadOptions *ebpf.CollectionOptions, constants loadConstants, features KernelFeatures) (monitorObjects, KernelFeatures, error) {
 	return loadLinux71MonitorObjectsWith(loadOptions, features, monitorVariantLoaders{
-		defaultVariant:   variantLoader(loadTraceguardLinux71),
-		dnsCompat:        variantLoader(loadTraceguardLinux71DNSCompat),
-		recvmsgCompat:    variantLoader(loadTraceguardLinux71RecvmsgCompat),
-		dnsRecvmsgCompat: variantLoader(loadTraceguardLinux71DNSRecvmsgCompat),
+		defaultVariant:   variantLoader(constants.specLoader(loadTraceguardLinux71)),
+		dnsCompat:        variantLoader(constants.specLoader(loadTraceguardLinux71DNSCompat)),
+		recvmsgCompat:    variantLoader(constants.specLoader(loadTraceguardLinux71RecvmsgCompat)),
+		dnsRecvmsgCompat: variantLoader(constants.specLoader(loadTraceguardLinux71DNSRecvmsgCompat)),
 	})
 }
 

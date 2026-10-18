@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultPinPath   = "/sys/fs/bpf/traceguard"
-	pinLayoutVersion = 5
+	pinLayoutVersion = 7
 	pinSettingsSize  = 32
 	pinEventSize     = 632
 	pinMetadataSize  = 96
@@ -310,7 +310,7 @@ func sanitizePinName(name string) string {
 func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
 		"allowlist": o.Allowlist, "allow_suffixes": o.AllowSuffixes, "block_suffixes": o.BlockSuffixes,
-		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "socket_info": o.SocketInfo,
+		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "exec_argv_scratch": o.ExecArgvScratch, "socket_info": o.SocketInfo,
 		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
 		"endpoint4_allow_rules": o.Endpoint4AllowRules, "endpoint4_cidr_allow_rules": o.Endpoint4CidrAllowRules,
 		"endpoint4_cidr_rules": o.Endpoint4CidrRules, "endpoint4_rules": o.Endpoint4Rules,
@@ -326,12 +326,12 @@ func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*
 		"sockopt_allow": o.SockoptAllow, "sockopt_block": o.SockoptBlock,
 		"policy_selector": o.PolicySelector, "policy_readers": o.PolicyReaders,
 		"daemon_identity": o.DaemonIdentity, "rule_names": o.RuleNames,
-		"settings": o.Settings, "lsm_path_buf": optional.LsmPathBuf,
+		"ringbuf_drops": o.RingbufDrops, "response_peers": o.ResponsePeers, "response_peer_drops": o.ResponsePeerDrops, "settings": o.Settings, "lsm_path_buf": optional.LsmPathBuf,
 	}
 }
 
 func monitorProgramHandles(o monitorObjects, optional optionalPrograms) map[string]*ebpf.Program {
-	return map[string]*ebpf.Program{
+	handles := map[string]*ebpf.Program{
 		"trace_dns": o.TraceDns, "trace_connection_ingress": o.TraceConnectionIngress,
 		"trace_sendmsg4": o.TraceSendmsg4, "trace_sendmsg6": o.TraceSendmsg6,
 		"trace_recvmsg4": o.TraceRecvmsg4, "trace_recvmsg6": o.TraceRecvmsg6,
@@ -345,6 +345,10 @@ func monitorProgramHandles(o monitorObjects, optional optionalPrograms) map[stri
 		"trace_recvmsg_unix": optional.UnixRecvmsg, "trace_setsockopt": optional.Sockopt,
 		"trace_sockops": optional.SockOps,
 	}
+	for _, tracepoint := range o.observeTracepoints() {
+		handles[tracepoint.program] = tracepoint.handle
+	}
+	return handles
 }
 
 func pinnedObjectName(metadata *pinMetadata) string {

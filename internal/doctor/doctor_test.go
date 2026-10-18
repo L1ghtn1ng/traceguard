@@ -317,6 +317,7 @@ func passingChecks(t *testing.T, root string) environmentChecks {
 				BTFAvailable:       true,
 				BPFLSMAvailable:    true,
 				LSMProgramType:     true,
+				TaskStorage:        true,
 				EnhancedTelemetry:  true,
 				SelectedFeatureSet: "linux71",
 				SelectedObject:     "traceguardLinux71",
@@ -480,5 +481,70 @@ func TestRunWarnsWhenRemotePolicyCacheUnavailable(t *testing.T) {
 				t.Fatalf("enforcement checks ran without a policy:\n%s", out.String())
 			}
 		})
+	}
+}
+
+func TestRunChecksThreatIntelFeeds(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		feed string
+		want string
+		ok   bool
+	}{
+		"readable": {"evil.example\nc2.example\n", "PASS threat-intel-feeds: feeds=1 indicators=2", true},
+		"invalid":  {"not a domain\n", "FAIL threat-intel-feeds", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			cfg := readyConfig(root)
+			feedPath := filepath.Join(root, "feed.txt")
+			if err := os.WriteFile(feedPath, []byte(test.feed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg.PolicyPath = filepath.Join(root, "policy.yaml")
+			local := []byte("version: 1\nthreat_intel:\n  feeds:\n    - {id: bad, path: " + feedPath + ", type: domains}\n")
+			if err := os.WriteFile(cfg.PolicyPath, local, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			checks := passingChecks(t, root)
+			baseReadFile := checks.readFile
+			checks.readFile = func(path string) ([]byte, error) {
+				if path == cfg.PolicyPath {
+					return local, nil
+				}
+				return baseReadFile(path)
+			}
+			var out bytes.Buffer
+			err := runWithChecks(cfg, &out, checks)
+			if (err == nil) != test.ok || !strings.Contains(out.String(), test.want) {
+				t.Fatalf("runWithChecks() error = %v, want ok %t and %q:\n%s", err, test.ok, test.want, out.String())
+			}
+		})
+	}
+}
+
+func TestDoctorEnforcementNeedsTaskStorage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := readyConfig(root)
+	cfg.PolicyURL = "https://policy.test/v1"
+	cfg.Block = true
+	checks := passingChecks(t, root)
+	writeCachedRemotePolicy(t, &cfg, &checks, remoteHostWideExecPolicy)
+	baseFeatures := checks.detectKernelFeatures
+	checks.detectKernelFeatures = func() ebpfmonitor.KernelFeatures {
+		features := baseFeatures()
+		features.TaskStorage = false
+		return features
+	}
+	var out bytes.Buffer
+	if err := runWithChecks(cfg, &out, checks); err == nil {
+		t.Fatalf("runWithChecks() passed an exec block rule without task storage\n%s", out.String())
+	}
+	for _, want := range []string{"PASS task-storage-map: disabled", "FAIL exec-enforce-ready: disabled", "PASS file-enforce-ready"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
 	}
 }

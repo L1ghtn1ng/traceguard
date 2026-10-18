@@ -31,6 +31,7 @@ type syslogSink struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	hostname   string
+	encode     recordEncoder
 }
 
 // RFC 5424 section 6 header field limits. HOSTNAME, APP-NAME, PROCID and
@@ -41,6 +42,10 @@ const (
 )
 
 func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry, hostname string) (*syslogSink, error) {
+	encode, err := newRecordEncoder(cfg.Schema)
+	if err != nil {
+		return nil, err
+	}
 	parsed, err := neturl.Parse(strings.TrimSpace(cfg.SyslogURL))
 	if err != nil {
 		return nil, errors.New("event syslog url is not valid")
@@ -104,6 +109,7 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry,
 		metrics:    metrics,
 		cancel:     cancel,
 		hostname:   sanitizeSyslogToken(hostname, maxSyslogHostnameBytes),
+		encode:     encode,
 	}
 	sink.wg.Go(func() {
 		sink.run(sinkCtx)
@@ -189,9 +195,9 @@ func (s *syslogSink) message(entry record) ([]byte, error) {
 		if available <= 0 {
 			return nil, errors.New("syslog header exceeds UDP payload limit")
 		}
-		payload, err = marshalUDPRecord(entry, available)
+		payload, err = marshalUDPRecord(entry, available, s.encode)
 	} else {
-		payload, err = marshalSingleRecord(entry)
+		payload, err = s.encode(entry)
 	}
 	if err != nil {
 		return nil, err
@@ -199,10 +205,10 @@ func (s *syslogSink) message(entry record) ([]byte, error) {
 	return append([]byte(header), payload...), nil
 }
 
-func marshalUDPRecord(entry record, limit int) ([]byte, error) {
+func marshalUDPRecord(entry record, limit int, encode recordEncoder) ([]byte, error) {
 	// Records were already bounded by the recorder; only shorten them further
 	// when the complete record does not fit in one datagram.
-	if payload, err := marshalSingleRecord(entry); err == nil && len(payload) <= limit {
+	if payload, err := encode(entry); err == nil && len(payload) <= limit {
 		return payload, nil
 	}
 	originalMessage := entry.Message
@@ -222,7 +228,7 @@ func marshalUDPRecord(entry record, limit int) ([]byte, error) {
 		if messageTruncated {
 			entry.Fields["telemetry_truncated"] = true
 		}
-		payload, err := marshalSingleRecord(entry)
+		payload, err := encode(entry)
 		if err == nil && len(payload) <= limit {
 			return payload, nil
 		}
@@ -233,7 +239,13 @@ func marshalUDPRecord(entry record, limit int) ([]byte, error) {
 		"telemetry_truncated":        true,
 		"telemetry_truncated_fields": len(originalFields),
 	}
-	payload, err := marshalSingleRecord(entry)
+	// Keep what classifies the record, so an OCSF event keeps its class.
+	for _, name := range udpClassificationFields {
+		if text, ok := originalFields[name].(string); ok {
+			entry.Fields[name], _ = truncateUTF8(text, 128)
+		}
+	}
+	payload, err := encode(entry)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +253,12 @@ func marshalUDPRecord(entry record, limit int) ([]byte, error) {
 		return nil, fmt.Errorf("bounded syslog record exceeds %d-byte payload budget", limit)
 	}
 	return payload, nil
+}
+
+// udpClassificationFields survive the last UDP fallback: the event name and
+// the fields that pick its OCSF class, activity, disposition, and finding.
+var udpClassificationFields = []string{
+	"event", "operation", "change", "mode", "source_event", "alert_id", "detection_rule_id", "severity",
 }
 
 func (s *syslogSink) Close() error {

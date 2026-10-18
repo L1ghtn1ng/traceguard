@@ -36,9 +36,12 @@ func (o *optionalPrograms) Close() error {
 	return errors.Join(errs...)
 }
 
-func loadOptionalPrograms(selectedObject string, loadOptions *ebpf.CollectionOptions, objects monitorObjects, pinnedLsmPath *ebpf.Map) optionalPrograms {
+func loadOptionalPrograms(selectedObject string, loadOptions *ebpf.CollectionOptions, constants loadConstants, objects monitorObjects, pinnedLsmPath *ebpf.Map) optionalPrograms {
 	loaded := optionalPrograms{Failures: make(map[string]error)}
 	spec, err := loadSelectedMonitorSpec(selectedObject)
+	if err == nil {
+		err = constants.apply(spec)
+	}
 	if err != nil {
 		loaded.Failures["collection"] = err
 		return loaded
@@ -172,7 +175,7 @@ func optionalMapReplacements(o monitorObjects, lsmPath *ebpf.Map) map[string]*eb
 	replacements := map[string]*ebpf.Map{
 		"settings": o.Settings, "policy_selector": o.PolicySelector,
 		"policy_readers": o.PolicyReaders, "daemon_identity": o.DaemonIdentity,
-		"rule_names": o.RuleNames, "events": o.Events,
+		"rule_names": o.RuleNames, "events": o.Events, "ringbuf_drops": o.RingbufDrops,
 		"socket_info": o.SocketInfo, "listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
 		"exec_allow_paths": o.ExecAllowPaths, "exec_block_paths": o.ExecBlockPaths,
 		"file_allow_paths": o.FileAllowPaths, "file_block_paths": o.FileBlockPaths,

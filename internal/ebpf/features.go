@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	cebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
@@ -23,6 +24,7 @@ type KernelFeatures struct {
 	BTFAvailable        bool
 	BPFLSMAvailable     bool
 	LSMProgramType      bool
+	TaskStorage         bool
 	EnhancedTelemetry   bool
 	SelectedFeatureSet  string
 	SelectedObject      string
@@ -37,6 +39,7 @@ func DetectKernelFeatures() KernelFeatures {
 	}
 	features.BPFLSMAvailable = detectBPFLSM()
 	features.LSMProgramType = featureAvailable(ebpffeatures.HaveProgramType(cebpf.LSM))
+	features.TaskStorage = featureAvailable(ebpffeatures.HaveMapType(cebpf.TaskStorage))
 	return features
 }
 
@@ -75,7 +78,9 @@ func ProbeKernelFeatures() KernelFeatures {
 		return detected
 	}
 	loadOptions := newCollectionOptions()
-	objects, features, err := loadMonitorObjects(loadOptions)
+	// A non-zero window keeps the verifier checking the deduplication path,
+	// which a zero constant would let it prune as dead code.
+	objects, features, err := loadMonitorObjects(loadOptions, loadConstants{connectionDedupeWindow: time.Minute})
 	if err != nil {
 		features.EnhancedLoadFailure = err.Error()
 		return features
@@ -115,6 +120,7 @@ func (f KernelFeatures) FeatureGates() map[string]bool {
 		"btf":                  f.BTFAvailable,
 		"bpf_lsm":              f.BPFLSMAvailable,
 		"lsm_program_type":     f.LSMProgramType,
+		"task_storage":         f.TaskStorage,
 		"enhanced_telemetry":   f.EnhancedTelemetry,
 	}
 }

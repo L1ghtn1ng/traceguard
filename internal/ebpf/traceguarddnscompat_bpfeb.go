@@ -105,6 +105,11 @@ type traceguardDNSCompatEndpoint6Key struct {
 	Pad       uint8
 }
 
+type traceguardDNSCompatExecArgvScratch struct {
+	_   structs.HostLayout
+	Buf [512]int8
+}
+
 type traceguardDNSCompatListenerInfoKey struct {
 	_        structs.HostLayout
 	Port     uint16
@@ -131,6 +136,13 @@ type traceguardDNSCompatPathLpmKey struct {
 	_         structs.HostLayout
 	Prefixlen uint32
 	Data      [256]uint8
+}
+
+type traceguardDNSCompatResponsePeerKey struct {
+	_      structs.HostLayout
+	Family uint8
+	Pad    [3]uint8
+	Addr   [16]uint8
 }
 
 type traceguardDNSCompatRuleNameKey struct {
@@ -211,70 +223,112 @@ type traceguardDNSCompatSockoptKey struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	traceguardDNSCompatMapAllowSuffixes           = "allow_suffixes"
-	traceguardDNSCompatMapAllowlist               = "allowlist"
-	traceguardDNSCompatMapBind4AllowRules         = "bind4_allow_rules"
-	traceguardDNSCompatMapBind4BlockRules         = "bind4_block_rules"
-	traceguardDNSCompatMapBind6AllowRules         = "bind6_allow_rules"
-	traceguardDNSCompatMapBind6BlockRules         = "bind6_block_rules"
-	traceguardDNSCompatMapBlockSuffixes           = "block_suffixes"
-	traceguardDNSCompatMapBlocklist               = "blocklist"
-	traceguardDNSCompatMapConnectionDedupe        = "connection_dedupe"
-	traceguardDNSCompatMapDaemonIdentity          = "daemon_identity"
-	traceguardDNSCompatMapDnsScratch              = "dns_scratch"
-	traceguardDNSCompatMapEgress4AllowRules       = "egress4_allow_rules"
-	traceguardDNSCompatMapEgress4BlockRules       = "egress4_block_rules"
-	traceguardDNSCompatMapEgress6AllowRules       = "egress6_allow_rules"
-	traceguardDNSCompatMapEgress6BlockRules       = "egress6_block_rules"
-	traceguardDNSCompatMapEndpoint4AllowRules     = "endpoint4_allow_rules"
-	traceguardDNSCompatMapEndpoint4CidrAllowRules = "endpoint4_cidr_allow_rules"
-	traceguardDNSCompatMapEndpoint4CidrRules      = "endpoint4_cidr_rules"
-	traceguardDNSCompatMapEndpoint4Rules          = "endpoint4_rules"
-	traceguardDNSCompatMapEndpoint6AllowRules     = "endpoint6_allow_rules"
-	traceguardDNSCompatMapEndpoint6CidrAllowRules = "endpoint6_cidr_allow_rules"
-	traceguardDNSCompatMapEndpoint6CidrRules      = "endpoint6_cidr_rules"
-	traceguardDNSCompatMapEndpoint6Rules          = "endpoint6_rules"
-	traceguardDNSCompatMapEvents                  = "events"
-	traceguardDNSCompatMapExecAllowPaths          = "exec_allow_paths"
-	traceguardDNSCompatMapExecBlockPaths          = "exec_block_paths"
-	traceguardDNSCompatMapFileAllowPaths          = "file_allow_paths"
-	traceguardDNSCompatMapFileBlockPaths          = "file_block_paths"
-	traceguardDNSCompatMapListenerInfo            = "listener_info"
-	traceguardDNSCompatMapLsmPathBuf              = "lsm_path_buf"
-	traceguardDNSCompatMapPolicyReaders           = "policy_readers"
-	traceguardDNSCompatMapPolicySelector          = "policy_selector"
-	traceguardDNSCompatMapRuleNames               = "rule_names"
-	traceguardDNSCompatMapSettings                = "settings"
-	traceguardDNSCompatMapSocketInfo              = "socket_info"
-	traceguardDNSCompatMapSockoptAllow            = "sockopt_allow"
-	traceguardDNSCompatMapSockoptBlock            = "sockopt_block"
-	traceguardDNSCompatMapUnixAllowPaths          = "unix_allow_paths"
-	traceguardDNSCompatMapUnixBlockPaths          = "unix_block_paths"
-	traceguardDNSCompatProgLsmBprmCheckSecurity   = "lsm_bprm_check_security"
-	traceguardDNSCompatProgLsmFileOpen            = "lsm_file_open"
-	traceguardDNSCompatProgTraceBind4             = "trace_bind4"
-	traceguardDNSCompatProgTraceBind6             = "trace_bind6"
-	traceguardDNSCompatProgTraceConnect4          = "trace_connect4"
-	traceguardDNSCompatProgTraceConnect6          = "trace_connect6"
-	traceguardDNSCompatProgTraceConnectUnix       = "trace_connect_unix"
-	traceguardDNSCompatProgTraceConnectionIngress = "trace_connection_ingress"
-	traceguardDNSCompatProgTraceCreat             = "trace_creat"
-	traceguardDNSCompatProgTraceDns               = "trace_dns"
-	traceguardDNSCompatProgTraceExecve            = "trace_execve"
-	traceguardDNSCompatProgTraceExecveat          = "trace_execveat"
-	traceguardDNSCompatProgTraceOpen              = "trace_open"
-	traceguardDNSCompatProgTraceOpenat            = "trace_openat"
-	traceguardDNSCompatProgTraceOpenat2           = "trace_openat2"
-	traceguardDNSCompatProgTracePostBind4         = "trace_post_bind4"
-	traceguardDNSCompatProgTracePostBind6         = "trace_post_bind6"
-	traceguardDNSCompatProgTraceRecvmsg4          = "trace_recvmsg4"
-	traceguardDNSCompatProgTraceRecvmsg6          = "trace_recvmsg6"
-	traceguardDNSCompatProgTraceRecvmsgUnix       = "trace_recvmsg_unix"
-	traceguardDNSCompatProgTraceSendmsg4          = "trace_sendmsg4"
-	traceguardDNSCompatProgTraceSendmsg6          = "trace_sendmsg6"
-	traceguardDNSCompatProgTraceSendmsgUnix       = "trace_sendmsg_unix"
-	traceguardDNSCompatProgTraceSetsockopt        = "trace_setsockopt"
-	traceguardDNSCompatProgTraceSockops           = "trace_sockops"
+	traceguardDNSCompatMapAllowSuffixes            = "allow_suffixes"
+	traceguardDNSCompatMapAllowlist                = "allowlist"
+	traceguardDNSCompatMapBind4AllowRules          = "bind4_allow_rules"
+	traceguardDNSCompatMapBind4BlockRules          = "bind4_block_rules"
+	traceguardDNSCompatMapBind6AllowRules          = "bind6_allow_rules"
+	traceguardDNSCompatMapBind6BlockRules          = "bind6_block_rules"
+	traceguardDNSCompatMapBlockSuffixes            = "block_suffixes"
+	traceguardDNSCompatMapBlocklist                = "blocklist"
+	traceguardDNSCompatMapConnectionDedupe         = "connection_dedupe"
+	traceguardDNSCompatMapDaemonIdentity           = "daemon_identity"
+	traceguardDNSCompatMapDnsScratch               = "dns_scratch"
+	traceguardDNSCompatMapEgress4AllowRules        = "egress4_allow_rules"
+	traceguardDNSCompatMapEgress4BlockRules        = "egress4_block_rules"
+	traceguardDNSCompatMapEgress6AllowRules        = "egress6_allow_rules"
+	traceguardDNSCompatMapEgress6BlockRules        = "egress6_block_rules"
+	traceguardDNSCompatMapEndpoint4AllowRules      = "endpoint4_allow_rules"
+	traceguardDNSCompatMapEndpoint4CidrAllowRules  = "endpoint4_cidr_allow_rules"
+	traceguardDNSCompatMapEndpoint4CidrRules       = "endpoint4_cidr_rules"
+	traceguardDNSCompatMapEndpoint4Rules           = "endpoint4_rules"
+	traceguardDNSCompatMapEndpoint6AllowRules      = "endpoint6_allow_rules"
+	traceguardDNSCompatMapEndpoint6CidrAllowRules  = "endpoint6_cidr_allow_rules"
+	traceguardDNSCompatMapEndpoint6CidrRules       = "endpoint6_cidr_rules"
+	traceguardDNSCompatMapEndpoint6Rules           = "endpoint6_rules"
+	traceguardDNSCompatMapEvents                   = "events"
+	traceguardDNSCompatMapExecAllowPaths           = "exec_allow_paths"
+	traceguardDNSCompatMapExecArgvScratch          = "exec_argv_scratch"
+	traceguardDNSCompatMapExecBlockPaths           = "exec_block_paths"
+	traceguardDNSCompatMapFileAllowPaths           = "file_allow_paths"
+	traceguardDNSCompatMapFileBlockPaths           = "file_block_paths"
+	traceguardDNSCompatMapListenerInfo             = "listener_info"
+	traceguardDNSCompatMapLsmPathBuf               = "lsm_path_buf"
+	traceguardDNSCompatMapPolicyReaders            = "policy_readers"
+	traceguardDNSCompatMapPolicySelector           = "policy_selector"
+	traceguardDNSCompatMapResponsePeerDrops        = "response_peer_drops"
+	traceguardDNSCompatMapResponsePeers            = "response_peers"
+	traceguardDNSCompatMapRingbufDrops             = "ringbuf_drops"
+	traceguardDNSCompatMapRuleNames                = "rule_names"
+	traceguardDNSCompatMapSettings                 = "settings"
+	traceguardDNSCompatMapSocketInfo               = "socket_info"
+	traceguardDNSCompatMapSockoptAllow             = "sockopt_allow"
+	traceguardDNSCompatMapSockoptBlock             = "sockopt_block"
+	traceguardDNSCompatMapUnixAllowPaths           = "unix_allow_paths"
+	traceguardDNSCompatMapUnixBlockPaths           = "unix_block_paths"
+	traceguardDNSCompatProgLsmBprmCheckSecurity    = "lsm_bprm_check_security"
+	traceguardDNSCompatProgLsmFileOpen             = "lsm_file_open"
+	traceguardDNSCompatProgTraceBind4              = "trace_bind4"
+	traceguardDNSCompatProgTraceBind6              = "trace_bind6"
+	traceguardDNSCompatProgTraceBpf                = "trace_bpf"
+	traceguardDNSCompatProgTraceCapset             = "trace_capset"
+	traceguardDNSCompatProgTraceChmod              = "trace_chmod"
+	traceguardDNSCompatProgTraceChown              = "trace_chown"
+	traceguardDNSCompatProgTraceConnect4           = "trace_connect4"
+	traceguardDNSCompatProgTraceConnect6           = "trace_connect6"
+	traceguardDNSCompatProgTraceConnectUnix        = "trace_connect_unix"
+	traceguardDNSCompatProgTraceConnectionIngress  = "trace_connection_ingress"
+	traceguardDNSCompatProgTraceCreat              = "trace_creat"
+	traceguardDNSCompatProgTraceDns                = "trace_dns"
+	traceguardDNSCompatProgTraceExecve             = "trace_execve"
+	traceguardDNSCompatProgTraceExecveat           = "trace_execveat"
+	traceguardDNSCompatProgTraceFchmod             = "trace_fchmod"
+	traceguardDNSCompatProgTraceFchmodat           = "trace_fchmodat"
+	traceguardDNSCompatProgTraceFchmodat2          = "trace_fchmodat2"
+	traceguardDNSCompatProgTraceFchown             = "trace_fchown"
+	traceguardDNSCompatProgTraceFchownat           = "trace_fchownat"
+	traceguardDNSCompatProgTraceFinitModule        = "trace_finit_module"
+	traceguardDNSCompatProgTraceInitModule         = "trace_init_module"
+	traceguardDNSCompatProgTraceIoUringSetup       = "trace_io_uring_setup"
+	traceguardDNSCompatProgTraceLchown             = "trace_lchown"
+	traceguardDNSCompatProgTraceLink               = "trace_link"
+	traceguardDNSCompatProgTraceLinkat             = "trace_linkat"
+	traceguardDNSCompatProgTraceMemfdCreate        = "trace_memfd_create"
+	traceguardDNSCompatProgTraceMount              = "trace_mount"
+	traceguardDNSCompatProgTraceOpen               = "trace_open"
+	traceguardDNSCompatProgTraceOpenat             = "trace_openat"
+	traceguardDNSCompatProgTraceOpenat2            = "trace_openat2"
+	traceguardDNSCompatProgTracePostBind4          = "trace_post_bind4"
+	traceguardDNSCompatProgTracePostBind6          = "trace_post_bind6"
+	traceguardDNSCompatProgTraceProcessVmReadv     = "trace_process_vm_readv"
+	traceguardDNSCompatProgTraceProcessVmWritev    = "trace_process_vm_writev"
+	traceguardDNSCompatProgTracePtrace             = "trace_ptrace"
+	traceguardDNSCompatProgTraceRecvmsg4           = "trace_recvmsg4"
+	traceguardDNSCompatProgTraceRecvmsg6           = "trace_recvmsg6"
+	traceguardDNSCompatProgTraceRecvmsgUnix        = "trace_recvmsg_unix"
+	traceguardDNSCompatProgTraceRename             = "trace_rename"
+	traceguardDNSCompatProgTraceRenameat           = "trace_renameat"
+	traceguardDNSCompatProgTraceRenameat2          = "trace_renameat2"
+	traceguardDNSCompatProgTraceRmdir              = "trace_rmdir"
+	traceguardDNSCompatProgTraceSendmsg4           = "trace_sendmsg4"
+	traceguardDNSCompatProgTraceSendmsg6           = "trace_sendmsg6"
+	traceguardDNSCompatProgTraceSendmsgUnix        = "trace_sendmsg_unix"
+	traceguardDNSCompatProgTraceSetgid             = "trace_setgid"
+	traceguardDNSCompatProgTraceSetns              = "trace_setns"
+	traceguardDNSCompatProgTraceSetregid           = "trace_setregid"
+	traceguardDNSCompatProgTraceSetresgid          = "trace_setresgid"
+	traceguardDNSCompatProgTraceSetresuid          = "trace_setresuid"
+	traceguardDNSCompatProgTraceSetreuid           = "trace_setreuid"
+	traceguardDNSCompatProgTraceSetsockopt         = "trace_setsockopt"
+	traceguardDNSCompatProgTraceSetuid             = "trace_setuid"
+	traceguardDNSCompatProgTraceSockops            = "trace_sockops"
+	traceguardDNSCompatProgTraceSymlink            = "trace_symlink"
+	traceguardDNSCompatProgTraceSymlinkat          = "trace_symlinkat"
+	traceguardDNSCompatProgTraceTruncate           = "trace_truncate"
+	traceguardDNSCompatProgTraceUnlink             = "trace_unlink"
+	traceguardDNSCompatProgTraceUnlinkat           = "trace_unlinkat"
+	traceguardDNSCompatProgTraceUnshare            = "trace_unshare"
+	traceguardDNSCompatVarConnectionDedupeWindowNs = "connection_dedupe_window_ns"
 )
 
 // loadTraceguardDNSCompat returns the embedded CollectionSpec for traceguardDNSCompat.
@@ -323,6 +377,10 @@ type traceguardDNSCompatProgramSpecs struct {
 	LsmFileOpen            *ebpf.ProgramSpec `ebpf:"lsm_file_open"`
 	TraceBind4             *ebpf.ProgramSpec `ebpf:"trace_bind4"`
 	TraceBind6             *ebpf.ProgramSpec `ebpf:"trace_bind6"`
+	TraceBpf               *ebpf.ProgramSpec `ebpf:"trace_bpf"`
+	TraceCapset            *ebpf.ProgramSpec `ebpf:"trace_capset"`
+	TraceChmod             *ebpf.ProgramSpec `ebpf:"trace_chmod"`
+	TraceChown             *ebpf.ProgramSpec `ebpf:"trace_chown"`
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.ProgramSpec `ebpf:"trace_connect_unix"`
@@ -331,19 +389,52 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.ProgramSpec `ebpf:"trace_fchmod"`
+	TraceFchmodat          *ebpf.ProgramSpec `ebpf:"trace_fchmodat"`
+	TraceFchmodat2         *ebpf.ProgramSpec `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.ProgramSpec `ebpf:"trace_fchown"`
+	TraceFchownat          *ebpf.ProgramSpec `ebpf:"trace_fchownat"`
+	TraceFinitModule       *ebpf.ProgramSpec `ebpf:"trace_finit_module"`
+	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
+	TraceIoUringSetup      *ebpf.ProgramSpec `ebpf:"trace_io_uring_setup"`
+	TraceLchown            *ebpf.ProgramSpec `ebpf:"trace_lchown"`
+	TraceLink              *ebpf.ProgramSpec `ebpf:"trace_link"`
+	TraceLinkat            *ebpf.ProgramSpec `ebpf:"trace_linkat"`
+	TraceMemfdCreate       *ebpf.ProgramSpec `ebpf:"trace_memfd_create"`
+	TraceMount             *ebpf.ProgramSpec `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.ProgramSpec `ebpf:"trace_open"`
 	TraceOpenat            *ebpf.ProgramSpec `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.ProgramSpec `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.ProgramSpec `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
+	TraceProcessVmReadv    *ebpf.ProgramSpec `ebpf:"trace_process_vm_readv"`
+	TraceProcessVmWritev   *ebpf.ProgramSpec `ebpf:"trace_process_vm_writev"`
+	TracePtrace            *ebpf.ProgramSpec `ebpf:"trace_ptrace"`
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_recvmsg_unix"`
+	TraceRename            *ebpf.ProgramSpec `ebpf:"trace_rename"`
+	TraceRenameat          *ebpf.ProgramSpec `ebpf:"trace_renameat"`
+	TraceRenameat2         *ebpf.ProgramSpec `ebpf:"trace_renameat2"`
+	TraceRmdir             *ebpf.ProgramSpec `ebpf:"trace_rmdir"`
 	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_sendmsg_unix"`
+	TraceSetgid            *ebpf.ProgramSpec `ebpf:"trace_setgid"`
+	TraceSetns             *ebpf.ProgramSpec `ebpf:"trace_setns"`
+	TraceSetregid          *ebpf.ProgramSpec `ebpf:"trace_setregid"`
+	TraceSetresgid         *ebpf.ProgramSpec `ebpf:"trace_setresgid"`
+	TraceSetresuid         *ebpf.ProgramSpec `ebpf:"trace_setresuid"`
+	TraceSetreuid          *ebpf.ProgramSpec `ebpf:"trace_setreuid"`
 	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
+	TraceSetuid            *ebpf.ProgramSpec `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
+	TraceSymlink           *ebpf.ProgramSpec `ebpf:"trace_symlink"`
+	TraceSymlinkat         *ebpf.ProgramSpec `ebpf:"trace_symlinkat"`
+	TraceTruncate          *ebpf.ProgramSpec `ebpf:"trace_truncate"`
+	TraceUnlink            *ebpf.ProgramSpec `ebpf:"trace_unlink"`
+	TraceUnlinkat          *ebpf.ProgramSpec `ebpf:"trace_unlinkat"`
+	TraceUnshare           *ebpf.ProgramSpec `ebpf:"trace_unshare"`
 }
 
 // traceguardDNSCompatMapSpecs contains maps before they are loaded into the kernel.
@@ -375,6 +466,7 @@ type traceguardDNSCompatMapSpecs struct {
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
 	ExecAllowPaths          *ebpf.MapSpec `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.MapSpec `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.MapSpec `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.MapSpec `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.MapSpec `ebpf:"file_block_paths"`
@@ -382,6 +474,9 @@ type traceguardDNSCompatMapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.MapSpec `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.MapSpec `ebpf:"response_peers"`
+	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
@@ -395,6 +490,7 @@ type traceguardDNSCompatMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardDNSCompatVariableSpecs struct {
+	ConnectionDedupeWindowNs *ebpf.VariableSpec `ebpf:"connection_dedupe_window_ns"`
 }
 
 // traceguardDNSCompatObjects contains all objects after they have been loaded into the kernel.
@@ -442,6 +538,7 @@ type traceguardDNSCompatMaps struct {
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
 	ExecAllowPaths          *ebpf.Map `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.Map `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.Map `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.Map `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.Map `ebpf:"file_block_paths"`
@@ -449,6 +546,9 @@ type traceguardDNSCompatMaps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
+	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
@@ -485,6 +585,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 		m.Endpoint6Rules,
 		m.Events,
 		m.ExecAllowPaths,
+		m.ExecArgvScratch,
 		m.ExecBlockPaths,
 		m.FileAllowPaths,
 		m.FileBlockPaths,
@@ -492,6 +593,9 @@ func (m *traceguardDNSCompatMaps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.ResponsePeerDrops,
+		m.ResponsePeers,
+		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,
@@ -506,6 +610,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 //
 // It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardDNSCompatVariables struct {
+	ConnectionDedupeWindowNs *ebpf.Variable `ebpf:"connection_dedupe_window_ns"`
 }
 
 // traceguardDNSCompatPrograms contains all programs after they have been loaded into the kernel.
@@ -516,6 +621,10 @@ type traceguardDNSCompatPrograms struct {
 	LsmFileOpen            *ebpf.Program `ebpf:"lsm_file_open"`
 	TraceBind4             *ebpf.Program `ebpf:"trace_bind4"`
 	TraceBind6             *ebpf.Program `ebpf:"trace_bind6"`
+	TraceBpf               *ebpf.Program `ebpf:"trace_bpf"`
+	TraceCapset            *ebpf.Program `ebpf:"trace_capset"`
+	TraceChmod             *ebpf.Program `ebpf:"trace_chmod"`
+	TraceChown             *ebpf.Program `ebpf:"trace_chown"`
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.Program `ebpf:"trace_connect_unix"`
@@ -524,19 +633,52 @@ type traceguardDNSCompatPrograms struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.Program `ebpf:"trace_fchmod"`
+	TraceFchmodat          *ebpf.Program `ebpf:"trace_fchmodat"`
+	TraceFchmodat2         *ebpf.Program `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.Program `ebpf:"trace_fchown"`
+	TraceFchownat          *ebpf.Program `ebpf:"trace_fchownat"`
+	TraceFinitModule       *ebpf.Program `ebpf:"trace_finit_module"`
+	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
+	TraceIoUringSetup      *ebpf.Program `ebpf:"trace_io_uring_setup"`
+	TraceLchown            *ebpf.Program `ebpf:"trace_lchown"`
+	TraceLink              *ebpf.Program `ebpf:"trace_link"`
+	TraceLinkat            *ebpf.Program `ebpf:"trace_linkat"`
+	TraceMemfdCreate       *ebpf.Program `ebpf:"trace_memfd_create"`
+	TraceMount             *ebpf.Program `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
 	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
+	TraceProcessVmReadv    *ebpf.Program `ebpf:"trace_process_vm_readv"`
+	TraceProcessVmWritev   *ebpf.Program `ebpf:"trace_process_vm_writev"`
+	TracePtrace            *ebpf.Program `ebpf:"trace_ptrace"`
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.Program `ebpf:"trace_recvmsg_unix"`
+	TraceRename            *ebpf.Program `ebpf:"trace_rename"`
+	TraceRenameat          *ebpf.Program `ebpf:"trace_renameat"`
+	TraceRenameat2         *ebpf.Program `ebpf:"trace_renameat2"`
+	TraceRmdir             *ebpf.Program `ebpf:"trace_rmdir"`
 	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.Program `ebpf:"trace_sendmsg_unix"`
+	TraceSetgid            *ebpf.Program `ebpf:"trace_setgid"`
+	TraceSetns             *ebpf.Program `ebpf:"trace_setns"`
+	TraceSetregid          *ebpf.Program `ebpf:"trace_setregid"`
+	TraceSetresgid         *ebpf.Program `ebpf:"trace_setresgid"`
+	TraceSetresuid         *ebpf.Program `ebpf:"trace_setresuid"`
+	TraceSetreuid          *ebpf.Program `ebpf:"trace_setreuid"`
 	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
+	TraceSetuid            *ebpf.Program `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
+	TraceSymlink           *ebpf.Program `ebpf:"trace_symlink"`
+	TraceSymlinkat         *ebpf.Program `ebpf:"trace_symlinkat"`
+	TraceTruncate          *ebpf.Program `ebpf:"trace_truncate"`
+	TraceUnlink            *ebpf.Program `ebpf:"trace_unlink"`
+	TraceUnlinkat          *ebpf.Program `ebpf:"trace_unlinkat"`
+	TraceUnshare           *ebpf.Program `ebpf:"trace_unshare"`
 }
 
 func (p *traceguardDNSCompatPrograms) Close() error {
@@ -545,6 +687,10 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.LsmFileOpen,
 		p.TraceBind4,
 		p.TraceBind6,
+		p.TraceBpf,
+		p.TraceCapset,
+		p.TraceChmod,
+		p.TraceChown,
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectUnix,
@@ -553,19 +699,52 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceFchmod,
+		p.TraceFchmodat,
+		p.TraceFchmodat2,
+		p.TraceFchown,
+		p.TraceFchownat,
+		p.TraceFinitModule,
+		p.TraceInitModule,
+		p.TraceIoUringSetup,
+		p.TraceLchown,
+		p.TraceLink,
+		p.TraceLinkat,
+		p.TraceMemfdCreate,
+		p.TraceMount,
 		p.TraceOpen,
 		p.TraceOpenat,
 		p.TraceOpenat2,
 		p.TracePostBind4,
 		p.TracePostBind6,
+		p.TraceProcessVmReadv,
+		p.TraceProcessVmWritev,
+		p.TracePtrace,
 		p.TraceRecvmsg4,
 		p.TraceRecvmsg6,
 		p.TraceRecvmsgUnix,
+		p.TraceRename,
+		p.TraceRenameat,
+		p.TraceRenameat2,
+		p.TraceRmdir,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
 		p.TraceSendmsgUnix,
+		p.TraceSetgid,
+		p.TraceSetns,
+		p.TraceSetregid,
+		p.TraceSetresgid,
+		p.TraceSetresuid,
+		p.TraceSetreuid,
 		p.TraceSetsockopt,
+		p.TraceSetuid,
 		p.TraceSockops,
+		p.TraceSymlink,
+		p.TraceSymlinkat,
+		p.TraceTruncate,
+		p.TraceUnlink,
+		p.TraceUnlinkat,
+		p.TraceUnshare,
 	)
 }
 

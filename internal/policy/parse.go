@@ -85,6 +85,9 @@ func Merge(base, overlay Document) (Bundle, error) {
 	for _, rule := range overlay.DetectionRules {
 		overlayIDs[rule.ID] = struct{}{}
 	}
+	for _, sequence := range overlay.DetectionSequences {
+		overlayIDs[sequence.ID] = struct{}{}
+	}
 	mergeDetectionByID := func(baseRules, overlayRules []DetectionRule) []DetectionRule {
 		merged := make(map[string]DetectionRule, len(baseRules)+len(overlayRules))
 		for _, rule := range baseRules {
@@ -150,9 +153,14 @@ func Merge(base, overlay Document) (Bundle, error) {
 			Default: mergeDefault(base.Sockopt.Default, overlay.Sockopt.Default),
 			Rules:   mergeRulesByID(base.Sockopt.Rules, overlay.Sockopt.Rules, overlayIDs, disabled, func(rule SockoptRule) string { return rule.ID }),
 		},
-		DetectionRules:  mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
-		BuiltinProfiles: profiles,
-		DisabledRuleIDs: disabledIDs,
+		DetectionRules:      mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
+		DetectionExceptions: mergeExceptionsByID(base.DetectionExceptions, overlay.DetectionExceptions),
+		DetectionSequences:  mergeSequencesByID(base.DetectionSequences, overlay.DetectionSequences, overlayIDs, disabled),
+		FileIntegrity:       mergeFileIntegrity(base.FileIntegrity, overlay.FileIntegrity),
+		ThreatIntel:         mergeThreatIntel(base.ThreatIntel, overlay.ThreatIntel),
+		Responses:           mergeResponsesByID(base.Responses, overlay.Responses),
+		BuiltinProfiles:     profiles,
+		DisabledRuleIDs:     disabledIDs,
 	}
 	if err := bundle.Validate(); err != nil {
 		return Bundle{}, fmt.Errorf("validate merged policy: %w", err)
@@ -168,6 +176,11 @@ func (b Bundle) Validate() error {
 		DisabledRuleIDs: slices.Clone(b.DisabledRuleIDs), Egress: b.Egress,
 		Exec: b.Exec, File: b.File, Bind: b.Bind, Unix: b.Unix,
 		Sockopt: b.Sockopt, DetectionRules: slices.Clone(b.DetectionRules),
+		DetectionExceptions: slices.Clone(b.DetectionExceptions),
+		DetectionSequences:  slices.Clone(b.DetectionSequences),
+		FileIntegrity:       b.FileIntegrity,
+		ThreatIntel:         b.ThreatIntel,
+		Responses:           slices.Clone(b.Responses),
 	}
 	if err := document.Validate(); err != nil {
 		return err
@@ -264,4 +277,46 @@ func parseDNS(policy DNSPolicy) (blocklist.Rules, error) {
 		return blocklist.Rules{}, fmt.Errorf("parse dns policy: %w", err)
 	}
 	return rules, nil
+}
+
+// mergeExceptionsByID lets an overlay exception replace a base exception with
+// the same ID.
+func mergeExceptionsByID(base, overlay []DetectionException) []DetectionException {
+	merged := make(map[string]DetectionException, len(base)+len(overlay))
+	for _, exception := range base {
+		merged[exception.ID] = exception
+	}
+	for _, exception := range overlay {
+		merged[exception.ID] = exception
+	}
+	out := make([]DetectionException, 0, len(merged))
+	for _, exception := range merged {
+		out = append(out, exception)
+	}
+	slices.SortFunc(out, func(left, right DetectionException) int { return strings.Compare(left.ID, right.ID) })
+	return out
+}
+
+// mergeFileIntegrity watches the union of both sources' paths and exclusions;
+// settings the overlay sets replace the base's.
+func mergeFileIntegrity(base, overlay FileIntegrityPolicy) FileIntegrityPolicy {
+	union := func(left, right []string) []string {
+		merged := append(slices.Clone(left), right...)
+		slices.Sort(merged)
+		return slices.Compact(merged)
+	}
+	merged := FileIntegrityPolicy{
+		Paths: union(base.Paths, overlay.Paths), Exclude: union(base.Exclude, overlay.Exclude),
+		Hash: base.Hash, MaxHashBytes: base.MaxHashBytes, RescanInterval: base.RescanInterval,
+	}
+	if overlay.Hash != nil {
+		merged.Hash = overlay.Hash
+	}
+	if overlay.MaxHashBytes != nil {
+		merged.MaxHashBytes = overlay.MaxHashBytes
+	}
+	if overlay.RescanInterval != nil {
+		merged.RescanInterval = overlay.RescanInterval
+	}
+	return merged
 }

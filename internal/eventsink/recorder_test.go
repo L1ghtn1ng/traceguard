@@ -1048,7 +1048,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 		t.Fatalf("symlink spool directory: %v", err)
 	}
 
-	_, err := newSpoolStore(link)
+	_, err := newSpoolStore(link, SchemaTraceGuard)
 	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
 		t.Fatalf("newSpoolStore error = %v, want symlink traversal rejection", err)
 	}
@@ -1057,7 +1057,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 func TestSpoolStoreRejectsOversizedPayload(t *testing.T) {
 	t.Parallel()
 
-	store, err := newSpoolStore(t.TempDir())
+	store, err := newSpoolStore(t.TempDir(), SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestSpoolStoreRejectsByteCapacityExceeded(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	store, err := newSpoolStore(dir)
+	store, err := newSpoolStore(dir, SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
@@ -1564,6 +1564,30 @@ func TestFileAuditFingerprintUsesFixedDigestAndRequestedPath(t *testing.T) {
 	}
 }
 
+func TestFileAuditFingerprintSeparatesFileChangeRequests(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]any{"event": "file_change", "requested_path": "/etc/hosts", "program": "sh"}
+	seen := map[recordFingerprint]string{}
+	for name, extra := range map[string]map[string]any{
+		"unlink":       {"operation": "unlink"},
+		"chmod 0644":   {"operation": "chmod", "requested_mode": "0644"},
+		"chmod 4755":   {"operation": "chmod", "requested_mode": "4755"},
+		"rename":       {"operation": "rename", "new_path": "/etc/hosts.bak"},
+		"rename other": {"operation": "rename", "new_path": "/tmp/x"},
+		"chown":        {"operation": "chown", "requested_uid": uint32(0)},
+		"truncate":     {"operation": "truncate", "truncate_length": uint64(0)},
+	} {
+		fields := maps.Clone(base)
+		maps.Copy(fields, extra)
+		fingerprint := fingerprintFileAuditRecord("file_change", fields)
+		if other, ok := seen[fingerprint]; ok {
+			t.Errorf("%s and %s share a fingerprint, so one would be suppressed", name, other)
+		}
+		seen[fingerprint] = name
+	}
+}
+
 func TestExportBatchRejectsPayloadAboveByteLimit(t *testing.T) {
 	t.Parallel()
 
@@ -1587,7 +1611,7 @@ func TestUDPRecordIsAlwaysWithinPayloadBudget(t *testing.T) {
 			"cmdline": []string{strings.Repeat("\x00", maxRecordStringBytes)},
 		},
 	}
-	payload, err := marshalUDPRecord(entry, 2048)
+	payload, err := marshalUDPRecord(entry, 2048, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
@@ -1609,7 +1633,7 @@ func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
 		Message:   message,
 		Hostname:  "worker-1",
 		Fields:    map[string]any{"event": "exec"},
-	}, maxSyslogUDPPayloadBytes)
+	}, maxSyslogUDPPayloadBytes, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
@@ -1623,7 +1647,7 @@ func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
 		Message:   strings.Repeat("\x00", maxRecordMessageBytes),
 		Hostname:  "worker-1",
 		Fields:    map[string]any{"event": "exec"},
-	}, 2048)
+	}, 2048, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
@@ -1682,4 +1706,56 @@ func encodeServerCertPEM(t *testing.T, server *httptest.Server) []byte {
 		Type:  "CERTIFICATE",
 		Bytes: server.Certificate().Raw,
 	})
+}
+
+// Not parallel: it points the package's spool path at a temporary directory.
+func TestStrandedSpoolWarningReachesSyslog(t *testing.T) {
+	spoolDir := filepath.Join(t.TempDir(), "spool")
+	originalSpoolPath := exportSpoolPath
+	exportSpoolPath = spoolDir
+	t.Cleanup(func() { exportSpoolPath = originalSpoolPath })
+	stranded, err := newSpoolStore(spoolDir, SchemaOCSF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stranded.Write([]json.RawMessage{json.RawMessage(`{"class_uid":4003}`)}); err != nil {
+		t.Fatal(err)
+	}
+	closeTestResource(t, stranded)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	defer server.Close()
+	packetConn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = packetConn.Close() }()
+	received := make(chan string, 16)
+	go func() {
+		buffer := make([]byte, 64<<10)
+		for {
+			_ = packetConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			n, _, err := packetConn.ReadFrom(buffer)
+			if err != nil {
+				close(received)
+				return
+			}
+			received <- string(buffer[:n])
+		}
+	}()
+
+	recorder, err := newSyslogTestRecorder(t, Config{
+		ExportURL: server.URL, ExportSpool: true,
+		SyslogURL: "syslog+udp://" + packetConn.LocalAddr().String(), SyslogFacility: "local0", SyslogTag: "traceguard", SyslogTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestResource(t, recorder)
+	for message := range received {
+		if strings.Contains(message, "export spool holds batches in another event schema") {
+			return
+		}
+	}
+	t.Fatal("the stranded-batch warning never reached syslog")
 }

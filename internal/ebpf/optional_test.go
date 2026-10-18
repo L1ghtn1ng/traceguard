@@ -83,9 +83,9 @@ func TestOptionalMapReplacementsSharePolicyPublicationMaps(t *testing.T) {
 	dummy := &ebpf.Map{}
 	replacements := optionalMapReplacements(monitorObjects{
 		Settings: dummy, PolicySelector: dummy, PolicyReaders: dummy,
-		DaemonIdentity: dummy, RuleNames: dummy,
+		DaemonIdentity: dummy, RuleNames: dummy, Events: dummy, RingbufDrops: dummy,
 	}, nil)
-	for _, name := range []string{"settings", "policy_selector", "policy_readers", "daemon_identity", "rule_names"} {
+	for _, name := range []string{"settings", "policy_selector", "policy_readers", "daemon_identity", "rule_names", "events", "ringbuf_drops"} {
 		if replacements[name] != dummy {
 			t.Errorf("replacement %q = %p, want shared map %p", name, replacements[name], dummy)
 		}

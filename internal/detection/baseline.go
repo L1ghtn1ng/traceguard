@@ -32,6 +32,7 @@ func BaselineRules() []policy.DetectionRule {
 			Cooldown: policy.Duration{Duration: time.Hour},
 			Message:  "a process connected to a cloud instance metadata endpoint",
 			Tags:     []string{"baseline", "cloud", "credential-access"},
+			MITRE:    policy.MITRE{Tactics: []string{"TA0006"}, Techniques: []string{"T1552.005"}},
 			Threshold: policy.Threshold{
 				Count:   1,
 				GroupBy: []string{"cgroup", "executable"},
@@ -50,6 +51,7 @@ func BaselineRules() []policy.DetectionRule {
 			Cooldown: policy.Duration{Duration: 5 * time.Minute},
 			Message:  "a process opened a direct outbound email connection",
 			Tags:     []string{"baseline", "egress", "exfiltration"},
+			MITRE:    policy.MITRE{Tactics: []string{"TA0010", "TA0011"}, Techniques: []string{"T1048", "T1071.003"}},
 			Threshold: policy.Threshold{
 				Count: 1,
 			},
@@ -74,6 +76,7 @@ func BaselineRules() []policy.DetectionRule {
 			Cooldown: policy.Duration{Duration: 10 * time.Minute},
 			Message:  "a remote address opened repeated SSH connections",
 			Tags:     []string{"baseline", "ssh", "brute-force", "credential-access"},
+			MITRE:    policy.MITRE{Tactics: []string{"TA0006"}, Techniques: []string{"T1110"}},
 		},
 		{
 			ID:       "baseline.policy-denial-burst",
@@ -95,9 +98,20 @@ func BaselineRules() []policy.DetectionRule {
 	}
 }
 
-func effectiveRules(custom []policy.DetectionRule, disabled []string) []policy.DetectionRule {
-	rules := make(map[string]policy.DetectionRule, len(custom)+len(BaselineRules()))
-	for _, rule := range BaselineRules() {
+// builtinRules returns the rules of the named built-in profiles. The baseline
+// profile is always included.
+func builtinRules(profiles []string) []policy.DetectionRule {
+	rules := BaselineRules()
+	if slices.Contains(profiles, policy.ProfileRuntime) {
+		rules = append(rules, RuntimeRules()...)
+	}
+	return rules
+}
+
+func effectiveRules(profiles []string, custom []policy.DetectionRule, disabled []string) []policy.DetectionRule {
+	builtin := builtinRules(profiles)
+	rules := make(map[string]policy.DetectionRule, len(custom)+len(builtin))
+	for _, rule := range builtin {
 		rules[rule.ID] = rule
 	}
 	for _, rule := range custom {

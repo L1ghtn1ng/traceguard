@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
+	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
@@ -12,10 +17,12 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	"github.com/L1ghtn1ng/traceguard/internal/kubeinfo"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 const (
@@ -55,9 +62,11 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 
 	monitor, err := ebpf.NewMonitor(cfg.CgroupPath, ebpf.Options{
-		FileAudit:   cfg.FileAudit,
-		PinEBPF:     cfg.PinEBPF,
-		EnableStats: cfg.EBPFStats,
+		FileAudit:              cfg.FileAudit,
+		SecurityEvents:         cfg.SecurityEvents,
+		PinEBPF:                cfg.PinEBPF,
+		EnableStats:            cfg.EBPFStats,
+		ConnectionDedupeWindow: cfg.ConnectionDedupeWindow,
 	})
 	if err != nil {
 		return err
@@ -69,6 +78,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			runErr = errors.Join(runErr, monitor.RemoveFreshPins())
 		}
 	}()
+	// Responses are undone after the workers stop, so none can apply a new
+	// one, and before the monitor closes the peer block map.
+	responder := newResponder(cfg, monitor, recorder, metrics)
+	defer responder.RevertAll()
 	// Background workers apply policy to and read stats from the monitor.
 	// Deferred after monitor.Close so it runs first: cancel and join them
 	// before any map or program descriptor is closed.
@@ -88,6 +101,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		"kernel_btf":           kernelFeatures.BTFAvailable,
 		"kernel_bpf_lsm":       kernelFeatures.BPFLSMAvailable,
 		"lsm_program_type":     kernelFeatures.LSMProgramType,
+		"task_storage":         kernelFeatures.TaskStorage,
 		"lsm_exec_attached":    attachState.LSMExecAttached,
 		"lsm_file_attached":    attachState.LSMFileAttached,
 		"cgroup_bind4":         attachState.Bind4Attached,
@@ -105,8 +119,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		featureFields["enhanced_load_failure"] = kernelFeatures.EnhancedLoadFailure
 	}
 	recorder.Info("kernel features selected", featureFields)
-	for hook, hookErr := range monitor.OptionalFailures() {
-		recorder.Error("optional eBPF hook unavailable", hookErr, map[string]any{"hook": hook})
+	hookFailures := monitor.OptionalFailures()
+	unavailableHooks := slices.Sorted(maps.Keys(hookFailures))
+	for _, hook := range unavailableHooks {
+		recorder.Error("optional eBPF hook unavailable", hookFailures[hook], map[string]any{"hook": hook})
+	}
+	if cfg.StrictHooks && len(unavailableHooks) > 0 {
+		return fmt.Errorf("strict-hooks: optional eBPF hooks unavailable: %s", strings.Join(unavailableHooks, ", "))
 	}
 	if cfg.EBPFStats {
 		collectProgramStats(monitor, metrics, recorder)
@@ -125,9 +144,40 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		return fmt.Errorf("initialize detection engine: %w", err)
 	}
 	metrics.SetDetectionRules(detector.RuleCount())
-	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector)
+
+	// The programs are already attached and producing events. Drain the ring
+	// buffer before loading policy, which can wait on a remote fetch, so a slow
+	// startup does not fill the buffer and drop events.
+	ringBuffer := newRingBufferWatcher(monitor, metrics, recorder)
+	ringBuffer.collect()
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, func(time.Time) { ringBuffer.collect() }) })
+	alerts := alertSink{recorder: recorder, metrics: metrics, responder: responder}
+	workers.Go(func() { responder.Run(ctx) })
+	workers.Go(func() {
+		runEvery(ctx, ringBufferStatsPollInterval, func(now time.Time) {
+			responder.Expire(now)
+			publishResponseStats(responder, monitor, metrics)
+		})
+	})
+	integrity := fim.NewWatcher("/")
+	workers.Go(func() { integrity.Run(ctx, newIntegrityEmitter(alerts, detector)) })
+	integrityStats := &integrityStatsWatcher{watcher: integrity, metrics: metrics, recorder: recorder}
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, integrityStats.collect) })
+	intel := &atomic.Pointer[threatintel.Matcher]{}
+	detections := newDetectionGate(func(timestamp time.Time, name string, fields map[string]any) {
+		emitDetectionAlerts(detector, alerts, timestamp, name, fields)
+		emitThreatIntelAlerts(intel.Load(), alerts, timestamp, name, fields)
+	})
+	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detections, integrity)
+	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
+
+	feedLoader := threatintel.NewLoader()
+	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel, responder, feedLoader)
 
 	var yamlManager *policyconfig.Manager
+	// watchRemote refreshes the remote policy; it starts after detection
+	// is armed.
+	var watchRemote func()
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
 		yamlManager, err = policyconfig.NewManager(policyconfig.Config{
 			Path:              cfg.PolicyPath,
@@ -139,8 +189,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			CAPath:            cfg.PolicyCAPath,
 			ClientCertPath:    cfg.PolicyClientCert,
 			ClientKeyPath:     cfg.PolicyClientKey,
+			SigningKeyPath:    cfg.PolicySigningKey,
 			Validate: func(bundle policyconfig.Bundle) error {
-				return validateBundleForMode(cfg, bundle)
+				return validateBundleForMode(cfg, feedLoader, bundle)
 			},
 		})
 		if err != nil {
@@ -163,7 +214,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			return fmt.Errorf("apply YAML policy: %w", err)
 		}
 		if cfg.PolicyURL != "" {
-			workers.Go(func() {
+			watchRemote = func() {
 				yamlManager.Watch(ctx, func(bundle policyconfig.Bundle, metadata policyconfig.LoadMetadata, loadErr error) {
 					source := yamlPolicySource(metadata, cfg)
 					metrics.IncPolicySourceLoad(source, loadErr == nil)
@@ -184,12 +235,19 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 						recorder.ErrorDedup("apply refreshed YAML policy", err, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
 					}
 				})
-			})
+			}
 		}
+	}
+	emptyPolicy, err := policyconfig.EmptyBundle()
+	if err != nil {
+		return fmt.Errorf("build empty policy: %w", err)
 	}
 	if cfg.EmergencyAllow {
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish emergency allow policy: %w", err)
+		}
+		if err := policyController.RecordApplied(emptyPolicy); err != nil {
+			return err
 		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
 			metrics.SetHookHealthy(hook, true)
@@ -201,280 +259,331 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish empty policy: %w", err)
 		}
+		if err := policyController.RecordApplied(emptyPolicy); err != nil {
+			return err
+		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
 			metrics.SetHookHealthy(hook, true)
 		}
 	}
 
+	// Held events are evaluated before any worker can change the policy, so
+	// all of them are judged by the startup policy.
+	if skipped := detections.arm(); skipped > 0 {
+		recorder.Error("detection skipped events read while policy loaded", nil, map[string]any{"skipped_events": skipped})
+	}
+	if watchRemote != nil {
+		workers.Go(watchRemote)
+	}
 	if reloadCh != nil && yamlManager != nil {
 		workers.Go(func() { runPolicyReloads(ctx, reloadCh, yamlManager, policyController, cfg, recorder, metrics) })
 	}
 	if yamlManager != nil {
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
+		feeds := &feedWatcher{source: policyController.Source, refresh: policyController.RefreshFeeds, metrics: metrics, recorder: recorder}
+		feeds.collect(time.Now())
+		workers.Go(func() { runEvery(ctx, threatIntelPollInterval, feeds.collect) })
 	}
+
+	exceptions := newExceptionWatcher(detector, metrics, recorder)
+	exceptions.collect(time.Now())
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, exceptions.collect) })
 
 	started = true
 	monitor.KeepPins()
-
-	monitorDone := make(chan struct{})
-	go func() {
-		defer close(monitorDone)
-		reportErr(monitor.Run(ctx, func(event ebpf.Event) {
-			process, hit := lookupProcessForEvent(processCache, event)
-			metrics.IncProcessCache(hit)
-			metrics.IncProcessMetadata(process.Source)
-			metrics.IncProcessLSMMetadata(process.LSMSource)
-			eventName := eventKindName(event.Kind)
-			if event.Kind == ebpf.EventFileAccess {
-				eventName = fileAuditEventName(event.FileFlags)
-			}
-			metrics.IncEvent(eventName, event.Transport)
-			if event.Kind == ebpf.EventConnection {
-				metrics.IncConnection(event.Direction, event.SocketFamily, event.SocketProtocol, eventAttribution(event))
-			}
-
-			fields := map[string]any{
-				"event":     eventName,
-				"pid":       event.PID,
-				"transport": event.Transport,
-			}
-			appendEventIdentityFields(fields, event)
-			if executable := resolveExecutablePath(event); executable != "" {
-				fields["exe"] = executable
-				fields["exe_source"] = "kernel-resolved"
-			}
-			if process.Source == processinfo.SourceProc {
-				fields["current_program"] = process.Comm
-				fields["current_exe"] = process.Exe
-				fields["current_uid"] = process.UID
-				fields["current_ppid"] = process.PPID
-				fields["current_parent_program"] = process.ParentComm
-				fields["current_parent_exe"] = process.ParentExe
-				fields["current_process_attribution"] = processinfo.SourceProc
-			}
-			appendSocketFields(fields, event)
-			if process.CgroupPath != "" {
-				fields["current_cgroup"] = process.CgroupPath
-			}
-			if process.Service != "" {
-				fields["current_service"] = process.Service
-			}
-			if process.Container != "" {
-				fields["current_container_id"] = process.Container
-			}
-			if process.PodUID != "" {
-				fields["current_pod_uid"] = process.PodUID
-			}
-			if process.Runtime != "" {
-				fields["current_runtime"] = process.Runtime
-			}
-			if process.LSMLabel != "" {
-				fields["current_lsm_label"] = process.LSMLabel
-			}
-			if process.LSMSource != "" {
-				fields["current_lsm_source"] = process.LSMSource
-			}
-			if process.SELinux != "" {
-				fields["current_selinux_context"] = process.SELinux
-			}
-			if process.AppArmor != "" {
-				fields["current_apparmor_profile"] = process.AppArmor
-			}
-			if process.AppArmorMode != "" {
-				fields["current_apparmor_mode"] = process.AppArmorMode
-			}
-			appendKernelFeatureFields(fields, event)
-			if kubeEnricher != nil && process.PodUID != "" {
-				if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
-					metrics.IncKubernetesEnrichment(true)
-					if pod.Namespace != "" {
-						fields["current_k8s_namespace"] = pod.Namespace
-					}
-					if pod.PodName != "" {
-						fields["current_k8s_pod"] = pod.PodName
-					}
-					if pod.NodeName != "" {
-						fields["current_k8s_node"] = pod.NodeName
-					}
-					if pod.PodIP != "" {
-						fields["current_k8s_pod_ip"] = pod.PodIP
-					}
-					if pod.ServiceAccount != "" {
-						fields["current_k8s_service_account"] = pod.ServiceAccount
-					}
-					if pod.OwnerKind != "" {
-						fields["current_k8s_owner_kind"] = pod.OwnerKind
-					}
-					if pod.OwnerName != "" {
-						fields["current_k8s_owner"] = pod.OwnerName
-					}
-					if pod.App != "" {
-						fields["current_k8s_app"] = pod.App
-					}
-					if len(pod.Containers) > 0 {
-						fields["current_k8s_containers"] = pod.Containers
-					}
-					if len(pod.Images) > 0 {
-						fields["current_k8s_images"] = pod.Images
-					}
-				} else {
-					metrics.IncKubernetesEnrichment(false)
-				}
-			}
-			if len(process.Cmdline) > 0 {
-				fields["current_cmdline"] = config.RedactCommandLine(process.Cmdline)
-			}
-			if process.CmdlineTruncated {
-				fields["current_cmdline_truncated"] = true
-			}
-			if event.PathTruncated {
-				fields["path_truncated"] = true
-			}
-			switch event.Kind {
-			case ebpf.EventDNS:
-				fields["domain"] = event.Domain
-				decision := blocklist.Decision(event.PolicyDecision)
-				if decision != blocklist.DecisionNone {
-					fields["policy"] = string(decision)
-				}
-				metrics.IncPolicyDecision(string(decision))
-				if cfg.DryRun && decision == blocklist.DecisionBlock {
-					fields["mode"] = "dry-run"
-					recorder.InfoAt(event.Timestamp, "would-block", fields)
-				} else {
-					recorder.InfoAt(event.Timestamp, "dns", fields)
-				}
-			case ebpf.EventBlocked:
-				fields["domain"] = event.Domain
-				fields["policy"] = string(blocklist.DecisionBlock)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				recorder.InfoAt(event.Timestamp, "blocked", fields)
-			case ebpf.EventResolver:
-				fields["endpoint"] = event.Address
-				fields["address"] = event.Address
-				fields["port"] = event.Port
-				decision := blocklist.Decision(event.PolicyDecision)
-				if decision != blocklist.DecisionNone {
-					fields["policy"] = string(decision)
-				}
-				metrics.IncPolicyDecision(string(decision))
-				if cfg.DryRun && decision == blocklist.DecisionBlock {
-					fields["mode"] = "dry-run"
-					recorder.InfoAt(event.Timestamp, "would-block-"+event.Transport, fields)
-				} else {
-					recorder.InfoAt(event.Timestamp, event.Transport, fields)
-				}
-			case ebpf.EventResolverBlocked:
-				fields["endpoint"] = event.Address
-				fields["address"] = event.Address
-				fields["port"] = event.Port
-				fields["policy"] = string(blocklist.DecisionBlock)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				recorder.InfoAt(event.Timestamp, "blocked-"+event.Transport, fields)
-			case ebpf.EventExec:
-				fields["requested_path"] = event.Filename
-				fields["path_source"] = "syscall-requested"
-				recorder.InfoAt(event.Timestamp, "exec", fields)
-			case ebpf.EventConnection:
-				fields["direction"] = event.Direction
-				fields["peer_address"] = event.Address
-				fields["peer_port"] = event.Port
-				fields["local_address"] = event.LocalAddress
-				fields["local_port"] = event.LocalPort
-				recorder.InfoAt(event.Timestamp, "connection", fields)
-			case ebpf.EventFileAccess:
-				fields["requested_path"] = event.Filename
-				fields["path_source"] = "syscall-requested"
-				fields["file_flags"] = event.FileFlags
-				fields["file_mode"] = event.FileMode
-				fields["file_access"] = fileAccessName(event.FileFlags)
-				recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
-			case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
-				fields["direction"] = event.Direction
-				fields["peer_address"] = event.Address
-				fields["peer_port"] = event.Port
-				fields["local_address"] = event.LocalAddress
-				fields["local_port"] = event.LocalPort
-				fields["policy"] = string(blocklist.DecisionBlock)
-				mode := "block"
-				if event.Kind == ebpf.EventEgressWouldBlock {
-					mode = "dry-run"
-				}
-				fields["mode"] = mode
-				if event.RuleID != "" {
-					fields["policy_rule_id"] = event.RuleID
-				} else {
-					fields["policy_rule_id"] = "default"
-				}
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncEgressDecision("block", mode)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventExecBlocked, ebpf.EventExecWouldBlock:
-				mode := enforcementEventMode(event.Kind == ebpf.EventExecWouldBlock)
-				fields["path"] = event.Filename
-				appendEnforcementDecisionFields(fields, event, mode)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncLSMDecision("exec", "block", mode)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventFileBlocked, ebpf.EventFileWouldBlock:
-				mode := enforcementEventMode(event.Kind == ebpf.EventFileWouldBlock)
-				fields["path"] = event.Filename
-				fields["file_flags"] = event.FileFlags
-				fields["file_access"] = fileAccessName(event.FileFlags)
-				appendEnforcementDecisionFields(fields, event, mode)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncLSMDecision("file", "block", mode)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventBindBlocked, ebpf.EventBindWouldBlock:
-				mode := enforcementEventMode(event.Kind == ebpf.EventBindWouldBlock)
-				fields["local_address"] = event.LocalAddress
-				fields["local_port"] = event.LocalPort
-				appendEnforcementDecisionFields(fields, event, mode)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncBindDecision("block", mode)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventUnixBlocked, ebpf.EventUnixWouldBlock:
-				mode := enforcementEventMode(event.Kind == ebpf.EventUnixWouldBlock)
-				operation := unixOperationName(event.FileFlags)
-				fields["path"] = event.Filename
-				fields["unix_op"] = operation
-				appendEnforcementDecisionFields(fields, event, mode)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncUnixDecision("block", mode, operation)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventSockoptBlocked, ebpf.EventSockoptWouldBlock:
-				mode := enforcementEventMode(event.Kind == ebpf.EventSockoptWouldBlock)
-				fields["sockopt_level"] = event.FileFlags
-				fields["sockopt_optname"] = event.FileMode
-				appendEnforcementDecisionFields(fields, event, mode)
-				metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
-				metrics.IncSockoptDecision("block", mode)
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			case ebpf.EventSockOps:
-				fields["direction"] = event.Direction
-				fields["peer_address"] = event.Address
-				fields["peer_port"] = event.Port
-				fields["local_address"] = event.LocalAddress
-				fields["local_port"] = event.LocalPort
-				fields["sockops_op"] = event.FileFlags
-				if event.FileMode != 0 {
-					fields["tcp_state"] = event.FileMode
-				}
-				recorder.InfoAt(event.Timestamp, eventName, fields)
-			default:
-				fields["kind"] = event.Kind
-				recorder.InfoAt(event.Timestamp, "event", fields)
-			}
-			emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
-		}, metrics))
-	}()
+	if cfg.HeartbeatInterval > 0 {
+		status := heartbeatStatus{
+			started: time.Now(), mode: policyMode(cfg), policyDigest: policyController.Digest,
+			unavailableHooks: unavailableHooks, ringBuffer: ringBuffer, detector: detector, healthy: metrics.Healthy,
+		}
+		workers.Go(func() { runHeartbeat(ctx, cfg.HeartbeatInterval, recorder, status) })
+	}
 
 	select {
 	case err := <-errCh:
 		runErr = err
 	case <-ctx.Done():
 	}
-	cancel()
-	<-monitorDone
 	return runErr
+}
+
+// newEventHandler enriches, records, and evaluates detections for each
+// kernel event read from the ring buffer.
+func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detections *detectionGate, integrity *fim.Watcher) func(ebpf.Event) {
+	selfPID := uint32(os.Getpid()) //nolint:gosec // PIDs fit in 32 bits
+	return func(event ebpf.Event) {
+		// File integrity hashing opens every watched file; auditing the
+		// daemon's own file activity would only report that work.
+		if (event.Kind == ebpf.EventFileAccess || event.Kind == ebpf.EventFileChange) && event.PID == selfPID {
+			return
+		}
+		// File change hooks stay attached for file integrity monitoring;
+		// without file auditing, their events serve only that.
+		if event.Kind == ebpf.EventFileChange && !cfg.FileAudit && !integrity.Enabled() {
+			return
+		}
+		process, hit := lookupProcessForEvent(processCache, event)
+		metrics.IncProcessCache(hit)
+		metrics.IncProcessMetadata(process.Source)
+		metrics.IncProcessLSMMetadata(process.LSMSource)
+		eventName := eventKindName(event.Kind)
+		if event.Kind == ebpf.EventFileAccess {
+			eventName = fileAuditEventName(event.FileFlags)
+		}
+		metrics.IncEvent(eventName, event.Transport)
+		if event.Kind == ebpf.EventConnection {
+			metrics.IncConnection(event.Direction, event.SocketFamily, event.SocketProtocol, eventAttribution(event))
+		}
+
+		fields := map[string]any{
+			"event":     eventName,
+			"pid":       event.PID,
+			"transport": event.Transport,
+		}
+		appendEventIdentityFields(fields, event)
+		if executable := resolveExecutablePath(event); executable != "" {
+			fields["exe"] = executable
+			fields["exe_source"] = "kernel-resolved"
+		}
+		if process.Source == processinfo.SourceProc {
+			fields["current_program"] = process.Comm
+			fields["current_exe"] = process.Exe
+			fields["current_uid"] = process.UID
+			fields["current_ppid"] = process.PPID
+			fields["current_parent_program"] = process.ParentComm
+			fields["current_parent_exe"] = process.ParentExe
+			fields["current_process_attribution"] = processinfo.SourceProc
+		}
+		appendSocketFields(fields, event)
+		if process.CgroupPath != "" {
+			fields["current_cgroup"] = process.CgroupPath
+		}
+		if process.Service != "" {
+			fields["current_service"] = process.Service
+		}
+		if process.Container != "" {
+			fields["current_container_id"] = process.Container
+		}
+		if process.PodUID != "" {
+			fields["current_pod_uid"] = process.PodUID
+		}
+		if process.Runtime != "" {
+			fields["current_runtime"] = process.Runtime
+		}
+		if process.LSMLabel != "" {
+			fields["current_lsm_label"] = process.LSMLabel
+		}
+		if process.LSMSource != "" {
+			fields["current_lsm_source"] = process.LSMSource
+		}
+		if process.SELinux != "" {
+			fields["current_selinux_context"] = process.SELinux
+		}
+		if process.AppArmor != "" {
+			fields["current_apparmor_profile"] = process.AppArmor
+		}
+		if process.AppArmorMode != "" {
+			fields["current_apparmor_mode"] = process.AppArmorMode
+		}
+		appendKernelFeatureFields(fields, event)
+		if kubeEnricher != nil && process.PodUID != "" {
+			if pod, ok := kubeEnricher.Lookup(process.PodUID); ok {
+				metrics.IncKubernetesEnrichment(true)
+				if pod.Namespace != "" {
+					fields["current_k8s_namespace"] = pod.Namespace
+				}
+				if pod.PodName != "" {
+					fields["current_k8s_pod"] = pod.PodName
+				}
+				if pod.NodeName != "" {
+					fields["current_k8s_node"] = pod.NodeName
+				}
+				if pod.PodIP != "" {
+					fields["current_k8s_pod_ip"] = pod.PodIP
+				}
+				if pod.ServiceAccount != "" {
+					fields["current_k8s_service_account"] = pod.ServiceAccount
+				}
+				if pod.OwnerKind != "" {
+					fields["current_k8s_owner_kind"] = pod.OwnerKind
+				}
+				if pod.OwnerName != "" {
+					fields["current_k8s_owner"] = pod.OwnerName
+				}
+				if pod.App != "" {
+					fields["current_k8s_app"] = pod.App
+				}
+				if len(pod.Containers) > 0 {
+					fields["current_k8s_containers"] = pod.Containers
+				}
+				if len(pod.Images) > 0 {
+					fields["current_k8s_images"] = pod.Images
+				}
+			} else {
+				metrics.IncKubernetesEnrichment(false)
+			}
+		}
+		if len(process.Cmdline) > 0 {
+			fields["current_cmdline"] = config.RedactCommandLine(process.Cmdline)
+		}
+		if process.CmdlineTruncated {
+			fields["current_cmdline_truncated"] = true
+		}
+		if event.PathTruncated {
+			fields["path_truncated"] = true
+		}
+		switch event.Kind {
+		case ebpf.EventDNS:
+			fields["domain"] = event.Domain
+			decision := blocklist.Decision(event.PolicyDecision)
+			if decision != blocklist.DecisionNone {
+				fields["policy"] = string(decision)
+			}
+			metrics.IncPolicyDecision(string(decision))
+			if cfg.DryRun && decision == blocklist.DecisionBlock {
+				fields["mode"] = "dry-run"
+				recorder.InfoAt(event.Timestamp, "would-block", fields)
+			} else {
+				recorder.InfoAt(event.Timestamp, "dns", fields)
+			}
+		case ebpf.EventBlocked:
+			fields["domain"] = event.Domain
+			fields["policy"] = string(blocklist.DecisionBlock)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			recorder.InfoAt(event.Timestamp, "blocked", fields)
+		case ebpf.EventResolver:
+			fields["endpoint"] = event.Address
+			fields["address"] = event.Address
+			fields["port"] = event.Port
+			decision := blocklist.Decision(event.PolicyDecision)
+			if decision != blocklist.DecisionNone {
+				fields["policy"] = string(decision)
+			}
+			metrics.IncPolicyDecision(string(decision))
+			if cfg.DryRun && decision == blocklist.DecisionBlock {
+				fields["mode"] = "dry-run"
+				recorder.InfoAt(event.Timestamp, "would-block-"+event.Transport, fields)
+			} else {
+				recorder.InfoAt(event.Timestamp, event.Transport, fields)
+			}
+		case ebpf.EventResolverBlocked:
+			fields["endpoint"] = event.Address
+			fields["address"] = event.Address
+			fields["port"] = event.Port
+			fields["policy"] = string(blocklist.DecisionBlock)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			recorder.InfoAt(event.Timestamp, "blocked-"+event.Transport, fields)
+		case ebpf.EventExec:
+			appendExecFields(fields, event)
+			recorder.InfoAt(event.Timestamp, "exec", fields)
+		case ebpf.EventConnection:
+			fields["direction"] = event.Direction
+			fields["peer_address"] = event.Address
+			fields["peer_port"] = event.Port
+			fields["local_address"] = event.LocalAddress
+			fields["local_port"] = event.LocalPort
+			recorder.InfoAt(event.Timestamp, "connection", fields)
+		case ebpf.EventFileAccess:
+			fields["requested_path"] = event.Filename
+			fields["path_source"] = "syscall-requested"
+			fields["file_flags"] = event.FileFlags
+			fields["file_mode"] = event.FileMode
+			fields["file_access"] = fileAccessName(event.FileFlags)
+			if dirfd := uint32(event.Value); dirfd != atFDCWD { //nolint:gosec // the low word is the dirfd
+				fields["requested_dirfd"] = int32(dirfd) //nolint:gosec // dirfd is a signed descriptor carried unsigned
+			}
+			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
+			notifyIntegrity(integrity, "/proc", event, fields)
+		case ebpf.EventFileChange:
+			appendFileChangeFields(fields, event)
+			notifyIntegrity(integrity, "/proc", event, fields)
+			if !cfg.FileAudit {
+				return
+			}
+			// Like opens, repeats of the same request are suppressed, so
+			// temporary-file churn does not record every syscall.
+			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
+		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
+			fields["direction"] = event.Direction
+			fields["peer_address"] = event.Address
+			fields["peer_port"] = event.Port
+			fields["local_address"] = event.LocalAddress
+			fields["local_port"] = event.LocalPort
+			fields["policy"] = string(blocklist.DecisionBlock)
+			mode := "block"
+			if event.Kind == ebpf.EventEgressWouldBlock {
+				mode = "dry-run"
+			}
+			fields["mode"] = mode
+			if event.RuleID != "" {
+				fields["policy_rule_id"] = event.RuleID
+			} else {
+				fields["policy_rule_id"] = "default"
+			}
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncEgressDecision("block", mode)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventExecBlocked, ebpf.EventExecWouldBlock:
+			mode := enforcementEventMode(event.Kind == ebpf.EventExecWouldBlock)
+			fields["path"] = event.Filename
+			appendEnforcementDecisionFields(fields, event, mode)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncLSMDecision("exec", "block", mode)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventFileBlocked, ebpf.EventFileWouldBlock:
+			mode := enforcementEventMode(event.Kind == ebpf.EventFileWouldBlock)
+			fields["path"] = event.Filename
+			fields["file_flags"] = event.FileFlags
+			fields["file_access"] = fileAccessName(event.FileFlags)
+			appendEnforcementDecisionFields(fields, event, mode)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncLSMDecision("file", "block", mode)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventBindBlocked, ebpf.EventBindWouldBlock:
+			mode := enforcementEventMode(event.Kind == ebpf.EventBindWouldBlock)
+			fields["local_address"] = event.LocalAddress
+			fields["local_port"] = event.LocalPort
+			appendEnforcementDecisionFields(fields, event, mode)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncBindDecision("block", mode)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventUnixBlocked, ebpf.EventUnixWouldBlock:
+			mode := enforcementEventMode(event.Kind == ebpf.EventUnixWouldBlock)
+			operation := unixOperationName(event.FileFlags)
+			fields["path"] = event.Filename
+			fields["unix_op"] = operation
+			appendEnforcementDecisionFields(fields, event, mode)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncUnixDecision("block", mode, operation)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventSockoptBlocked, ebpf.EventSockoptWouldBlock:
+			mode := enforcementEventMode(event.Kind == ebpf.EventSockoptWouldBlock)
+			fields["sockopt_level"] = event.FileFlags
+			fields["sockopt_optname"] = event.FileMode
+			appendEnforcementDecisionFields(fields, event, mode)
+			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
+			metrics.IncSockoptDecision("block", mode)
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		case ebpf.EventSockOps:
+			fields["direction"] = event.Direction
+			fields["peer_address"] = event.Address
+			fields["peer_port"] = event.Port
+			fields["local_address"] = event.LocalAddress
+			fields["local_port"] = event.LocalPort
+			fields["sockops_op"] = event.FileFlags
+			if event.FileMode != 0 {
+				fields["tcp_state"] = event.FileMode
+			}
+			recorder.InfoAt(event.Timestamp, eventName, fields)
+		default:
+			if ebpf.IsSecurityEvent(event.Kind) {
+				appendSecurityEventFields(fields, event, "/proc")
+				recorder.InfoAt(event.Timestamp, eventName, fields)
+				break
+			}
+			fields["kind"] = event.Kind
+			recorder.InfoAt(event.Timestamp, "event", fields)
+		}
+		detections.submit(event.Timestamp, eventName, fields)
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -21,6 +22,10 @@ import (
 )
 
 const bindPolarityHelperCgroupEnv = "TRACEGUARD_BIND_POLARITY_HELPER_CGROUP"
+
+// integrationConstants uses a non-zero dedupe window so the verifier checks
+// the deduplication path, as production does by default.
+var integrationConstants = loadConstants{connectionDedupeWindow: time.Minute}
 
 func TestTraceDNSProgramLoadsForIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -55,7 +60,7 @@ func TestLinux71MonitorObjectsLoadForIntegration(t *testing.T) {
 		t.Fatalf("RemoveMemlock returned error: %v", err)
 	}
 
-	objects, features, err := loadLinux71MonitorObjects(newCollectionOptions(), KernelFeatures{
+	objects, features, err := loadLinux71MonitorObjects(newCollectionOptions(), integrationConstants, KernelFeatures{
 		KernelAtLeast612: true,
 		KernelAtLeast71:  true,
 	})
@@ -76,12 +81,12 @@ func TestOptionalLoadAttemptsLeaveCorePolicyMapsWritable(t *testing.T) {
 		t.Fatalf("RemoveMemlock returned error: %v", err)
 	}
 	options := newCollectionOptions()
-	objects, features, err := loadMonitorObjects(options)
+	objects, features, err := loadMonitorObjects(options, integrationConstants)
 	if err != nil {
 		fatalVerifierError(t, "loadMonitorObjects", err)
 	}
 	defer objects.Close()
-	optional := loadOptionalPrograms(features.SelectedObject, options, objects, nil)
+	optional := loadOptionalPrograms(features.SelectedObject, options, integrationConstants, objects, nil)
 	defer optional.Close()
 
 	if err := objects.Settings.Put(uint32(0), runtimeSettings{}); err != nil {
@@ -104,12 +109,12 @@ func TestOptionalProgramsPassVerifierForIntegration(t *testing.T) {
 		t.Fatalf("RemoveMemlock returned error: %v", err)
 	}
 	options := newCollectionOptions()
-	objects, features, err := loadMonitorObjects(options)
+	objects, features, err := loadMonitorObjects(options, integrationConstants)
 	if err != nil {
 		fatalVerifierError(t, "loadMonitorObjects", err)
 	}
 	defer objects.Close()
-	optional := loadOptionalPrograms(features.SelectedObject, options, objects, nil)
+	optional := loadOptionalPrograms(features.SelectedObject, options, integrationConstants, objects, nil)
 	defer optional.Close()
 
 	// Optional hooks may be missing on older kernels, but a verifier rejection

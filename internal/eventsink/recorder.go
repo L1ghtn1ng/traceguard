@@ -50,6 +50,10 @@ type Config struct {
 	SyslogTag               string
 	SyslogTimeout           time.Duration
 	SyslogCAPath            string
+	// Schema selects the record format for HTTPS export and syslog:
+	// SchemaTraceGuard (the default) or SchemaOCSF. Local sinks always use
+	// the TraceGuard format.
+	Schema string
 }
 
 type Recorder struct {
@@ -136,6 +140,16 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 			return nil, err
 		}
 		recorder.syslog = syslog
+	}
+	// Batches spooled under another -event-schema are kept for when it
+	// returns, so say how many are waiting, once every sink can carry it.
+	if recorder.exporter != nil && recorder.exporter.spool != nil {
+		if count, err := recorder.exporter.spool.stranded(); err == nil && count > 0 {
+			recorder.Error("export spool holds batches in another event schema", nil, map[string]any{
+				"spool_batches": count, "event_schema": cfg.Schema,
+				"detail": "they are kept and sent when that -event-schema is configured again",
+			})
+		}
 	}
 	return recorder, nil
 }
@@ -406,6 +420,14 @@ func fingerprintFileAuditRecord(msg string, fields map[string]any) recordFingerp
 		"file_access",
 		"file_flags",
 		"file_mode",
+		"operation",
+		"new_path",
+		"requested_dirfd",
+		"requested_flags",
+		"requested_mode",
+		"requested_uid",
+		"requested_gid",
+		"truncate_length",
 		"program",
 		"exe",
 		"cmdline",

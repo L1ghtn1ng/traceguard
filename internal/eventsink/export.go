@@ -35,9 +35,14 @@ type exportSink struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	spool         *spoolStore
+	encode        recordEncoder
 }
 
 func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*exportSink, error) {
+	encode, err := newRecordEncoder(cfg.Schema)
+	if err != nil {
+		return nil, err
+	}
 	// Never include the raw URL or the *url.Error in returned errors: the
 	// query string may carry secrets such as access tokens.
 	parsed, err := neturl.Parse(strings.TrimSpace(cfg.ExportURL))
@@ -76,7 +81,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 
 	var spool *spoolStore
 	if cfg.ExportSpool {
-		spool, err = newSpoolStore(exportSpoolPath)
+		spool, err = newSpoolStore(exportSpoolPath, cfg.Schema)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -95,6 +100,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		metrics:       metrics,
 		cancel:        cancel,
 		spool:         spool,
+		encode:        encode,
 	}
 	sink.updateQueueDepth()
 	sink.updateSpoolFiles()
@@ -105,7 +111,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 }
 
 func (e *exportSink) Enqueue(entry record) {
-	payload, err := marshalSingleRecord(entry)
+	payload, err := e.encode(entry)
 	if err != nil {
 		e.metrics.IncEventExport("error")
 		return
@@ -330,12 +336,34 @@ func (e *exportSink) Close() error {
 	return nil
 }
 
+// spoolStore keeps undelivered batches as files. Each event schema has its
+// own file suffix, because batches are stored encoded: a batch is replayed
+// only while the schema it was written in is configured, so a collector never
+// receives a mix of formats.
 type spoolStore struct {
-	dir *os.File
-	mu  sync.Mutex
+	dir    *os.File
+	suffix string
+	mu     sync.Mutex
 }
 
-func newSpoolStore(path string) (*spoolStore, error) {
+// spoolSuffix names the spool files of an event schema. TraceGuard batches
+// keep the original .json suffix.
+func spoolSuffix(schema string) string {
+	if schema == SchemaOCSF {
+		return ".ocsf.json"
+	}
+	return ".json"
+}
+
+// isSpoolFile reports whether name is a spool file of the schema with suffix.
+func isSpoolFile(name, suffix string) bool {
+	if !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	return suffix != ".json" || !strings.HasSuffix(name, spoolSuffix(SchemaOCSF))
+}
+
+func newSpoolStore(path, schema string) (*spoolStore, error) {
 	cleaned := filepath.Clean(path)
 	if err := os.MkdirAll(cleaned, 0o750); err != nil {
 		return nil, fmt.Errorf("create export spool directory: %w", err)
@@ -353,7 +381,7 @@ func newSpoolStore(path string) (*spoolStore, error) {
 		_ = dir.Close()
 		return nil, fmt.Errorf("export spool directory %q is not a directory", cleaned)
 	}
-	return &spoolStore{dir: dir}, nil
+	return &spoolStore{dir: dir, suffix: spoolSuffix(schema)}, nil
 }
 
 func (s *spoolStore) Write(batch []json.RawMessage) error {
@@ -388,7 +416,7 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 		return err
 	}
 	tempName := name + ".tmp"
-	finalName := name + ".json"
+	finalName := name + s.suffix
 	temp, err := safefile.OpenBeneath(int(s.dir.Fd()), tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -474,13 +502,37 @@ func (s *spoolStore) files() (files []string, listErr error) {
 	}
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !filepath.IsLocal(entry.Name()) {
+		if entry.IsDir() || !isSpoolFile(entry.Name(), s.suffix) || !filepath.IsLocal(entry.Name()) {
 			continue
 		}
 		out = append(out, entry.Name())
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// stranded counts spool files written under another event schema. They
+// are kept, and sent once that schema is configured again.
+func (s *spoolStore) stranded() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := safefile.OpenBeneath(int(s.dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasSuffix(name, ".json") && !isSpoolFile(name, s.suffix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *spoolStore) Close() error {

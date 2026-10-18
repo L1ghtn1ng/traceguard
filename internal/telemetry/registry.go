@@ -58,6 +58,14 @@ func (r *Registry) SetPolicyMode(mode string) {
 	r.replaceGauges("traceguard_policy_mode", gauges)
 }
 
+// SetPolicyDigest publishes the SHA-256 of the active effective policy as an
+// info metric, replacing the previous digest.
+func (r *Registry) SetPolicyDigest(digest string) {
+	r.replaceGauges("traceguard_policy_info", map[string]int64{
+		metricKey1("traceguard_policy_info", "sha256", digest): 1,
+	})
+}
+
 func (r *Registry) SetPolicyRuleCounts(counts map[string]int) {
 	gauges := make(map[string]int64, len(counts))
 	for key, value := range counts {
@@ -155,6 +163,67 @@ func (r *Registry) SetDetectionStateGroups(count int) {
 	r.setGauge("traceguard_detection_state_groups", int64(count))
 }
 
+// SetDetectionExceptions publishes how many detection exceptions are active
+// and expired, and each installed exception's cumulative suppression count.
+func (r *Registry) SetDetectionExceptions(active, expired int, suppressed map[string]uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges[metricKey1("traceguard_detection_exceptions", "state", "active")] = int64(active)
+	r.gauges[metricKey1("traceguard_detection_exceptions", "state", "expired")] = int64(expired)
+	const name = "traceguard_detection_suppressed_total"
+	for key := range r.counters {
+		if strings.HasPrefix(key, name+"{") {
+			delete(r.counters, key)
+		}
+	}
+	for id, count := range suppressed {
+		r.counters[metricKey1(name, "exception", id)] = boundedMetricUint64(count)
+	}
+}
+
+// IncFileIntegrityChange counts one reported file integrity change by kind.
+func (r *Registry) IncFileIntegrityChange(kind string) {
+	r.incCounter(metricKey1("traceguard_file_integrity_changes_total", "change", kind))
+}
+
+// SetFileIntegrityStats publishes the baseline size, whether it was cut at
+// its file limit, and how many change checks were dropped for a rescan.
+func (r *Registry) SetFileIntegrityStats(files int, truncated bool, dropped uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_file_integrity_files"] = int64(files)
+	r.gauges["traceguard_file_integrity_truncated"] = 0
+	if truncated {
+		r.gauges["traceguard_file_integrity_truncated"] = 1
+	}
+	r.counters["traceguard_file_integrity_dropped_checks_total"] = boundedMetricUint64(dropped)
+}
+
+// SetThreatIntelIndicators publishes each loaded feed's indicator count,
+// replacing feeds that were removed.
+func (r *Registry) SetThreatIntelIndicators(counts map[string]int) {
+	gauges := make(map[string]int64, len(counts))
+	for feed, count := range counts {
+		gauges[metricKey1("traceguard_threat_intel_indicators", "feed", feed)] = int64(count)
+	}
+	r.replaceGauges("traceguard_threat_intel_indicators", gauges)
+}
+
+// IncResponseAction counts one response step, such as "response applied".
+func (r *Registry) IncResponseAction(action, step string) {
+	r.incCounter(metricKey2("traceguard_response_actions_total", "action", action, "step", step))
+}
+
+// SetResponseStats publishes active responses and packets dropped by peer
+// blocks in each direction.
+func (r *Registry) SetResponseStats(active int, egressDrops, ingressDrops uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_response_active"] = int64(active)
+	r.counters[metricKey1("traceguard_response_peer_drops_total", "direction", "egress")] = boundedMetricUint64(egressDrops)
+	r.counters[metricKey1("traceguard_response_peer_drops_total", "direction", "ingress")] = boundedMetricUint64(ingressDrops)
+}
+
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
 	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
 }
@@ -242,6 +311,18 @@ func (r *Registry) SetKernelFeatures(features map[string]bool) {
 		gauges[metricKey1("traceguard_kernel_feature_enabled", "feature", feature)] = value
 	}
 	r.replaceGauges("traceguard_kernel_feature_enabled", gauges)
+}
+
+// SetRingBufferStats publishes ring buffer occupancy and the kernel's
+// cumulative per-kind counts of events dropped because the buffer was full.
+func (r *Registry) SetRingBufferStats(sizeBytes, unreadBytes int, drops map[string]uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_ringbuf_size_bytes"] = int64(sizeBytes)
+	r.gauges["traceguard_ringbuf_unread_bytes"] = int64(unreadBytes)
+	for kind, dropped := range drops {
+		r.counters[metricKey1("traceguard_ringbuf_dropped_total", "kind", kind)] = boundedMetricUint64(dropped)
+	}
 }
 
 func (r *Registry) IncEBPFReadError() {

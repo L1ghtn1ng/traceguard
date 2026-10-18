@@ -339,3 +339,48 @@ detections:
   # local overlay temporarily turns off a remote custom detection by ID.
   - id: experimental-disabled-rule
     enabled: false
+
+# Exceptions suppress named rules for matching events without disabling them.
+# Record why each exists and let it expire so it is revisited.
+detection_exceptions:
+  - id: root-guest-agent-imds
+    rules:
+      - baseline.cloud-metadata-access
+    reason: the root-owned cloud guest agent polls instance metadata
+    expires: 2027-06-30T00:00:00Z
+    match:
+      uids:
+        - 0
+
+# File integrity monitoring baselines these files and reports how they change,
+# with the process that changed them when an event names it.
+file_integrity:
+  paths:
+    - /etc/cron.d/**
+    - /etc/ssh/sshd_config
+    - /etc/sudoers.d/**
+    - /root/.ssh/**
+  hash: true
+  max_hash_bytes: 16777216
+  rescan_interval: 1h
+
+# Sequences correlate ordered steps for one process or cgroup within a window.
+detection_sequences:
+  - id: web-shell-egress
+    severity: critical
+    key: cgroup
+    within: 5m
+    steps:
+      - events: [exec]
+        match:
+          command_globs:
+            - "sh -c *"
+            - "bash -c *"
+      - events: [connection]
+        match:
+          directions: [outbound]
+    cooldown: 30m
+    message: a shell started in a cgroup that then connected out
+    mitre:
+      tactics: [TA0002, TA0011]
+      techniques: [T1059.004]

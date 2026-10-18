@@ -18,6 +18,8 @@ const (
 	domainSize          = 256
 	maxDNSWireNameBytes = 255
 	filenameSize        = 248
+	mountSourceSize     = 192
+	execArgvTruncated   = uint32(1 << 31)
 	pathTruncatedFlag   = uint32(1 << 31)
 	timestampOffsetTTL  = time.Second
 )
@@ -57,6 +59,16 @@ const (
 	EventSockoptBlocked
 	EventSockoptWouldBlock
 	EventSockOps
+	EventMemfdCreate
+	EventPtrace
+	EventProcessVM
+	EventModuleLoad
+	EventBPFProgLoad
+	EventIOURingSetup
+	EventMount
+	EventNamespaceChange
+	EventPrivilegeChange
+	EventFileChange
 )
 
 type rawEvent struct {
@@ -119,6 +131,29 @@ type Event struct {
 	RuleID           string
 	ProcessStartTime uint64
 	PolicyDecision   string
+	// Operation is the security event's operation code, such as the ptrace
+	// request or the namespace or privilege syscall.
+	Operation   uint32
+	MountSource string
+	MountFSType string
+	// Args is the exec command line read at syscall entry, and
+	// ArgsTruncated reports that arguments or bytes beyond it were dropped.
+	Args          []string
+	ArgsTruncated bool
+	// NewPath is a rename's destination, and Value a file change's argument:
+	// the mode for chmod, uid | gid << 32 for chown, the length for truncate,
+	// or the destination dirfd for rename. For a file audit event, Value is
+	// the open's dirfd.
+	NewPath string
+	Value   uint64
+	// MountNamespace is the mount namespace inode number of a file audit or
+	// file change event's process, captured in the kernel; 0 when unknown.
+	MountNamespace uint32
+	// FileDevice and FileInode identify the file a descriptor-based change
+	// (fchmod, fchown) acted on, captured in the kernel; 0 when unknown.
+	// FileDevice is the kernel's encoding: major << 20 | minor.
+	FileDevice uint32
+	FileInode  uint64
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -151,7 +186,7 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		LocalAddress:     decodeAddress(raw.Family, raw.LocalAddr),
 		LocalPort:        raw.LocalPort,
 		FileFlags:        raw.FileFlags,
-		FileMode:         raw.FileMode &^ pathTruncatedFlag,
+		FileMode:         raw.FileMode,
 		PathTruncated:    isPathEnforcementEvent(raw.Kind) && raw.FileMode&pathTruncatedFlag != 0,
 		KernelUID:        raw.KernelUID,
 		CgroupID:         raw.CgroupID,
@@ -165,6 +200,48 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
 	}
+	// Only path enforcement events keep the truncation flag in file_mode;
+	// exec and file change events carry a signed dirfd there, whose high bit
+	// is set for AT_FDCWD.
+	if isPathEnforcementEvent(raw.Kind) {
+		event.FileMode &^= pathTruncatedFlag
+	}
+	if raw.Kind == EventExec {
+		event.Operation = raw.RuleID
+		event.Args = splitArgs(raw.Domain[:], int(raw.Port))
+		event.ArgsTruncated = raw.FileFlags&execArgvTruncated != 0
+		event.FileFlags &^= execArgvTruncated
+		event.Port = 0
+		return event, nil
+	}
+	if raw.Kind == EventFileAccess || raw.Kind == EventFileChange {
+		// These events carry the mount namespace in addr instead.
+		event.MountNamespace = byteOrder.Uint32(raw.Addr[:4])
+		event.Address = ""
+	}
+	if raw.Kind == EventFileAccess {
+		event.Value = raw.SocketCookie
+		event.SocketCookie = 0
+		return event, nil
+	}
+	if raw.Kind == EventFileChange {
+		event.FileDevice = byteOrder.Uint32(raw.LocalAddr[:4])
+		event.FileInode = byteOrder.Uint64(raw.LocalAddr[8:])
+		event.LocalAddress = ""
+		event.Operation = raw.RuleID
+		event.NewPath = zeroTerminated(raw.Domain[:])
+		event.Value = raw.SocketCookie
+		event.SocketCookie = 0
+		return event, nil
+	}
+	if IsSecurityEvent(raw.Kind) {
+		event.Operation = raw.RuleID
+		if raw.Kind == EventMount {
+			event.MountSource = zeroTerminated(raw.Domain[:mountSourceSize])
+			event.MountFSType = zeroTerminated(raw.Domain[mountSourceSize:])
+		}
+		return event, nil
+	}
 	if isDNSPolicyEvent(raw.Kind) {
 		event.Domain = decodeQName(raw.Domain[:])
 		event.PolicyDecision = policyDecisionName(raw.RuleID)
@@ -175,6 +252,28 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		}
 	}
 	return event, nil
+}
+
+// splitArgs returns the first count NUL-terminated arguments in buffer. A final
+// argument without a terminator was cut at the end of the buffer.
+func splitArgs(buffer []byte, count int) []string {
+	args := make([]string, 0, count)
+	for len(args) < count && len(buffer) > 0 {
+		end := bytes.IndexByte(buffer, 0)
+		if end < 0 {
+			args = append(args, string(buffer))
+			break
+		}
+		args = append(args, string(buffer[:end]))
+		buffer = buffer[end+1:]
+	}
+	return args
+}
+
+// IsSecurityEvent reports whether kind is one of the observe-only security
+// syscall events.
+func IsSecurityEvent(kind uint32) bool {
+	return kind >= EventMemfdCreate && kind <= EventPrivilegeChange
 }
 
 func isEnforcementPolicyEvent(kind uint32) bool {

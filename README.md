@@ -10,7 +10,9 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - detect outbound DNS-over-TLS resolver connections
 - detect configured DNS-over-HTTPS resolver connections
 - trace `execve` and `execveat` activity so newly spawned programs are visible
-- audit file access through open-style syscall tracepoints when enabled
+- observe memfd creation, ptrace and cross-process memory access, kernel module and BPF program loads, io_uring setup, mounts, namespace changes, and privilege changes
+- audit file access through open-style syscall tracepoints when enabled, and path-based unlink, rename, chmod, chown, and truncate requests
+- monitor file integrity for policy-selected paths: SHA-256 and attribute baselines, change attribution to the acting process, and periodic rescans
 - optionally block DNS lookups defined by local or remote YAML policy
 - enforce exact and suffix DNS policies, with allow rules taking precedence
 - enforce UID- and cgroup-aware outbound TCP/UDP CIDR and port policy
@@ -18,16 +20,25 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - mediate inet binds, AF_UNIX operations, and selected socket options
 - observe TCP established, listen, retransmit, and close sockops signals
 - load a strict YAML v1 policy from a local file, HTTPS endpoint, or both
-- emit bounded alert-only detections over fully enriched events, with a default baseline
+- emit bounded alert-only detections over fully enriched events, with a default baseline and an opt-in runtime threat profile, mapped to MITRE ATT&CK
 - expose health and Prometheus-style metrics over HTTP
 - optionally archive JSON events locally and export them to an HTTPS collector
 - support batched authenticated HTTPS export with durable retry spooling
 - export structured events to remote syslog over UDP, TCP, or TLS
 - support optional `Authorization` headers and mTLS for HTTPS event export
+- optionally send HTTPS export and syslog records as OCSF 1.3.0 events
 - optionally enrich pod-scoped events with Kubernetes namespace, pod, node, workload, service account, container, and image metadata
 - run a built-in environment doctor check before deployment
 - optionally pin eBPF maps, programs, and cgroup/tracepoint links across daemon restarts
 - optionally export per-program eBPF runtime statistics
+- count events lost to a full ring buffer per event kind and record each loss
+- report the effective policy's SHA-256 and a periodic heartbeat with self-health for fleet drift and stuck-agent detection
+- optionally require a detached Ed25519 signature on remote policy
+- suppress named detections with scoped, expiring exceptions that record a reason
+- replay detection rules over an archived event stream to measure noise before rollout
+- correlate ordered steps for one process or cgroup with detection sequences
+- match DNS and connection events against local threat intelligence feeds, optionally enforcing small feeds in the kernel
+- run reversible responses to alerts, temporarily blocking a peer address or freezing a cgroup, in dry-run by default
 
 Remote YAML policy is cached for validated startup fallback and refreshed every
 five minutes by default. After a remote policy has been activated, refresh
@@ -47,6 +58,7 @@ TraceGuard uses a set of eBPF programs:
 - an observe-only `sockops` program reports selected TCP lifecycle callbacks
 - `tracepoint/syscalls/sys_enter_execve*` emits process execution events
 - `tracepoint/syscalls/sys_enter_open*` and `sys_enter_creat` emit file access audit events when file auditing is enabled
+- observe-only syscall-entry tracepoints for `memfd_create`, `ptrace`, `process_vm_readv`/`writev`, `init_module`/`finit_module`, `bpf`, `io_uring_setup`, `mount`, `setns`, `unshare`, the `set*id` family, and `capset` emit security events when enabled
 
 The user-space service:
 
@@ -73,6 +85,8 @@ The user-space service:
 - avoids shelling out or executing fetched content
 
 ## Requirements
+
+See [kernel support](docs/kernel-support.md) for what each feature needs from the kernel.
 
 - Linux 6.12 or newer with cgroup v2 mounted at `/sys/fs/cgroup`
 - eBPF support for cgroup egress and tracepoints
@@ -128,6 +142,8 @@ Notes:
 - the detection engine is alert-only, caps state at 16,384 threshold groups and 65,536 retained timestamps, and enables three baseline rules by default
 - bpffs pinning is disabled by default and requires real `bpf_link` attachments; unpinned startup rejects an existing TraceGuard pin root until `traceguard -unpin` removes it, and host-wide LSM links remain lifecycle-bound
 - eBPF runtime statistics are disabled by default because kernel runtime accounting has a system-wide performance cost
+- events that cannot be queued because the 16 MiB event ring buffer is full are counted in the kernel per event kind and exported as `traceguard_ringbuf_dropped_total{kind}`, with `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` for occupancy; any new drops are also recorded as an `eBPF ring buffer full; events dropped` error event with `dropped_events` and `dropped_<kind>` counts, checked every five seconds. Enforcement decisions are unaffected by drops; only their telemetry is lost
+- the ring buffer reader starts before the initial YAML policy is loaded, so a slow remote policy fetch at startup does not leave attached programs filling an unread buffer
 
 ## Build
 
@@ -356,6 +372,47 @@ Remote syslog supports `syslog+udp://`, `syslog+tcp://`, and `syslog+tls://`
 URLs. It is best-effort and does not spool failed sends; use HTTPS export when
 durable retry is required.
 
+Send HTTPS export and syslog records as [OCSF](https://schema.ocsf.io/) 1.3.0
+events instead of the TraceGuard format:
+
+```bash
+sudo ./traceguard \
+  -event-export-url https://siem.example/ingest \
+  -event-schema ocsf
+```
+
+| TraceGuard events | OCSF class |
+| --- | --- |
+| `dns`, `blocked` | DNS Activity (4003) |
+| `connection`, `resolver*`, `egress_*`, `bind_*`, `unix_*`, `sockopt_*`, `tcp_sockops` | Network Activity (4001) |
+| `exec*`, `ptrace`, `process_vm`, `privilege_change`, `memfd_create`, `io_uring_setup`, `namespace_change` | Process Activity (1007) |
+| `module_load`, `bpf_prog_load` | Kernel Extension Activity (1002) |
+| `file_access`, `file_created`, `file_*block*`, `file_change`, `file_integrity`, `mount` | File System Activity (1001) |
+| `detection_alert` | Detection Finding (2004), with ATT&CK techniques and tactics in `attacks` |
+| Heartbeats and daemon status | Base Event (0) |
+
+Fields that map to an OCSF attribute move there: the acting process's
+event-time PID, program, and user to `actor` (from the socket cache's
+`cached_*` identity when that attributed the event, and for `file_integrity`
+the triggering `actor_*` process), endpoints to `src_endpoint` and
+`dst_endpoint`, paths and digests to `file` (a deletion's previous ones), and
+the alert's `alert_id` to `finding_info.uid`. `current_exe` is read from
+`/proc` later and may name another binary, so it stays unmapped. A required
+`actor` or `dst_endpoint` that the record cannot fill, such as a rescan's actor
+or a socket option's peer, is present but empty. Events use the `security_control`
+profile: `action_id` is `2` (Denied) for blocked events and `1` (Allowed)
+otherwise, with `disposition_id` `2` (Blocked) or, for dry-run, `15`
+(Detected). Activities without an OCSF name, such as `memfd_create`, carry the
+TraceGuard operation or event name as `activity_name`. A pathless module load
+and a BPF program load have a driver file named `unknown`. Every other field,
+including the TraceGuard `event` name, is kept under `unmapped`, so nothing is
+lost. An event over the 32 KiB record limit drops `unmapped`, except the TraceGuard `event` and `source_event` names, then shortens
+mapped strings and lists, and records `unmapped.telemetry_truncated=true`. The
+local event archive and logs keep the TraceGuard format, which `-replay` reads.
+
+Amazon Security Lake accepts OCSF 1.3 or earlier, but as Apache Parquet objects
+per event class; send OCSF JSON through a collector that writes Parquet.
+
 Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
@@ -397,6 +454,14 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_KUBERNETES_CA_PATH`
 - `TRACEGUARD_KUBERNETES_NODE_NAME`
 - `TRACEGUARD_KUBERNETES_POLL_INTERVAL`
+- `TRACEGUARD_STRICT_HOOKS`
+- `TRACEGUARD_HEARTBEAT_INTERVAL`
+- `TRACEGUARD_POLICY_SIGNING_KEY`
+- `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
+- `TRACEGUARD_SECURITY_EVENTS`
+- `TRACEGUARD_EVENT_SCHEMA`
+- `TRACEGUARD_RESPONSE_MODE`
+- `TRACEGUARD_RESPONSE_STATE_PATH`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -413,10 +478,16 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - local event archive disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` is set
 - durable HTTPS batch export disabled unless `TRACEGUARD_EVENT_EXPORT_URL` is set
 - HTTPS export sends batches of 50 events or every 5 seconds
-- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit
+- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit per event schema. Batches are stored as encoded, so each `-event-schema` has its own spool files and a batch is resent only while its schema is configured; at startup TraceGuard records `export spool holds batches in another event schema` with their count
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
+- security events enabled: `TRACEGUARD_SECURITY_EVENTS=true`
+- HTTPS export and syslog records in the TraceGuard format: `TRACEGUARD_EVENT_SCHEMA=traceguard`
+- connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
+- policy responses recorded but not applied: `TRACEGUARD_RESPONSE_MODE=dry-run`
+- strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
+- remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint
 
 Example output:
@@ -473,7 +544,7 @@ The generated packages install:
 - Detection matching and grouping never use `current_*` enrichment or syscall-requested path aliases; canonical path events report truncation explicitly and accept only bounded exact or `/**` detection patterns.
 - Process enrichment also extracts cgroup path, likely service unit, and container ID heuristics from `/proc/<pid>/cgroup`.
 - Process enrichment includes SELinux contexts and AppArmor profile/mode where the host exposes those labels through `/proc`.
-- File access auditing records open-style syscall path, flags, mode, and read/write intent. Opens with create intent are emitted as `file_created`; other opens are emitted as `file_access`. It is enabled by the packaged env file with `TRACEGUARD_FILE_AUDIT=true`; disable it when retained path data or event volume is not acceptable.
+- File access auditing records open-style syscall path, flags, mode, read/write intent, and, for `openat` and `openat2` relative to a directory descriptor, `requested_dirfd`. Opens with create intent are emitted as `file_created`; other opens are emitted as `file_access`. It is enabled by the packaged env file with `TRACEGUARD_FILE_AUDIT=true`; disable it when retained path data or event volume is not acceptable.
 - Repeated file access audit records are deduplicated for 5 minutes using stable file, process, container/pod, and SELinux/AppArmor label fields so short-lived PID churn does not spam logs with unchanged LSM-attributed entries.
 - Process enrichment now also extracts pod UID and runtime hints from common Kubernetes/container cgroup layouts when present.
 - Optional Kubernetes API enrichment can add namespace, pod name, pod IP, node name, service account, controller workload, app label, container names, and image names keyed by the observed pod UID.

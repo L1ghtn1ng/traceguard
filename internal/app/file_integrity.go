@@ -1,0 +1,289 @@
+package app
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/L1ghtn1ng/traceguard/internal/config"
+	"github.com/L1ghtn1ng/traceguard/internal/detection"
+	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
+	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/fim"
+	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"golang.org/x/sys/unix"
+)
+
+// File change operation codes mirror FILE_CHANGE_* in traceguard.c.
+var fileChangeOperations = map[uint32]string{0: "unlink", 1: "rename", 2: "chmod", 3: "chown", 4: "truncate", 5: "link", 6: "symlink"}
+
+const (
+	atFDCWD     = 0xffffff9c // AT_FDCWD as the unsigned dirfd field carries it
+	atRemoveDir = 0x200
+)
+
+// appendFileChangeFields adds a file change event's requested arguments.
+func appendFileChangeFields(fields map[string]any, event ebpf.Event) {
+	operation := operationName(fileChangeOperations, event.Operation)
+	if operation == "unlink" && event.FileFlags&atRemoveDir != 0 {
+		operation = "rmdir"
+	}
+	fields["operation"] = operation
+	fields["requested_path"] = event.Filename
+	fields["path_source"] = "syscall-requested"
+	if event.FileMode != atFDCWD {
+		fields["requested_dirfd"] = int32(event.FileMode) //nolint:gosec // dirfd is a signed descriptor carried in the unsigned field
+	}
+	if event.FileFlags != 0 {
+		fields["requested_flags"] = event.FileFlags
+	}
+	switch operation {
+	case "rename", "link", "symlink":
+		fields["new_path"] = event.NewPath
+	case "chmod":
+		fields["requested_mode"] = fmt.Sprintf("%04o", event.Value&0o7777)
+	case "chown":
+		if uid := uint32(event.Value); uid != unchangedID { //nolint:gosec // the low word is the uid
+			fields["requested_uid"] = uid
+		}
+		if gid := uint32(event.Value >> 32); gid != unchangedID {
+			fields["requested_gid"] = gid
+		}
+	case "truncate":
+		fields["truncate_length"] = event.Value
+	}
+}
+
+// resolveRequestedPath turns a syscall-requested path into an absolute one,
+// reading the process's working directory or dirfd from /proc for relative
+// paths. It is best effort: the process may have exited or changed
+// directory, and reading another user's /proc entries needs ptrace access.
+func resolveRequestedPath(procRoot string, pid, dirfd uint32, path string) (string, bool) {
+	if path == "" {
+		// fchmod, fchown, and AT_EMPTY_PATH requests name the descriptor
+		// itself, which resolves to the file it has open.
+		if dirfd == atFDCWD || pid == 0 {
+			return "", false
+		}
+		target, err := os.Readlink(fmt.Sprintf("%s/%d/fd/%d", procRoot, pid, dirfd))
+		// An unlinked file's link ends in " (deleted)" and may name another
+		// file now; the event's file identity finds its other names.
+		if err != nil || !filepath.IsAbs(target) || strings.HasSuffix(target, " (deleted)") {
+			return "", false
+		}
+		return filepath.Clean(target), true
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), true
+	}
+	if pid == 0 {
+		return "", false
+	}
+	base := fmt.Sprintf("%s/%d/cwd", procRoot, pid)
+	if dirfd != atFDCWD {
+		base = fmt.Sprintf("%s/%d/fd/%d", procRoot, pid, dirfd)
+	}
+	directory, err := os.Readlink(base)
+	if err != nil || !filepath.IsAbs(directory) {
+		return "", false
+	}
+	return filepath.Join(directory, path), true
+}
+
+// sharesMountNamespace reports whether the event's process was in the
+// daemon's mount namespace. It uses the namespace the kernel captured with the
+// event, so a process that has since exited is judged correctly, and falls
+// back to /proc when the kernel could not read it. When neither can be read it
+// assumes the process shared the namespace.
+func sharesMountNamespace(procRoot string, event ebpf.Event) bool {
+	daemon, err := os.Readlink(procRoot + "/self/ns/mnt")
+	if err != nil {
+		return true
+	}
+	if event.MountNamespace != 0 {
+		return daemon == fmt.Sprintf("mnt:[%d]", event.MountNamespace)
+	}
+	process, err := os.Readlink(fmt.Sprintf("%s/%d/ns/mnt", procRoot, event.PID))
+	return err != nil || process == daemon
+}
+
+// integrityActorFields are the triggering event's fields copied onto a file
+// integrity change, prefixed with actor_.
+var integrityActorFields = []string{
+	"event", "operation", "pid", "program", "kernel_uid", "cgroup_id", "process_start_ticks",
+	"current_exe", "current_cmdline", "current_cgroup", "current_container_id",
+}
+
+// notifyIntegrity queues integrity checks for the files an audit or change
+// event may have modified.
+func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fields map[string]any) {
+	// Most hosts watch nothing, so do no /proc lookups for them.
+	if !watcher.Enabled() {
+		return
+	}
+	// Each requested path is resolved against its own directory descriptor.
+	type request struct {
+		path  string
+		dirfd uint32
+	}
+	var requests []request
+	switch event.Kind {
+	case ebpf.EventFileAccess:
+		if fileAccessName(event.FileFlags) != "write" {
+			return
+		}
+		// Open audit events carry the mode in FileMode and the dirfd in
+		// Value.
+		requests = append(requests, request{event.Filename, uint32(event.Value)}) //nolint:gosec // the low word is the dirfd
+	case ebpf.EventFileChange:
+		// A link or symlink changes only the path it creates; a symlink's
+		// first path is just its target text. An empty path with a
+		// descriptor, as fchmod and fchown send, names the open file.
+		if operation := fileChangeOperations[event.Operation]; operation != "link" && operation != "symlink" {
+			requests = append(requests, request{event.Filename, event.FileMode})
+		}
+		if event.NewPath != "" {
+			// The created path is relative to the new dirfd.
+			requests = append(requests, request{event.NewPath, uint32(event.Value)}) //nolint:gosec // the low word is the dirfd
+		}
+	default:
+		return
+	}
+	var watched []string
+	for _, requested := range requests {
+		path, ok := resolveRequestedPath(procRoot, event.PID, requested.dirfd, requested.path)
+		if ok && watcher.Watched(path) && !slices.Contains(watched, path) {
+			watched = append(watched, path)
+		}
+	}
+	// A descriptor-based change carries the file's identity from the
+	// kernel, which finds every watched name for it even if the descriptor
+	// was closed, reused, or its name removed before this ran.
+	if event.Kind == ebpf.EventFileChange && event.FileInode != 0 {
+		device := unix.Mkdev(event.FileDevice>>20, event.FileDevice&0xfffff)
+		for _, path := range watcher.PathsForFile(device, event.FileInode) {
+			if !slices.Contains(watched, path) {
+				watched = append(watched, path)
+			}
+		}
+	}
+	// The paths name files in the process's own mount namespace, such as a
+	// container's /etc, not the host files that are watched.
+	if len(watched) == 0 || !sharesMountNamespace(procRoot, event) {
+		return
+	}
+	actor := fim.Actor{}
+	for _, name := range integrityActorFields {
+		if value, ok := fields[name]; ok {
+			actor["actor_"+name] = value
+		}
+	}
+	for _, path := range watched {
+		watcher.Notify(path, actor)
+	}
+}
+
+// integrityRecordFields renders a change as file_integrity record fields.
+func integrityRecordFields(change fim.Change, actor fim.Actor) map[string]any {
+	fields := map[string]any{
+		"event":            "file_integrity",
+		"path":             change.Path,
+		"change":           change.Kind,
+		"detection_source": "event",
+	}
+	if len(change.Changed) > 0 {
+		fields["changed"] = change.Changed
+	}
+	if actor == nil {
+		fields["detection_source"] = "rescan"
+	}
+	for key, value := range actor {
+		fields[key] = value
+	}
+	addIntegrityState(fields, "", change.Current)
+	addIntegrityState(fields, "previous_", change.Previous)
+	return fields
+}
+
+func addIntegrityState(fields map[string]any, prefix string, state *fim.State) {
+	if state == nil {
+		return
+	}
+	fields[prefix+"file_type"] = state.Type
+	fields[prefix+"mode"] = fmt.Sprintf("%04o", uint32(state.Mode.Perm())|specialModeBits(state))
+	fields[prefix+"owner_uid"] = state.UID
+	fields[prefix+"owner_gid"] = state.GID
+	fields[prefix+"size"] = state.Size
+	fields[prefix+"mtime"] = state.ModTime.Format(time.RFC3339Nano)
+	if state.SHA256 != "" {
+		fields[prefix+"sha256"] = state.SHA256
+	} else {
+		fields[prefix+"hash_skipped"] = state.HashSkipped
+	}
+	if state.LinkTarget != "" {
+		fields[prefix+"link_target"] = state.LinkTarget
+	}
+}
+
+// specialModeBits renders setuid, setgid, and sticky as their octal digits.
+func specialModeBits(state *fim.State) uint32 {
+	var bits uint32
+	if state.Mode&os.ModeSetuid != 0 {
+		bits |= 0o4000
+	}
+	if state.Mode&os.ModeSetgid != 0 {
+		bits |= 0o2000
+	}
+	if state.Mode&os.ModeSticky != 0 {
+		bits |= 0o1000
+	}
+	return bits
+}
+
+// newIntegrityEmitter records each change, counts it, and evaluates
+// detections against it.
+func newIntegrityEmitter(sink alertSink, detector *detection.Engine) func(fim.Change, fim.Actor) {
+	return func(change fim.Change, actor fim.Actor) {
+		fields := integrityRecordFields(change, actor)
+		now := time.Now().UTC()
+		sink.metrics.IncFileIntegrityChange(change.Kind)
+		sink.recorder.InfoAt(now, "file_integrity", fields)
+		emitDetectionAlerts(detector, sink, now, "file_integrity", fields)
+	}
+}
+
+// integrityStatsWatcher publishes watcher statistics and records a truncated
+// baseline once per truncation.
+type integrityStatsWatcher struct {
+	watcher   *fim.Watcher
+	metrics   *telemetry.Registry
+	recorder  *eventsink.Recorder
+	truncated bool
+}
+
+func (w *integrityStatsWatcher) collect(time.Time) {
+	stats := w.watcher.Stats()
+	w.metrics.SetFileIntegrityStats(stats.Files, stats.Truncated, stats.Dropped)
+	if stats.Truncated && !w.truncated {
+		w.recorder.Error("file integrity baseline truncated", nil, map[string]any{"max_files": fim.MaxFiles})
+	}
+	w.truncated = stats.Truncated
+}
+
+// warnIntegrityWithoutAudit records that, with file auditing off, writes
+// through open files reach file integrity only through rescans.
+func warnIntegrityWithoutAudit(cfg config.Config, integrity policyconfig.FileIntegrityPolicy, recorder *eventsink.Recorder) {
+	if cfg.FileAudit || !integrity.Enabled() {
+		return
+	}
+	fields := map[string]any{"rescan_interval": integrity.Rescan().String()}
+	if integrity.Rescan() == 0 {
+		recorder.Error("file integrity sees no file writes: file audit and rescans are both disabled", nil, fields)
+		return
+	}
+	recorder.Error("file integrity finds file writes only by rescan because file audit is disabled", nil, fields)
+}

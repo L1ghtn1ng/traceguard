@@ -14,24 +14,45 @@ import (
 )
 
 const (
-	Version                         = 1
-	MaxDocumentBytes          int64 = 4 << 20
-	MaxEgressRules                  = 1024
-	MaxEnforcementRules             = 1024
-	MaxDetectionRules               = 256
-	MaxDetectionGroups              = 16384
-	MaxThresholdWindow              = time.Hour
-	MaxThresholdCount               = 10000
-	MaxRuleListValues               = 256
-	MaxDetectionMessageBytes        = 4096
-	MaxDetectionPathStemBytes       = 247
-	MaxDetectionSamples             = 65536
-	MaxPolicySelectors              = 4096
-	MaxDNSRules                     = 4096
-	MaxResolverHostnames            = 256
+	Version                             = 1
+	MaxDocumentBytes              int64 = 4 << 20
+	MaxEgressRules                      = 1024
+	MaxEnforcementRules                 = 1024
+	MaxDetectionRules                   = 256
+	MaxDetectionExceptions              = 256
+	MaxExceptionReasonBytes             = 512
+	MaxFileIntegrityPaths               = 256
+	DefaultFileIntegrityHashBytes       = 16 << 20
+	MaxFileIntegrityHashBytes           = 1 << 30
+	DefaultFileIntegrityRescan          = time.Hour
+	MinFileIntegrityRescan              = time.Minute
+	MaxDetectionGroups                  = 16384
+	MaxThresholdWindow                  = time.Hour
+	MaxThresholdCount                   = 10000
+	MaxRuleListValues                   = 256
+	MaxDetectionMessageBytes            = 4096
+	MaxDetectionPathStemBytes           = 247
+	MaxDetectionSamples                 = 65536
+	MaxPolicySelectors                  = 4096
+	MaxDNSRules                         = 4096
+	MaxResolverHostnames                = 256
 )
 
-var ruleIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var (
+	ruleIDPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	mitreTacticPattern    = regexp.MustCompile(`^TA[0-9]{4}$`)
+	mitreTechniquePattern = regexp.MustCompile(`^T[0-9]{4}(\.[0-9]{3})?$`)
+)
+
+const (
+	// ProfileBaseline is always enabled.
+	ProfileBaseline = "baseline"
+	// ProfileRuntime adds runtime threat detections over security events.
+	ProfileRuntime = "runtime"
+)
+
+// BuiltinProfiles lists every built-in detection profile.
+var BuiltinProfiles = []string{ProfileBaseline, ProfileRuntime}
 
 type Duration struct {
 	time.Duration
@@ -46,18 +67,99 @@ func (d *Duration) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// Timestamp is an RFC 3339 instant; the zero value means unset.
+type Timestamp struct {
+	time.Time
+}
+
+func (t *Timestamp) UnmarshalText(text []byte) error {
+	value, err := time.Parse(time.RFC3339, string(text))
+	if err != nil {
+		return fmt.Errorf("timestamp must be RFC 3339, for example 2026-12-31T00:00:00Z: %w", err)
+	}
+	t.Time = value.UTC()
+	return nil
+}
+
 type Document struct {
-	Version         int             `yaml:"version"`
-	BuiltinProfiles []string        `yaml:"builtin_profiles,omitempty"`
-	DisabledRuleIDs []string        `yaml:"disabled_rule_ids,omitempty"`
-	DNS             DNSPolicy       `yaml:"dns,omitempty"`
-	Egress          EgressPolicy    `yaml:"egress,omitempty"`
-	Exec            PathPolicy      `yaml:"exec,omitempty"`
-	File            FilePolicy      `yaml:"file,omitempty"`
-	Bind            BindPolicy      `yaml:"bind,omitempty"`
-	Unix            UnixPolicy      `yaml:"unix,omitempty"`
-	Sockopt         SockoptPolicy   `yaml:"sockopt,omitempty"`
-	DetectionRules  []DetectionRule `yaml:"detections,omitempty"`
+	Version             int                  `yaml:"version"`
+	BuiltinProfiles     []string             `yaml:"builtin_profiles,omitempty"`
+	DisabledRuleIDs     []string             `yaml:"disabled_rule_ids,omitempty"`
+	DNS                 DNSPolicy            `yaml:"dns,omitempty"`
+	Egress              EgressPolicy         `yaml:"egress,omitempty"`
+	Exec                PathPolicy           `yaml:"exec,omitempty"`
+	File                FilePolicy           `yaml:"file,omitempty"`
+	Bind                BindPolicy           `yaml:"bind,omitempty"`
+	Unix                UnixPolicy           `yaml:"unix,omitempty"`
+	Sockopt             SockoptPolicy        `yaml:"sockopt,omitempty"`
+	DetectionRules      []DetectionRule      `yaml:"detections,omitempty"`
+	DetectionExceptions []DetectionException `yaml:"detection_exceptions,omitempty"`
+	DetectionSequences  []DetectionSequence  `yaml:"detection_sequences,omitempty"`
+	FileIntegrity       FileIntegrityPolicy  `yaml:"file_integrity,omitempty"`
+	ThreatIntel         ThreatIntelPolicy    `yaml:"threat_intel,omitempty"`
+	Responses           []Response           `yaml:"responses,omitempty"`
+}
+
+// FileIntegrityPolicy selects the files whose content and attributes are
+// baselined and compared after change events and on a periodic rescan.
+type FileIntegrityPolicy struct {
+	Paths   []string `yaml:"paths,omitempty"`
+	Exclude []string `yaml:"exclude,omitempty"`
+	// Hash enables SHA-256 content hashing; it defaults to true.
+	Hash *bool `yaml:"hash,omitempty"`
+	// MaxHashBytes caps the size of a hashed file; larger files are compared
+	// by metadata only. 0 selects the default, so an overlay can restore it.
+	MaxHashBytes *int64 `yaml:"max_hash_bytes,omitempty"`
+	// RescanInterval is the full rescan period; 0 disables periodic rescans.
+	RescanInterval *Duration `yaml:"rescan_interval,omitempty"`
+}
+
+// Enabled reports whether any path is watched.
+func (f FileIntegrityPolicy) Enabled() bool { return len(f.Paths) > 0 }
+
+// HashEnabled reports whether content hashing is on.
+func (f FileIntegrityPolicy) HashEnabled() bool { return f.Hash == nil || *f.Hash }
+
+// HashLimit returns the largest file size that is hashed.
+func (f FileIntegrityPolicy) HashLimit() int64 {
+	if f.MaxHashBytes == nil || *f.MaxHashBytes == 0 {
+		return DefaultFileIntegrityHashBytes
+	}
+	return *f.MaxHashBytes
+}
+
+// Rescan returns the periodic rescan interval, 0 when disabled.
+func (f FileIntegrityPolicy) Rescan() time.Duration {
+	if f.RescanInterval == nil {
+		return DefaultFileIntegrityRescan
+	}
+	return f.RescanInterval.Duration
+}
+
+func (f FileIntegrityPolicy) validate() error {
+	if count := len(f.Paths) + len(f.Exclude); count > MaxFileIntegrityPaths {
+		return fmt.Errorf("path and exclude count %d exceeds %d", count, MaxFileIntegrityPaths)
+	}
+	if len(f.Exclude) > 0 && len(f.Paths) == 0 {
+		return fmt.Errorf("exclude requires paths")
+	}
+	for _, list := range [][]string{f.Paths, f.Exclude} {
+		if err := validateUnique(list, "file integrity path"); err != nil {
+			return err
+		}
+		for _, pattern := range list {
+			if err := validateDetectionPathPattern(pattern); err != nil {
+				return err
+			}
+		}
+	}
+	if f.MaxHashBytes != nil && (*f.MaxHashBytes < 0 || *f.MaxHashBytes > MaxFileIntegrityHashBytes) {
+		return fmt.Errorf("max_hash_bytes must be between 0 and %d", MaxFileIntegrityHashBytes)
+	}
+	if f.RescanInterval != nil && f.RescanInterval.Duration != 0 && f.RescanInterval.Duration < MinFileIntegrityRescan {
+		return fmt.Errorf("rescan_interval must be 0 or at least %s", MinFileIntegrityRescan)
+	}
+	return nil
 }
 
 type DNSPolicy struct {
@@ -179,6 +281,15 @@ type DetectionRule struct {
 	Cooldown  Duration       `yaml:"cooldown,omitempty"`
 	Message   string         `yaml:"message"`
 	Tags      []string       `yaml:"tags,omitempty"`
+	MITRE     MITRE          `yaml:"mitre,omitempty"`
+	// Compliance holds free-form control references, such as pci-dss:10.2.7.
+	Compliance []string `yaml:"compliance,omitempty"`
+}
+
+// MITRE maps a detection to MITRE ATT&CK tactic and technique IDs.
+type MITRE struct {
+	Tactics    []string `yaml:"tactics,omitempty"`
+	Techniques []string `yaml:"techniques,omitempty"`
 }
 
 type DetectionMatch struct {
@@ -208,6 +319,27 @@ type DetectionMatch struct {
 	KubernetesApps      []string `yaml:"k8s_apps,omitempty"`
 	LSMSources          []string `yaml:"lsm_sources,omitempty"`
 	LSMLabels           []string `yaml:"lsm_labels,omitempty"`
+	Operations          []string `yaml:"operations,omitempty"`
+	ExecSources         []string `yaml:"exec_sources,omitempty"`
+	MountFSTypes        []string `yaml:"mount_fstypes,omitempty"`
+	Capabilities        []string `yaml:"capabilities,omitempty"`
+	Changes             []string `yaml:"changes,omitempty"`
+}
+
+// DetectionException suppresses alerts from the listed rules for events that
+// match, until it expires. Matching events also do not count toward the rules'
+// thresholds.
+type DetectionException struct {
+	ID      string         `yaml:"id"`
+	Rules   []string       `yaml:"rules"`
+	Reason  string         `yaml:"reason"`
+	Expires Timestamp      `yaml:"expires,omitempty"`
+	Match   DetectionMatch `yaml:"match"`
+}
+
+// Active reports whether the exception applies at the given time.
+func (e DetectionException) Active(at time.Time) bool {
+	return e.Expires.IsZero() || at.Before(e.Expires.Time)
 }
 
 type Threshold struct {
@@ -217,16 +349,21 @@ type Threshold struct {
 }
 
 type Bundle struct {
-	DNS             blocklist.Rules
-	Egress          EgressPolicy
-	Exec            PathPolicy
-	File            FilePolicy
-	Bind            BindPolicy
-	Unix            UnixPolicy
-	Sockopt         SockoptPolicy
-	DetectionRules  []DetectionRule
-	BuiltinProfiles []string
-	DisabledRuleIDs []string
+	DNS                 blocklist.Rules
+	Egress              EgressPolicy
+	Exec                PathPolicy
+	File                FilePolicy
+	Bind                BindPolicy
+	Unix                UnixPolicy
+	Sockopt             SockoptPolicy
+	DetectionRules      []DetectionRule
+	DetectionExceptions []DetectionException
+	DetectionSequences  []DetectionSequence
+	FileIntegrity       FileIntegrityPolicy
+	ThreatIntel         ThreatIntelPolicy
+	Responses           []Response
+	BuiltinProfiles     []string
+	DisabledRuleIDs     []string
 }
 
 func (d Document) Validate() error {
@@ -234,7 +371,7 @@ func (d Document) Validate() error {
 		return fmt.Errorf("unsupported policy version %d, want %d", d.Version, Version)
 	}
 	for _, profile := range d.BuiltinProfiles {
-		if profile != "baseline" {
+		if !slices.Contains(BuiltinProfiles, profile) {
 			return fmt.Errorf("unsupported builtin profile %q", profile)
 		}
 	}
@@ -254,6 +391,12 @@ func (d Document) Validate() error {
 	}
 	if len(d.DetectionRules) > MaxDetectionRules {
 		return fmt.Errorf("detection rule count %d exceeds %d", len(d.DetectionRules), MaxDetectionRules)
+	}
+	if len(d.DetectionSequences) > MaxDetectionSequences {
+		return fmt.Errorf("detection sequence count %d exceeds %d", len(d.DetectionSequences), MaxDetectionSequences)
+	}
+	if len(d.DetectionExceptions) > MaxDetectionExceptions {
+		return fmt.Errorf("detection exception count %d exceeds %d", len(d.DetectionExceptions), MaxDetectionExceptions)
 	}
 	if count := len(d.DNS.Block) + len(d.DNS.Allow); count > MaxDNSRules {
 		return fmt.Errorf("dns rule count %d exceeds %d", count, MaxDNSRules)
@@ -282,6 +425,11 @@ func (d Document) Validate() error {
 		}
 		if previous, exists := ids[id]; exists {
 			return fmt.Errorf("duplicate rule id %q in %s and %s", id, previous, area)
+		}
+		// Feed alerts carry threat_intel.<feed>, so a rule or sequence with
+		// such an ID could not be told apart from them, nor its responses.
+		if (area == "detections" || area == "detection_sequences") && strings.HasPrefix(id, ThreatIntelRulePrefix) {
+			return fmt.Errorf("%s rule %d: id %q uses the %q prefix reserved for threat intelligence feeds", area, index, id, ThreatIntelRulePrefix)
 		}
 		ids[id] = area
 		return nil
@@ -344,8 +492,73 @@ func (d Document) Validate() error {
 			return fmt.Errorf("detection rule %q: %w", rule.ID, err)
 		}
 	}
+	if err := d.FileIntegrity.validate(); err != nil {
+		return fmt.Errorf("file_integrity: %w", err)
+	}
+	if err := d.ThreatIntel.validate(); err != nil {
+		return fmt.Errorf("threat_intel: %w", err)
+	}
+	if err := validateResponses(d.Responses); err != nil {
+		return fmt.Errorf("responses: %w", err)
+	}
+	exceptionIDs := make(map[string]struct{}, len(d.DetectionExceptions))
+	for index, exception := range d.DetectionExceptions {
+		if err := validateRuleID(exception.ID); err != nil {
+			return fmt.Errorf("detection exception %d: %w", index, err)
+		}
+		if _, exists := exceptionIDs[exception.ID]; exists {
+			return fmt.Errorf("duplicate detection exception id %q", exception.ID)
+		}
+		exceptionIDs[exception.ID] = struct{}{}
+		if err := exception.validate(); err != nil {
+			return fmt.Errorf("detection exception %q: %w", exception.ID, err)
+		}
+	}
+	for index := range d.DetectionSequences {
+		sequence := &d.DetectionSequences[index]
+		if err := validateID(sequence.ID, "detection_sequences", index); err != nil {
+			return err
+		}
+		if err := sequence.validate(); err != nil {
+			return fmt.Errorf("detection sequence %q: %w", sequence.ID, err)
+		}
+	}
 	if _, err := parseDNS(d.DNS); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (e DetectionException) validate() error {
+	if len(e.Rules) == 0 {
+		return fmt.Errorf("rules must not be empty")
+	}
+	if len(e.Rules) > MaxRuleListValues {
+		return fmt.Errorf("rules count %d exceeds %d", len(e.Rules), MaxRuleListValues)
+	}
+	if err := validateIDs(e.Rules, "exception rule"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(e.Reason) == "" {
+		return fmt.Errorf("reason must not be empty")
+	}
+	if len(e.Reason) > MaxExceptionReasonBytes {
+		return fmt.Errorf("reason length %d exceeds %d bytes", len(e.Reason), MaxExceptionReasonBytes)
+	}
+	if e.Match.Empty() {
+		return fmt.Errorf("match must not be empty; disable the rule with disabled_rule_ids instead")
+	}
+	if err := e.Match.validate(); err != nil {
+		return fmt.Errorf("match: %w", err)
+	}
+	return nil
+}
+
+// ValidateExceptionFor checks that an exception's match only uses fields the
+// rule's events carry at event time.
+func ValidateExceptionFor(rule DetectionRule, exception DetectionException) error {
+	if err := validateDetectionEventFields(rule.Events, exception.Match, rule.Match, exception.Match); err != nil {
+		return fmt.Errorf("detection exception %q for rule %q: %w", exception.ID, rule.ID, err)
 	}
 	return nil
 }
@@ -401,32 +614,11 @@ func (r DetectionRule) validate() error {
 	if r.Enabled != nil && !*r.Enabled {
 		return nil
 	}
-	switch r.Severity {
-	case "debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency":
-	default:
-		return fmt.Errorf("unsupported severity %q", r.Severity)
+	if err := validateAlertMetadata(r.Severity, r.Message, r.Tags, r.MITRE, r.Compliance); err != nil {
+		return err
 	}
-	if len(r.Events) == 0 {
-		return fmt.Errorf("events must not be empty")
-	}
-	for _, event := range r.Events {
-		if !slices.Contains(supportedDetectionEvents, event) {
-			return fmt.Errorf("unsupported event %q", event)
-		}
-	}
-	if strings.TrimSpace(r.Message) == "" {
-		return fmt.Errorf("message must not be empty")
-	}
-	if len(r.Message) > MaxDetectionMessageBytes {
-		return fmt.Errorf("message length %d exceeds %d bytes", len(r.Message), MaxDetectionMessageBytes)
-	}
-	if len(r.Tags) > 16 {
-		return fmt.Errorf("tag count %d exceeds 16", len(r.Tags))
-	}
-	for _, tag := range r.Tags {
-		if strings.TrimSpace(tag) == "" || len(tag) > 64 {
-			return fmt.Errorf("invalid tag %q", tag)
-		}
+	if err := validateEventNames(r.Events); err != nil {
+		return err
 	}
 	if r.Cooldown.Duration < 0 {
 		return fmt.Errorf("cooldown must not be negative")
@@ -489,6 +681,67 @@ func (r DetectionRule) validate() error {
 	return nil
 }
 
+// validateAlertMetadata checks the fields every alert-producing rule shares.
+func validateAlertMetadata(severity, message string, tags []string, mitre MITRE, compliance []string) error {
+	switch severity {
+	case "debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency":
+	default:
+		return fmt.Errorf("unsupported severity %q", severity)
+	}
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("message must not be empty")
+	}
+	if len(message) > MaxDetectionMessageBytes {
+		return fmt.Errorf("message length %d exceeds %d bytes", len(message), MaxDetectionMessageBytes)
+	}
+	if len(tags) > 16 {
+		return fmt.Errorf("tag count %d exceeds 16", len(tags))
+	}
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) == "" || len(tag) > 64 {
+			return fmt.Errorf("invalid tag %q", tag)
+		}
+	}
+	for name, values := range map[string][]string{
+		"mitre tactic": mitre.Tactics, "mitre technique": mitre.Techniques, "compliance reference": compliance,
+	} {
+		if len(values) > 16 {
+			return fmt.Errorf("%s count %d exceeds 16", name, len(values))
+		}
+		if err := validateUnique(values, name); err != nil {
+			return err
+		}
+	}
+	for _, tactic := range mitre.Tactics {
+		if !mitreTacticPattern.MatchString(tactic) {
+			return fmt.Errorf("invalid mitre tactic %q; use an ID such as TA0005", tactic)
+		}
+	}
+	for _, technique := range mitre.Techniques {
+		if !mitreTechniquePattern.MatchString(technique) {
+			return fmt.Errorf("invalid mitre technique %q; use an ID such as T1055 or T1055.008", technique)
+		}
+	}
+	for _, reference := range compliance {
+		if strings.TrimSpace(reference) == "" || len(reference) > 64 {
+			return fmt.Errorf("invalid compliance reference %q", reference)
+		}
+	}
+	return nil
+}
+
+func validateEventNames(events []string) error {
+	if len(events) == 0 {
+		return fmt.Errorf("events must not be empty")
+	}
+	for _, event := range events {
+		if !slices.Contains(supportedDetectionEvents, event) {
+			return fmt.Errorf("unsupported event %q", event)
+		}
+	}
+	return nil
+}
+
 func (m DetectionMatch) validate() error {
 	for name, count := range map[string]int{
 		"actions":               len(m.Actions),
@@ -517,6 +770,11 @@ func (m DetectionMatch) validate() error {
 		"kubernetes apps":       len(m.KubernetesApps),
 		"lsm sources":           len(m.LSMSources),
 		"lsm labels":            len(m.LSMLabels),
+		"operations":            len(m.Operations),
+		"exec sources":          len(m.ExecSources),
+		"mount fstypes":         len(m.MountFSTypes),
+		"capabilities":          len(m.Capabilities),
+		"changes":               len(m.Changes),
 	} {
 		if count > MaxRuleListValues {
 			return fmt.Errorf("%s count %d exceeds %d", name, count, MaxRuleListValues)
@@ -561,8 +819,10 @@ func (m DetectionMatch) validate() error {
 			return fmt.Errorf("unsupported file access %q", access)
 		}
 	}
-	if len(m.CommandGlobs) > 0 {
-		return fmt.Errorf("command_globs are unavailable because command lines are not captured at event time")
+	for _, source := range m.ExecSources {
+		if source != "path" && source != "fd" {
+			return fmt.Errorf("unsupported exec source %q", source)
+		}
 	}
 	for _, field := range []struct {
 		name  string
@@ -585,6 +845,19 @@ func (m DetectionMatch) validate() error {
 		}
 	}
 	return nil
+}
+
+// Empty reports whether the match sets no conditions and so matches every event.
+func (m DetectionMatch) Empty() bool {
+	return len(m.Actions)+len(m.Directions)+len(m.Transports)+len(m.Protocols)+
+		len(m.UIDs)+len(m.Domains)+len(m.DomainSuffixes)+len(m.DestinationCIDRs)+
+		len(m.Ports)+len(m.LocalPorts)+len(m.ExecutableGlobs)+len(m.CommandGlobs)+
+		len(m.FilePathGlobs)+len(m.UnixPathGlobs)+
+		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
+		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
+		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
+		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations)+len(m.ExecSources)+
+		len(m.MountFSTypes)+len(m.Capabilities)+len(m.Changes) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {
@@ -621,8 +894,8 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 	}
 	if len(match.FilePathGlobs) > 0 {
 		for _, event := range events {
-			if event != "file_blocked" && event != "file_would_block" {
-				return fmt.Errorf("file_path_globs require only file_blocked or file_would_block events with kernel-resolved paths; %q is unsupported", event)
+			if event != "file_blocked" && event != "file_would_block" && event != "file_integrity" {
+				return fmt.Errorf("file_path_globs require only file_blocked, file_would_block, or file_integrity events with resolved paths; %q is unsupported", event)
 			}
 		}
 	}
@@ -637,6 +910,58 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 		for _, event := range events {
 			if !slices.Contains(localPortDetectionEvents, event) {
 				return fmt.Errorf("local_ports require events that carry a local port; %q is unsupported", event)
+			}
+		}
+	}
+	for _, selector := range []struct {
+		name, event, reason string
+		count               int
+	}{
+		{"command_globs", "exec", "whose command line is captured at syscall entry", len(match.CommandGlobs)},
+		{"exec_sources", "exec", "whose executable source is captured at syscall entry", len(match.ExecSources)},
+		{"mount_fstypes", "mount", "which carry the requested filesystem type", len(match.MountFSTypes)},
+		{"capabilities", "privilege_change", "whose capset requests carry capabilities", len(match.Capabilities)},
+		{"changes", "file_integrity", "which carry the change kind", len(match.Changes)},
+	} {
+		if selector.count == 0 {
+			continue
+		}
+		for _, event := range events {
+			if event != selector.event {
+				return fmt.Errorf("%s require %s events, %s; %q is unsupported", selector.name, selector.event, selector.reason, event)
+			}
+		}
+	}
+	for _, change := range match.Changes {
+		if !slices.Contains([]string{"created", "modified", "deleted", "attributes"}, change) {
+			return fmt.Errorf("unsupported change %q", change)
+		}
+	}
+	for _, capability := range match.Capabilities {
+		if !slices.Contains(CapabilityNames, capability) {
+			return fmt.Errorf("unsupported capability %q", capability)
+		}
+	}
+	if len(match.Operations) > 0 {
+		var known []string
+		for _, event := range events {
+			operations, ok := SecurityEventOperations[event]
+			if !ok {
+				return fmt.Errorf("operations require security events that carry an operation; %q is unsupported", event)
+			}
+			known = append(known, operations...)
+		}
+		for _, operation := range match.Operations {
+			if !slices.Contains(known, operation) {
+				return fmt.Errorf("operation %q is not carried by events %v", operation, events)
+			}
+		}
+		// Every listed event must be able to match, or part of the rule
+		// silently never fires.
+		for _, event := range events {
+			carried := SecurityEventOperations[event]
+			if !slices.ContainsFunc(match.Operations, func(operation string) bool { return slices.Contains(carried, operation) }) {
+				return fmt.Errorf("event %q carries none of operations %v", event, match.Operations)
 			}
 		}
 	}
@@ -696,6 +1021,29 @@ var supportedDetectionEvents = []string{
 	"exec_blocked", "exec_would_block", "file_blocked", "file_would_block",
 	"bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block",
 	"sockopt_blocked", "sockopt_would_block", "tcp_sockops",
+	"memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load",
+	"io_uring_setup", "mount", "namespace_change", "privilege_change",
+	"file_change", "file_integrity",
+}
+
+// CapabilityNames lists the capabilities a capset event can report: the low
+// 32 capability bits, in bit order.
+var CapabilityNames = []string{
+	"chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid",
+	"setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw", "ipc_lock", "ipc_owner",
+	"sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice",
+	"sys_resource", "sys_time", "sys_tty_config", "mknod", "lease", "audit_write", "audit_control", "setfcap",
+}
+
+// SecurityEventOperations lists the operation names each security event can
+// carry in its operation field.
+var SecurityEventOperations = map[string][]string{
+	"ptrace":           {"traceme", "poketext", "pokedata", "pokeuser", "attach", "seize"},
+	"process_vm":       {"read", "write"},
+	"module_load":      {"init_module", "finit_module"},
+	"namespace_change": {"setns", "unshare"},
+	"privilege_change": {"setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"},
+	"file_change":      {"unlink", "rmdir", "rename", "link", "symlink", "chmod", "chown", "truncate"},
 }
 
 var supportedGroupFields = []string{
@@ -707,7 +1055,7 @@ var processIdentityGroupFields = []string{
 }
 
 var eventsWithoutProcessIdentity = []string{
-	"dns", "blocked", "tcp_sockops",
+	"dns", "blocked", "tcp_sockops", "file_integrity",
 }
 
 var localPortDetectionEvents = []string{
@@ -717,5 +1065,5 @@ var localPortDetectionEvents = []string{
 
 var resolvedPathDetectionEvents = []string{
 	"exec_blocked", "exec_would_block", "file_blocked", "file_would_block",
-	"unix_blocked", "unix_would_block",
+	"unix_blocked", "unix_would_block", "file_integrity",
 }

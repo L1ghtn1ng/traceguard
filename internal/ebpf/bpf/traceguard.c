@@ -39,6 +39,73 @@
 #define EVENT_SOCKOPT_BLOCKED 18
 #define EVENT_SOCKOPT_WOULD_BLOCK 19
 #define EVENT_SOCKOPS 20
+#define EVENT_MEMFD_CREATE 21
+#define EVENT_PTRACE 22
+#define EVENT_PROCESS_VM 23
+#define EVENT_MODULE_LOAD 24
+#define EVENT_BPF_PROG_LOAD 25
+#define EVENT_IO_URING_SETUP 26
+#define EVENT_MOUNT 27
+#define EVENT_NAMESPACE_CHANGE 28
+#define EVENT_PRIVILEGE_CHANGE 29
+#define EVENT_FILE_CHANGE 30
+#define EVENT_KIND_MAX EVENT_FILE_CHANGE
+
+/* Security events reuse generic event fields: rule_id carries the
+ * operation, file_flags the flags argument, file_mode the target PID or
+ * requested ID, filename the primary string argument, and domain a
+ * secondary string argument. Values are the syscall's requested arguments
+ * at entry, not its outcome.
+ */
+#define PROCESS_VM_READ 0
+#define PROCESS_VM_WRITE 1
+#define MODULE_LOAD_INIT 0
+#define MODULE_LOAD_FINIT 1
+#define NAMESPACE_SETNS 0
+#define NAMESPACE_UNSHARE 1
+#define PRIVILEGE_SETUID 0
+#define PRIVILEGE_SETGID 1
+#define PRIVILEGE_SETREUID 2
+#define PRIVILEGE_SETREGID 3
+#define PRIVILEGE_SETRESUID 4
+#define PRIVILEGE_SETRESGID 5
+#define PRIVILEGE_CAPSET 6
+
+/* File change events carry the operation in rule_id, the path in filename,
+ * the dirfd in file_mode, AT_* flags in file_flags, and the operation's value
+ * in socket_cookie: the mode for chmod, uid | gid << 32 for chown, the length
+ * for truncate, and the new dirfd for rename, link, and symlink, whose new
+ * path is in domain. For symlink, filename is the link's target.
+ */
+#define FILE_CHANGE_UNLINK 0
+#define FILE_CHANGE_RENAME 1
+#define FILE_CHANGE_CHMOD 2
+#define FILE_CHANGE_CHOWN 3
+#define FILE_CHANGE_TRUNCATE 4
+#define FILE_CHANGE_LINK 5
+#define FILE_CHANGE_SYMLINK 6
+#define TRACEGUARD_AT_REMOVEDIR 0x200
+#define TRACEGUARD_AT_SYMLINK_NOFOLLOW 0x100
+#define MOUNT_SOURCE_LEN 192
+#define MOUNT_FSTYPE_OFFSET MOUNT_SOURCE_LEN
+#define TRACEGUARD_BPF_PROG_LOAD 5
+#define TRACEGUARD_PTRACE_TRACEME 0
+#define TRACEGUARD_PTRACE_POKETEXT 4
+#define TRACEGUARD_PTRACE_POKEDATA 5
+#define TRACEGUARD_PTRACE_POKEUSER 6
+#define TRACEGUARD_PTRACE_ATTACH 16
+#define TRACEGUARD_PTRACE_SEIZE 0x4206
+
+/* Exec events carry the command line in domain as NUL-terminated arguments,
+ * the captured argument count in port, the execveat dirfd in file_mode, and
+ * the execveat flags in file_flags. rule_id names the syscall.
+ */
+#define EXEC_SYSCALL_EXECVE 0
+#define EXEC_SYSCALL_EXECVEAT 1
+#define EXEC_ARGV_MAX 32
+#define EXEC_ARGV_BYTES (MAX_DOMAIN_LEN + 1)
+#define EXEC_ARGV_TRUNCATED (1U << 31)
+#define TRACEGUARD_AT_FDCWD (-100)
 #define POLICY_DECISION_NONE 0
 #define POLICY_DECISION_ALLOW 1
 #define POLICY_DECISION_BLOCK 2
@@ -94,7 +161,6 @@
 #define SOCKET_INFO_MAX_ENTRIES 16384
 #define LISTENER_INFO_MAX_ENTRIES 16384
 #define CONNECTION_DEDUPE_MAX_ENTRIES 32768
-#define CONNECTION_DEDUPE_WINDOW_NS 60000000000ULL
 #define EGRESS_IDENTITY_BYTES 17
 #define EGRESS_IDENTITY_GLOBAL 0
 #define EGRESS_IDENTITY_UID 1
@@ -144,9 +210,28 @@ struct path {
 	struct dentry *dentry;
 } __attribute__((preserve_access_index));
 
+struct super_block {
+	__u32 s_dev;
+} __attribute__((preserve_access_index));
+
+struct inode {
+	unsigned long i_ino;
+	struct super_block *i_sb;
+} __attribute__((preserve_access_index));
+
 struct file {
 	struct path f_path;
 	__u32 f_flags;
+	struct inode *f_inode;
+} __attribute__((preserve_access_index));
+
+struct fdtable {
+	unsigned int max_fds;
+	struct file **fd;
+} __attribute__((preserve_access_index));
+
+struct files_struct {
+	struct fdtable *fdt;
 } __attribute__((preserve_access_index));
 
 struct linux_binprm {
@@ -239,9 +324,23 @@ struct lsm_path_value {
 	char path[4096];
 };
 
+struct ns_common {
+	unsigned int inum;
+} __attribute__((preserve_access_index));
+
+struct mnt_namespace {
+	struct ns_common ns;
+} __attribute__((preserve_access_index));
+
+struct nsproxy {
+	struct mnt_namespace *mnt_ns;
+} __attribute__((preserve_access_index));
+
 struct task_struct {
 	struct task_struct *group_leader;
 	__u64 start_boottime;
+	struct nsproxy *nsproxy;
+	struct files_struct *files;
 } __attribute__((preserve_access_index));
 
 struct domain_key {
@@ -464,6 +563,59 @@ struct {
 	__uint(max_entries, 1 << 24);
 } events SEC(".maps");
 
+/* Set by userspace at load time; 0 disables connection event deduplication. */
+volatile const __u64 connection_dedupe_window_ns = 60000000000ULL;
+
+/* Addresses a response blocks until the value, a bpf_ktime_get_ns deadline.
+ * Userspace adds and removes entries; the deadline also stops a stale entry
+ * from blocking if userspace cannot remove it.
+ */
+struct response_peer_key {
+	__u8 family;
+	__u8 pad[3];
+	__u8 addr[16];
+};
+
+#define RESPONSE_PEERS_MAX_ENTRIES 4096
+#define RESPONSE_DROP_EGRESS 0
+#define RESPONSE_DROP_INGRESS 1
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, RESPONSE_PEERS_MAX_ENTRIES);
+	__type(key, struct response_peer_key);
+	__type(value, __u64);
+} response_peers SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, __u32);
+	__type(value, __u64);
+} response_peer_drops SEC(".maps");
+
+/* Indexed by event kind; counts events lost because the ring buffer was full. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, EVENT_KIND_MAX + 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} ringbuf_drops SEC(".maps");
+
+static __always_inline struct event *reserve_event(__u32 kind)
+{
+	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	__u64 *drops;
+
+	if (!event) {
+		drops = bpf_map_lookup_elem(&ringbuf_drops, &kind);
+		if (drops) {
+			__sync_fetch_and_add(drops, 1);
+		}
+	}
+	return event;
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, POLICY_MAP_MAX_ENTRIES);
@@ -540,6 +692,20 @@ struct {
 	__type(key, __u32);
 	__type(value, struct dns_parse_result);
 } dns_scratch SEC(".maps");
+
+/* Twice the copied size, so each argument read may use all the remaining
+ * space without the verifier having to relate offset and length.
+ */
+struct exec_argv_scratch {
+	char buf[2 * EXEC_ARGV_BYTES];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct exec_argv_scratch);
+} exec_argv_scratch SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -960,7 +1126,7 @@ struct path_decision_context {
 static __always_inline void emit_path_decision(__u32 kind, __u32 source,
 	const struct path_decision_context *decision)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 	__u64 copy_len = (__u64)decision->path_len + 1;
 
 	if (!event) {
@@ -1096,6 +1262,67 @@ static __always_inline __u64 current_process_start_time(void)
 		return 0;
 	}
 	return start_boottime / NSEC_PER_USER_HZ_TICK;
+}
+
+/* current_mnt_ns returns the calling task's mount namespace inode number, or
+ * 0 when it cannot be read.
+ */
+static __always_inline __u32 current_mnt_ns(void)
+{
+	struct task_struct *task = bpf_get_current_task();
+	struct nsproxy *nsproxy = 0;
+	struct mnt_namespace *mnt_ns = 0;
+	unsigned int inum = 0;
+
+	if (!task || bpf_probe_read_kernel(&nsproxy, sizeof(nsproxy), __builtin_preserve_access_index(&task->nsproxy)) < 0 || !nsproxy ||
+		bpf_probe_read_kernel(&mnt_ns, sizeof(mnt_ns), __builtin_preserve_access_index(&nsproxy->mnt_ns)) < 0 || !mnt_ns ||
+		bpf_probe_read_kernel(&inum, sizeof(inum), __builtin_preserve_access_index(&mnt_ns->ns.inum)) < 0) {
+		return 0;
+	}
+	return inum;
+}
+
+/* set_event_mnt_ns records the mount namespace in addr, which file audit and
+ * file change events do not otherwise use, so a path can be checked against
+ * the right namespace after the process has exited.
+ */
+static __always_inline void set_event_mnt_ns(struct event *event)
+{
+	__u32 inum = current_mnt_ns();
+
+	__builtin_memcpy(event->addr, &inum, sizeof(inum));
+}
+
+/* fd_file_identity reads the device and inode of the file the calling task
+ * has open as fd, so a descriptor-based change can be matched to the file
+ * even if the descriptor is closed or reused before userspace reads /proc.
+ * It returns 0 when they cannot be read.
+ */
+static __always_inline int fd_file_identity(__u64 fd, __u32 *dev, __u64 *ino)
+{
+	struct task_struct *task = bpf_get_current_task();
+	struct files_struct *files = 0;
+	struct fdtable *fdt = 0;
+	struct file **table = 0;
+	struct file *file = 0;
+	struct inode *inode = 0;
+	struct super_block *sb = 0;
+	unsigned int max_fds = 0;
+	unsigned long number = 0;
+
+	if (!task || bpf_probe_read_kernel(&files, sizeof(files), __builtin_preserve_access_index(&task->files)) < 0 || !files ||
+		bpf_probe_read_kernel(&fdt, sizeof(fdt), __builtin_preserve_access_index(&files->fdt)) < 0 || !fdt ||
+		bpf_probe_read_kernel(&max_fds, sizeof(max_fds), __builtin_preserve_access_index(&fdt->max_fds)) < 0 || fd >= max_fds ||
+		bpf_probe_read_kernel(&table, sizeof(table), __builtin_preserve_access_index(&fdt->fd)) < 0 || !table ||
+		bpf_probe_read_kernel(&file, sizeof(file), &table[fd]) < 0 || !file ||
+		bpf_probe_read_kernel(&inode, sizeof(inode), __builtin_preserve_access_index(&file->f_inode)) < 0 || !inode ||
+		bpf_probe_read_kernel(&number, sizeof(number), __builtin_preserve_access_index(&inode->i_ino)) < 0 ||
+		bpf_probe_read_kernel(&sb, sizeof(sb), __builtin_preserve_access_index(&inode->i_sb)) < 0 || !sb ||
+		bpf_probe_read_kernel(dev, sizeof(*dev), __builtin_preserve_access_index(&sb->s_dev)) < 0) {
+		return 0;
+	}
+	*ino = number;
+	return 1;
 }
 
 static __always_inline int daemon_is_exempt(const struct settings *cfg)
@@ -1277,8 +1504,12 @@ static __always_inline int should_emit_connection_event(const struct connection_
 	struct connection_dedupe_key key = {0};
 	struct connection_dedupe_value value = {0};
 	struct connection_dedupe_value *existing;
+	__u64 window = connection_dedupe_window_ns;
 	__u64 now = bpf_ktime_get_ns();
 
+	if (!window) {
+		return 1;
+	}
 	key.pid = pid;
 	key.port = params->port;
 	key.local_port = params->local_port;
@@ -1289,7 +1520,7 @@ static __always_inline int should_emit_connection_event(const struct connection_
 	copy_socket_addr(key.local_addr, params->family, params->local_addr);
 
 	existing = bpf_map_lookup_elem(&connection_dedupe, &key);
-	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < CONNECTION_DEDUPE_WINDOW_NS) {
+	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < window) {
 		return 0;
 	}
 
@@ -1308,7 +1539,7 @@ static __always_inline int emit_connection_event_identity(const struct connectio
 		return 1;
 	}
 
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(EVENT_CONNECTION);
 	if (!event) {
 		return 1;
 	}
@@ -1341,7 +1572,7 @@ static __always_inline int emit_connection_event_current(const struct connection
 		return 1;
 	}
 
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(EVENT_CONNECTION);
 	if (!event) {
 		return 1;
 	}
@@ -1527,7 +1758,7 @@ static __always_inline __u32 lookup_egress6(__u8 allow, const struct egress_look
 static __always_inline int emit_egress_decision(struct bpf_sock_addr *ctx, const struct connection_event_params *params, const struct settings *cfg, __u32 rule_id, const struct egress_lookup *lookup)
 {
 	__u32 kind = cfg->egress_enforce ? EVENT_EGRESS_BLOCKED : EVENT_EGRESS_WOULD_BLOCK;
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 
 	if (!event) {
 		return cfg->egress_enforce ? 0 : 1;
@@ -1737,7 +1968,7 @@ static __always_inline __u32 lookup_bind6(__u8 allow, const struct egress_lookup
 static __always_inline int emit_bind_decision(struct bpf_sock_addr *ctx, const struct settings *cfg,
 	const struct egress_lookup *lookup, __u32 rule_id, __u16 socket_meta)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(cfg->bind_enforce ? EVENT_BIND_BLOCKED : EVENT_BIND_WOULD_BLOCK);
 	__u8 family = (__u8)(socket_meta >> 8);
 	__u8 hook = (__u8)socket_meta;
 	__u8 deny = cfg->bind_enforce;
@@ -2089,7 +2320,7 @@ int trace_setsockopt(struct bpf_sockopt *ctx)
 		release_policy_guard(&guard);
 		return 1;
 	}
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(cfg->sockopt_enforce ? EVENT_SOCKOPT_BLOCKED : EVENT_SOCKOPT_WOULD_BLOCK);
 	if (event) {
 		__builtin_memset(event, 0, sizeof(*event));
 		init_event(event, cfg->sockopt_enforce ? EVENT_SOCKOPT_BLOCKED : EVENT_SOCKOPT_WOULD_BLOCK,
@@ -2117,13 +2348,19 @@ static __always_inline int should_emit_sockops_retrans(struct bpf_sock_ops *ctx)
 	struct connection_dedupe_key key = {0};
 	struct connection_dedupe_value value = {0};
 	struct connection_dedupe_value *existing;
-	__u64 cookie = bpf_get_socket_cookie(ctx);
-	__u64 now = bpf_ktime_get_ns();
+	__u64 window = connection_dedupe_window_ns;
+	__u64 cookie;
+	__u64 now;
 
+	if (!window) {
+		return 1;
+	}
+	cookie = bpf_get_socket_cookie(ctx);
+	now = bpf_ktime_get_ns();
 	key.direction = (__u8)BPF_SOCK_OPS_RETRANS_CB;
 	__builtin_memcpy(key.addr, &cookie, sizeof(cookie));
 	existing = bpf_map_lookup_elem(&connection_dedupe, &key);
-	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < CONNECTION_DEDUPE_WINDOW_NS) {
+	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < window) {
 		return 0;
 	}
 	value.last_seen_ns = now;
@@ -2133,7 +2370,7 @@ static __always_inline int should_emit_sockops_retrans(struct bpf_sock_ops *ctx)
 
 static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(EVENT_SOCKOPS);
 	__u8 family;
 
 	if (!event) {
@@ -2375,7 +2612,7 @@ struct dns_emit_context {
 
 static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct dns_emit_context *ctx, __u32 addr)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(ctx->kind);
 	__u8 protocol = ctx->transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
 	(void)skb;
 
@@ -2398,7 +2635,7 @@ static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct d
 
 static __always_inline int emit_dns6_event(struct __sk_buff *skb, const struct dns_emit_context *ctx, const __u8 addr[16])
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(ctx->kind);
 	__u8 protocol = ctx->transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
 	(void)skb;
 
@@ -2643,7 +2880,7 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 
 static __always_inline int emit_resolver_event(struct bpf_sock_addr *ctx, __u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook, __u32 decision)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 	(void)ctx;
 	(void)addr_len;
 
@@ -3170,12 +3407,55 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 	return 1;
 }
 
+/* peer_blocked reports whether a response currently blocks the packet's
+ * remote address: the destination on egress, the source on ingress.
+ */
+static __always_inline int peer_blocked(struct __sk_buff *skb, __u32 direction)
+{
+	struct response_peer_key key = {0};
+	__u8 version_ihl;
+	__u64 *deadline;
+	__u64 *drops;
+	__u32 offset;
+
+	if (bpf_skb_load_bytes(skb, 0, &version_ihl, sizeof(version_ihl)) < 0) {
+		return 0;
+	}
+	if (version_ihl >> 4 == 4) {
+		key.family = FAMILY_IPV4;
+		offset = direction == RESPONSE_DROP_EGRESS ? 16 : 12;
+		if (bpf_skb_load_bytes(skb, offset, key.addr, 4) < 0) {
+			return 0;
+		}
+	} else if (version_ihl >> 4 == 6) {
+		key.family = FAMILY_IPV6;
+		offset = direction == RESPONSE_DROP_EGRESS ? 24 : 8;
+		if (bpf_skb_load_bytes(skb, offset, key.addr, 16) < 0) {
+			return 0;
+		}
+	} else {
+		return 0;
+	}
+	deadline = bpf_map_lookup_elem(&response_peers, &key);
+	if (!deadline || bpf_ktime_get_ns() >= *deadline) {
+		return 0;
+	}
+	drops = bpf_map_lookup_elem(&response_peer_drops, &direction);
+	if (drops) {
+		__sync_fetch_and_add(drops, 1);
+	}
+	return 1;
+}
+
 SEC("cgroup_skb/egress")
 int trace_dns(struct __sk_buff *skb)
 {
 	struct policy_guard guard = {0};
 	int verdict;
 
+	if (peer_blocked(skb, RESPONSE_DROP_EGRESS)) {
+		return 0;
+	}
 	if (!acquire_policy_guard(&guard)) {
 		return 1;
 	}
@@ -3191,6 +3471,9 @@ int trace_connection_ingress(struct __sk_buff *skb)
 	__u8 version_ihl;
 	__u8 version;
 
+	if (peer_blocked(skb, RESPONSE_DROP_INGRESS)) {
+		return 0;
+	}
 	if (packet_len < 1) {
 		return 1;
 	}
@@ -3753,9 +4036,67 @@ int lsm_file_open(unsigned long long *ctx)
 	return verdict;
 }
 
-static __always_inline int emit_exec_event(const char *filename)
+static __always_inline void copy_exec_argv(struct event *event, const char *const *argv)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct exec_argv_scratch *scratch;
+	__u32 zero = 0;
+	__u32 offset = 0;
+	__u16 argc = 0;
+
+	if (!argv) {
+		return;
+	}
+	scratch = bpf_map_lookup_elem(&exec_argv_scratch, &zero);
+	if (!scratch) {
+		return;
+	}
+	for (__u32 index = 0; index < EXEC_ARGV_MAX; index++) {
+		const char *arg = 0;
+		long copied;
+
+		if (bpf_probe_read_user(&arg, sizeof(arg), &argv[index]) != 0 || !arg) {
+			break;
+		}
+		if (offset >= EXEC_ARGV_BYTES) {
+			event->file_flags |= EXEC_ARGV_TRUNCATED;
+			break;
+		}
+		copied = bpf_probe_read_user_str(&scratch->buf[offset & (EXEC_ARGV_BYTES - 1)], EXEC_ARGV_BYTES, arg);
+		if (copied <= 0) {
+			break;
+		}
+		if (copied == EXEC_ARGV_BYTES) {
+			/* The read filled its limit, so the argument is either exactly
+			 * EXEC_ARGV_BYTES - 1 bytes long or was cut at that length.
+			 */
+			char next = 0;
+
+			if (bpf_probe_read_user(&next, sizeof(next), arg + EXEC_ARGV_BYTES - 1) != 0 || next) {
+				event->file_flags |= EXEC_ARGV_TRUNCATED;
+			}
+		}
+		offset += (__u32)copied;
+		argc++;
+		if (index == EXEC_ARGV_MAX - 1) {
+			if (bpf_probe_read_user(&arg, sizeof(arg), &argv[index + 1]) == 0 && arg) {
+				event->file_flags |= EXEC_ARGV_TRUNCATED;
+			}
+		}
+	}
+	if (offset > EXEC_ARGV_BYTES) {
+		/* The last argument runs past the bytes the event carries. One that
+		 * ends exactly at the limit fits with its terminator.
+		 */
+		event->file_flags |= EXEC_ARGV_TRUNCATED;
+	}
+	__builtin_memcpy(event->domain, scratch->buf, sizeof(event->domain));
+	event->domain[sizeof(event->domain) - 1] = 0;
+	event->port = argc;
+}
+
+static __always_inline int emit_exec_event(__u32 syscall, const char *filename, const char *const *argv, __u64 dirfd, __u64 flags)
+{
+	struct event *event = reserve_event(EVENT_EXEC);
 
 	if (!event) {
 		return 0;
@@ -3763,16 +4104,23 @@ static __always_inline int emit_exec_event(const char *filename)
 
 	__builtin_memset(event, 0, sizeof(*event));
 	init_event(event, EVENT_EXEC, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = syscall;
+	event->file_mode = (__u32)dirfd;
+	event->file_flags = (__u32)flags & ~EXEC_ARGV_TRUNCATED;
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
+	copy_exec_argv(event, argv);
 	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
 
-static __always_inline int emit_file_access_event(const char *filename, __u64 flags, __u64 mode)
+/* File audit events carry the open's dirfd in socket_cookie, so a relative
+ * path can be resolved against the right directory.
+ */
+static __always_inline int emit_file_access_event(__u64 dirfd, const char *filename, __u64 flags, __u64 mode)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(EVENT_FILE_ACCESS);
 
 	if (!event) {
 		return 0;
@@ -3782,6 +4130,8 @@ static __always_inline int emit_file_access_event(const char *filename, __u64 fl
 	init_event(event, EVENT_FILE_ACCESS, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
 	event->file_flags = (__u32)flags;
 	event->file_mode = (__u32)mode;
+	event->socket_cookie = (__u32)dirfd;
+	set_event_mnt_ns(event);
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
@@ -3789,28 +4139,500 @@ static __always_inline int emit_file_access_event(const char *filename, __u64 fl
 	return 0;
 }
 
+static __always_inline struct event *start_security_event(__u32 kind, __u32 operation)
+{
+	struct event *event = reserve_event(kind);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, kind, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	return event;
+}
+
+static __always_inline int emit_security_ids(__u32 kind, __u32 operation, __u64 flags, __u64 argument)
+{
+	struct event *event = start_security_event(kind, operation);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)flags;
+	event->file_mode = (__u32)argument;
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_memfd_create")
+int trace_memfd_create(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MEMFD_CREATE, 0);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)ctx->args[1];
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[0]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+/* Only requests that attach to, or write into, another process are emitted;
+ * tracers issue other requests at very high rates.
+ */
+SEC("tracepoint/syscalls/sys_enter_ptrace")
+int trace_ptrace(struct trace_event_raw_sys_enter *ctx)
+{
+	unsigned long request = ctx->args[0];
+
+	switch (request) {
+	case TRACEGUARD_PTRACE_TRACEME:
+	case TRACEGUARD_PTRACE_POKETEXT:
+	case TRACEGUARD_PTRACE_POKEDATA:
+	case TRACEGUARD_PTRACE_POKEUSER:
+	case TRACEGUARD_PTRACE_ATTACH:
+	case TRACEGUARD_PTRACE_SEIZE:
+		return emit_security_ids(EVENT_PTRACE, (__u32)request, 0, ctx->args[1]);
+	default:
+		return 0;
+	}
+}
+
+SEC("tracepoint/syscalls/sys_enter_process_vm_readv")
+int trace_process_vm_readv(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PROCESS_VM, PROCESS_VM_READ, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_process_vm_writev")
+int trace_process_vm_writev(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PROCESS_VM, PROCESS_VM_WRITE, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_init_module")
+int trace_init_module(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MODULE_LOAD, MODULE_LOAD_INIT);
+
+	if (!event) {
+		return 0;
+	}
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[2]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_finit_module")
+int trace_finit_module(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MODULE_LOAD, MODULE_LOAD_FINIT);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_mode = (__u32)ctx->args[0];
+	event->file_flags = (__u32)ctx->args[2];
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[1]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+/* Map and object operations are routine for BPF tooling; only program loads
+ * are emitted.
+ */
+SEC("tracepoint/syscalls/sys_enter_bpf")
+int trace_bpf(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 prog_type = 0;
+
+	if (ctx->args[0] != TRACEGUARD_BPF_PROG_LOAD) {
+		return 0;
+	}
+	bpf_probe_read_user(&prog_type, sizeof(prog_type), (const void *)ctx->args[1]);
+	return emit_security_ids(EVENT_BPF_PROG_LOAD, TRACEGUARD_BPF_PROG_LOAD, 0, prog_type);
+}
+
+SEC("tracepoint/syscalls/sys_enter_io_uring_setup")
+int trace_io_uring_setup(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 flags = 0;
+
+	/* struct io_uring_params begins with sq_entries, cq_entries, flags. */
+	bpf_probe_read_user(&flags, sizeof(flags), (const char *)ctx->args[1] + 2 * sizeof(__u32));
+	return emit_security_ids(EVENT_IO_URING_SETUP, 0, flags, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_mount")
+int trace_mount(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MOUNT, 0);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)ctx->args[3];
+	bpf_probe_read_user_str(event->domain, MOUNT_SOURCE_LEN, (const char *)ctx->args[0]);
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[1]);
+	bpf_probe_read_user_str(event->domain + MOUNT_FSTYPE_OFFSET, sizeof(event->domain) - MOUNT_FSTYPE_OFFSET,
+		(const char *)ctx->args[2]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setns")
+int trace_setns(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_NAMESPACE_CHANGE, NAMESPACE_SETNS, ctx->args[1], ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unshare")
+int trace_unshare(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_NAMESPACE_CHANGE, NAMESPACE_UNSHARE, ctx->args[0], 0);
+}
+
+/* For the set*id family file_mode carries the requested effective ID, or
+ * 0xffffffff when the call leaves it unchanged.
+ */
+SEC("tracepoint/syscalls/sys_enter_setuid")
+int trace_setuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETUID, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setgid")
+int trace_setgid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETGID, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setreuid")
+int trace_setreuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETREUID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setregid")
+int trace_setregid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETREGID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresuid")
+int trace_setresuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETRESUID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresgid")
+int trace_setresgid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETRESGID, 0, ctx->args[1]);
+}
+
+/* file_flags carries the low 32 bits of the requested effective set. */
+SEC("tracepoint/syscalls/sys_enter_capset")
+int trace_capset(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 effective = 0;
+
+	bpf_probe_read_user(&effective, sizeof(effective), (const void *)ctx->args[1]);
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_CAPSET, effective, 0);
+}
+
+static __always_inline int emit_file_change(__u32 operation, __u64 dirfd, const char *path, __u64 flags, __u64 value)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	event->file_mode = (__u32)dirfd;
+	event->file_flags = (__u32)flags;
+	event->socket_cookie = value;
+	set_event_mnt_ns(event);
+	/* A descriptor-based request has no path; dirfd is the file itself. */
+	if (path) {
+		bpf_probe_read_user_str(event->filename, sizeof(event->filename), path);
+	}
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+/* file_pair is an operation on two paths: rename, link, or symlink. BPF
+ * calls take at most five arguments, so they travel in a struct.
+ */
+struct file_pair {
+	__u32 operation;
+	__u32 flags;
+	__u64 old_dirfd;
+	__u64 new_dirfd;
+	const char *old_path;
+	const char *new_path;
+};
+
+static __always_inline int emit_file_pair(const struct file_pair *pair)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = pair->operation;
+	event->file_mode = (__u32)pair->old_dirfd;
+	event->file_flags = pair->flags;
+	event->socket_cookie = (__u32)pair->new_dirfd;
+	set_event_mnt_ns(event);
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), pair->old_path);
+	bpf_probe_read_user_str(event->domain, sizeof(event->domain), pair->new_path);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+#define AT_FDCWD_ARG ((__u64)(__s64)TRACEGUARD_AT_FDCWD)
+
+SEC("tracepoint/syscalls/sys_enter_unlink")
+int trace_unlink(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_unlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, ctx->args[0], (const char *)ctx->args[1], ctx->args[2], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_rmdir")
+int trace_rmdir(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, AT_FDCWD_ARG, (const char *)ctx->args[0], TRACEGUARD_AT_REMOVEDIR, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_rename")
+int trace_rename(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat")
+int trace_renameat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = 0,
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat2")
+int trace_renameat2(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = (__u32)ctx->args[4],
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_link")
+int trace_link(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_LINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_linkat")
+int trace_linkat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_LINK,
+		.flags = (__u32)ctx->args[4],
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_symlink")
+int trace_symlink(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_SYMLINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_symlinkat")
+int trace_symlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_SYMLINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = ctx->args[1],
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[2],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_chmod")
+int trace_chmod(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmodat")
+int trace_fchmodat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], (const char *)ctx->args[1], 0, ctx->args[2]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmodat2")
+int trace_fchmodat2(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], (const char *)ctx->args[1], ctx->args[3], ctx->args[2]);
+}
+
+static __always_inline __u64 owner_value(__u64 uid, __u64 gid)
+{
+	return (uid & 0xffffffffULL) | ((gid & 0xffffffffULL) << 32);
+}
+
+/* emit_fd_change reports a descriptor-based change with the open file's
+ * device in local_addr[0..3] and inode in local_addr[8..15], captured now.
+ */
+static __always_inline int emit_fd_change(__u32 operation, __u64 fd, __u64 value)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+	__u32 dev = 0;
+	__u64 ino = 0;
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	event->file_mode = (__u32)fd;
+	event->socket_cookie = value;
+	set_event_mnt_ns(event);
+	if (fd_file_identity(fd, &dev, &ino)) {
+		__builtin_memcpy(&event->local_addr[0], &dev, sizeof(dev));
+		__builtin_memcpy(&event->local_addr[8], &ino, sizeof(ino));
+	}
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmod")
+int trace_fchmod(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_fd_change(FILE_CHANGE_CHMOD, ctx->args[0], ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchown")
+int trace_fchown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_fd_change(FILE_CHANGE_CHOWN, ctx->args[0], owner_value(ctx->args[1], ctx->args[2]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_chown")
+int trace_chown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, owner_value(ctx->args[1], ctx->args[2]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_lchown")
+int trace_lchown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, AT_FDCWD_ARG, (const char *)ctx->args[0], TRACEGUARD_AT_SYMLINK_NOFOLLOW,
+		owner_value(ctx->args[1], ctx->args[2]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchownat")
+int trace_fchownat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, ctx->args[0], (const char *)ctx->args[1], ctx->args[4],
+		owner_value(ctx->args[2], ctx->args[3]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_truncate")
+int trace_truncate(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_TRUNCATE, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, ctx->args[1]);
+}
+
 SEC("tracepoint/syscalls/sys_enter_execve")
 int trace_execve(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_exec_event((const char *)ctx->args[0]);
+	return emit_exec_event(EXEC_SYSCALL_EXECVE, (const char *)ctx->args[0], (const char *const *)ctx->args[1],
+		(__u64)(__s64)TRACEGUARD_AT_FDCWD, 0);
 }
 
 SEC("tracepoint/syscalls/sys_enter_execveat")
 int trace_execveat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_exec_event((const char *)ctx->args[1]);
+	return emit_exec_event(EXEC_SYSCALL_EXECVEAT, (const char *)ctx->args[1], (const char *const *)ctx->args[2],
+		ctx->args[0], ctx->args[4]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_open")
 int trace_open(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[0], ctx->args[1], ctx->args[2]);
+	return emit_file_access_event((__u64)(__s64)TRACEGUARD_AT_FDCWD, (const char *)ctx->args[0], ctx->args[1], ctx->args[2]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[1], ctx->args[2], ctx->args[3]);
+	return emit_file_access_event(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], ctx->args[3]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat2")
@@ -3822,11 +4644,11 @@ int trace_openat2(struct trace_event_raw_sys_enter *ctx)
 	if (bpf_probe_read_user(&how, sizeof(how), (const void *)ctx->args[2]) == 0) {
 		flags = how.flags;
 	}
-	return emit_file_access_event((const char *)ctx->args[1], flags, how.mode);
+	return emit_file_access_event(ctx->args[0], (const char *)ctx->args[1], flags, how.mode);
 }
 
 SEC("tracepoint/syscalls/sys_enter_creat")
 int trace_creat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[0], TRACEGUARD_CREAT_FLAGS, ctx->args[1]);
+	return emit_file_access_event((__u64)(__s64)TRACEGUARD_AT_FDCWD, (const char *)ctx->args[0], TRACEGUARD_CREAT_FLAGS, ctx->args[1]);
 }

@@ -13,7 +13,9 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/response"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 type processMetadataCache interface {
@@ -210,6 +212,26 @@ func eventKindName(kind uint32) string {
 		return "sockopt_would_block"
 	case ebpf.EventSockOps:
 		return "tcp_sockops"
+	case ebpf.EventMemfdCreate:
+		return "memfd_create"
+	case ebpf.EventPtrace:
+		return "ptrace"
+	case ebpf.EventProcessVM:
+		return "process_vm"
+	case ebpf.EventModuleLoad:
+		return "module_load"
+	case ebpf.EventBPFProgLoad:
+		return "bpf_prog_load"
+	case ebpf.EventIOURingSetup:
+		return "io_uring_setup"
+	case ebpf.EventMount:
+		return "mount"
+	case ebpf.EventNamespaceChange:
+		return "namespace_change"
+	case ebpf.EventPrivilegeChange:
+		return "privilege_change"
+	case ebpf.EventFileChange:
+		return "file_change"
 	default:
 		return "unknown"
 	}
@@ -283,26 +305,35 @@ func fileCreated(flags uint32) bool {
 	return flags&unknownFlags == 0 && flags&oCreat != 0
 }
 
-func emitDetectionAlerts(detector *detection.Engine, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
+// alertSink records alerts and hands each to the responder, if any.
+type alertSink struct {
+	recorder  *eventsink.Recorder
+	metrics   *telemetry.Registry
+	responder *response.Responder
+}
+
+func (s alertSink) record(eventName string, alerts []detection.Alert) {
+	for _, alert := range alerts {
+		s.metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
+		s.recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))
+		if s.responder != nil {
+			s.responder.Submit(alert)
+		}
+	}
+}
+
+func emitDetectionAlerts(detector *detection.Engine, sink alertSink, timestamp time.Time, eventName string, fields map[string]any) {
 	alerts := detector.Evaluate(detection.Event{
 		Timestamp: timestamp,
 		Name:      eventName,
 		Fields:    fields,
 	})
-	metrics.SetDetectionStateGroups(detector.StateCount())
-	for _, alert := range alerts {
-		alertFields := alert.Fields
-		alertFields["source_event"] = eventName
-		alertFields["event"] = "detection_alert"
-		alertFields["detection_rule_id"] = alert.RuleID
-		alertFields["severity"] = alert.Severity
-		alertFields["detection_message"] = alert.Message
-		alertFields["tags"] = alert.Tags
-		alertFields["threshold_count"] = alert.Count
-		if alert.Window > 0 {
-			alertFields["threshold_window"] = alert.Window.String()
-		}
-		metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
-		recorder.InfoAt(alert.Timestamp, "detection-alert", alertFields)
-	}
+	sink.metrics.SetDetectionStateGroups(detector.StateCount())
+	sink.record(eventName, alerts)
+}
+
+// emitThreatIntelAlerts records alerts for events whose domain or peer
+// address is in a loaded feed.
+func emitThreatIntelAlerts(matcher *threatintel.Matcher, sink alertSink, timestamp time.Time, eventName string, fields map[string]any) {
+	sink.record(eventName, matcher.Evaluate(detection.Event{Timestamp: timestamp, Name: eventName, Fields: fields}))
 }

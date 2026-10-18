@@ -229,6 +229,12 @@ func sortedEndpointCIDRs(values map[string]EndpointCIDR) []EndpointCIDR {
 	return out
 }
 
+// NormalizeDomain validates a hostname and returns it lowercased without a
+// trailing dot, a leading "*.", or a URL scheme and path.
+func NormalizeDomain(raw string) (string, bool) {
+	return normalizeDomain(raw)
+}
+
 func normalizeDomain(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

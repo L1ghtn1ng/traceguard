@@ -34,6 +34,8 @@ func TestParseRejectsMalformedBooleanEnvironmentValues(t *testing.T) {
 		"TRACEGUARD_EVENT_EXPORT_SPOOL",
 		"TRACEGUARD_FILE_AUDIT",
 		"TRACEGUARD_KUBERNETES_ENRICH",
+		"TRACEGUARD_STRICT_HOOKS",
+		"TRACEGUARD_SECURITY_EVENTS",
 	}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -86,6 +88,8 @@ func TestParseRejectsMalformedDurationEnvironmentValues(t *testing.T) {
 		"TRACEGUARD_EVENT_SYSLOG_TIMEOUT",
 		"TRACEGUARD_PROCESS_CACHE_TTL",
 		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+		"TRACEGUARD_HEARTBEAT_INTERVAL",
+		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
 	}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -249,6 +253,13 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_KUBERNETES_CA_PATH",
 		"TRACEGUARD_KUBERNETES_NODE_NAME",
 		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+		"TRACEGUARD_STRICT_HOOKS",
+		"TRACEGUARD_HEARTBEAT_INTERVAL",
+		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
+		"TRACEGUARD_POLICY_SIGNING_KEY",
+		"TRACEGUARD_SECURITY_EVENTS",
+		"TRACEGUARD_EVENT_SCHEMA",
+		"TRACEGUARD_RESPONSE_MODE",
 	)
 
 	cfg, err := Parse()
@@ -276,6 +287,15 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	if !cfg.FileAudit {
 		t.Fatal("FileAudit = false, want packaged default true")
 	}
+	if !cfg.SecurityEvents {
+		t.Fatal("SecurityEvents = false, want packaged default true")
+	}
+	if cfg.EventSchema != "traceguard" {
+		t.Fatalf("EventSchema = %q, want packaged default traceguard", cfg.EventSchema)
+	}
+	if cfg.ResponseMode != "dry-run" {
+		t.Fatalf("ResponseMode = %q, want packaged default dry-run", cfg.ResponseMode)
+	}
 	if cfg.KubernetesEnrich {
 		t.Fatal("KubernetesEnrich = true, want packaged default false")
 	}
@@ -287,6 +307,69 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if cfg.KubernetesTokenPath != "/var/run/secrets/kubernetes.io/serviceaccount/token" || cfg.KubernetesCAPath != "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" || cfg.KubernetesPoll.String() != "2m0s" {
 		t.Fatalf("Kubernetes path/poll defaults = token %q ca %q poll %s, want packaged defaults", cfg.KubernetesTokenPath, cfg.KubernetesCAPath, cfg.KubernetesPoll)
+	}
+	if cfg.StrictHooks || cfg.HeartbeatInterval != 5*time.Minute || cfg.ConnectionDedupeWindow != time.Minute || cfg.PolicySigningKey != "" {
+		t.Fatalf("self-monitoring defaults = strict %t heartbeat %s dedupe %s signing key %q, want packaged defaults", cfg.StrictHooks, cfg.HeartbeatInterval, cfg.ConnectionDedupeWindow, cfg.PolicySigningKey)
+	}
+}
+
+func TestParseSelfMonitoringOptions(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-strict-hooks", "-heartbeat-interval", "0", "-connection-dedupe-window", "10s",
+		"-policy-url", "https://policy.example/traceguard.yaml", "-policy-signing-key", "/etc/traceguard/policy.pub"}
+	clearPolicyEnv(t)
+	clearTypedEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if !cfg.StrictHooks || cfg.HeartbeatInterval != 0 || cfg.ConnectionDedupeWindow != 10*time.Second || cfg.PolicySigningKey != "/etc/traceguard/policy.pub" {
+		t.Fatalf("options = strict %t heartbeat %s dedupe %s key %q", cfg.StrictHooks, cfg.HeartbeatInterval, cfg.ConnectionDedupeWindow, cfg.PolicySigningKey)
+	}
+}
+
+func TestParseRejectsInvalidSelfMonitoringOptions(t *testing.T) {
+	tests := map[string]struct {
+		args []string
+		want string
+	}{
+		"negative heartbeat":      {[]string{"-heartbeat-interval", "-1s"}, "heartbeat-interval"},
+		"negative dedupe":         {[]string{"-connection-dedupe-window", "-1s"}, "connection-dedupe-window"},
+		"oversized dedupe":        {[]string{"-connection-dedupe-window", "2h"}, "connection-dedupe-window"},
+		"relative signing key":    {[]string{"-policy-url", "https://policy.example/p.yaml", "-policy-signing-key", "policy.pub"}, "absolute"},
+		"signing key without url": {[]string{"-policy-signing-key", "/etc/traceguard/policy.pub"}, "requires policy-url"},
+		"relative replay path":    {[]string{"-replay", "events.jsonl"}, "replay"},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			originalArgs := os.Args
+			t.Cleanup(func() { os.Args = originalArgs })
+			os.Args = append([]string{"traceguard"}, test.args...)
+			clearPolicyEnv(t)
+			clearTypedEnv(t)
+
+			if _, err := Parse(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseReplaySkipsServiceValidation(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-replay", "/var/log/traceguard/events.jsonl", "-policy-path", "/etc/traceguard/policy.yaml", "-log-path", "relative.log"}
+	clearPolicyEnv(t)
+	clearTypedEnv(t)
+
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+	if cfg.ReplayPath != "/var/log/traceguard/events.jsonl" || cfg.PolicyPath != "/etc/traceguard/policy.yaml" {
+		t.Fatalf("replay config = path %q policy %q", cfg.ReplayPath, cfg.PolicyPath)
 	}
 }
 
@@ -651,6 +734,13 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_EVENT_SYSLOG_TIMEOUT",
 		"TRACEGUARD_PROCESS_CACHE_TTL",
 		"TRACEGUARD_KUBERNETES_POLL_INTERVAL",
+		"TRACEGUARD_STRICT_HOOKS",
+		"TRACEGUARD_HEARTBEAT_INTERVAL",
+		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
+		"TRACEGUARD_POLICY_SIGNING_KEY",
+		"TRACEGUARD_SECURITY_EVENTS",
+		"TRACEGUARD_EVENT_SCHEMA",
+		"TRACEGUARD_RESPONSE_MODE",
 	} {
 		t.Setenv(key, "")
 	}
@@ -786,5 +876,26 @@ func TestSanitizeURLDoesNotEchoInvalidOrCredentialBearingInput(t *testing.T) {
 	}
 	if got := SanitizeURL("%%%secret"); got != "[invalid-url]" {
 		t.Fatalf("SanitizeURL(invalid) = %q", got)
+	}
+}
+
+func TestParseResponseMode(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-response-mode", "enforce"}, "enforce"},
+		{[]string{"-response-mode", "OFF"}, "off"},
+		{[]string{"-response-mode", "enforce", "-emergency-allow"}, "off"},
+	} {
+		originalArgs := os.Args
+		os.Args = append([]string{"traceguard"}, test.args...)
+		clearPolicyEnv(t)
+		clearTypedEnv(t)
+		cfg, err := Parse()
+		os.Args = originalArgs
+		if err != nil || cfg.ResponseMode != test.want {
+			t.Fatalf("Parse(%v) = %q, %v; want %q", test.args, cfg.ResponseMode, err, test.want)
+		}
 	}
 }

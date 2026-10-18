@@ -51,9 +51,9 @@ func TestPinnedMapSetIncludesAtomicPolicyState(t *testing.T) {
 	dummy := &ebpf.Map{}
 	handles := monitorMapHandles(monitorObjects{
 		Settings: dummy, PolicySelector: dummy, PolicyReaders: dummy,
-		DaemonIdentity: dummy, RuleNames: dummy,
+		DaemonIdentity: dummy, RuleNames: dummy, RingbufDrops: dummy,
 	}, optionalPrograms{})
-	for _, name := range []string{"settings", "policy_selector", "policy_readers", "daemon_identity", "rule_names"} {
+	for _, name := range []string{"settings", "policy_selector", "policy_readers", "daemon_identity", "rule_names", "ringbuf_drops"} {
 		if handles[name] != dummy {
 			t.Errorf("pinned handle %q = %p, want policy map %p", name, handles[name], dummy)
 		}

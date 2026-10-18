@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -222,9 +223,13 @@ type PolicyConfig struct {
 }
 
 type Monitor struct {
-	objects          monitorObjects
-	links            []io.Closer
-	reader           *ringbuf.Reader
+	objects monitorObjects
+	links   []io.Closer
+	reader  *ringbuf.Reader
+	// readerMu orders occupancy reads against closing the reader, whose
+	// shared ring mapping is released on close.
+	readerMu         sync.Mutex
+	readerClosed     bool
 	features         KernelFeatures
 	optional         optionalPrograms
 	optionalLinks    []io.Closer
@@ -250,6 +255,12 @@ type Options struct {
 	PinEBPF     bool
 	PinPath     string
 	EnableStats bool
+	// SecurityEvents attaches the memfd, ptrace, process memory, module,
+	// BPF, io_uring, mount, namespace, and privilege-change tracepoints.
+	SecurityEvents bool
+	// ConnectionDedupeWindow suppresses repeated connection and TCP
+	// retransmit events for the same flow; zero disables suppression.
+	ConnectionDedupeWindow time.Duration
 }
 
 type AttachState struct {
@@ -281,12 +292,15 @@ type monitorObjects struct {
 	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
+	securityPrograms
+	fileChangePrograms
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
 	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
+	ExecArgvScratch         *ebpf.Map `ebpf:"exec_argv_scratch"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
@@ -319,6 +333,9 @@ type monitorObjects struct {
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	DaemonIdentity          *ebpf.Map `ebpf:"daemon_identity"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
+	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 }
 
@@ -346,6 +363,7 @@ func (o *monitorObjects) Close() error {
 		o.BlockSuffixes,
 		o.Blocklist,
 		o.DnsScratch,
+		o.ExecArgvScratch,
 		o.SocketInfo,
 		o.ListenerInfo,
 		o.ConnectionDedupe,
@@ -377,6 +395,9 @@ func (o *monitorObjects) Close() error {
 		o.PolicyReaders,
 		o.DaemonIdentity,
 		o.RuleNames,
+		o.RingbufDrops,
+		o.ResponsePeers,
+		o.ResponsePeerDrops,
 		o.Events,
 		o.Settings,
 	} {
@@ -384,6 +405,7 @@ func (o *monitorObjects) Close() error {
 			errs = append(errs, closer.Close())
 		}
 	}
+	errs = append(errs, o.securityPrograms.Close(), o.fileChangePrograms.Close())
 	return errors.Join(errs...)
 }
 
@@ -416,13 +438,14 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return errors.Join(cause, statsCloser.Close())
 	}
 
+	constants := loadConstants{connectionDedupeWindow: opts.ConnectionDedupeWindow}
 	loadOptions := newCollectionOptions()
 	pinnedMaps, pinLayout, err := preparePinnedMaps(opts)
 	if err != nil {
 		return nil, closeStatsOnError(err)
 	}
 	loadOptions.MapReplacements = pinnedMaps
-	objects, features, err := loadMonitorObjects(loadOptions)
+	objects, features, err := loadMonitorObjects(loadOptions, constants)
 	if err != nil {
 		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps)))
 	}
@@ -434,7 +457,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		loadOptions = newCollectionOptions()
 		pinnedMaps = nil
 		pinLayout = nil
-		objects, features, err = loadMonitorObjects(loadOptions)
+		objects, features, err = loadMonitorObjects(loadOptions, constants)
 		if err != nil {
 			return nil, closeStatsOnError(err)
 		}
@@ -453,7 +476,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 	if err != nil {
 		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps), objects.Close()))
 	}
-	optional := loadOptionalPrograms(features.SelectedObject, loadOptions, objects, pinnedMaps["lsm_path_buf"])
+	optional := loadOptionalPrograms(features.SelectedObject, loadOptions, constants, objects, pinnedMaps["lsm_path_buf"])
 	if err := closePinnedMapHandles(pinnedMaps); err != nil {
 		return nil, closeStatsOnError(errors.Join(fmt.Errorf("close adopted eBPF map handles: %w", err), optional.Close(), objects.Close()))
 	}
@@ -663,7 +686,7 @@ func readProcessStartTime(path string) (uint64, error) {
 func (m *Monitor) Close() error {
 	var errs []error
 	if m.reader != nil {
-		errs = append(errs, m.reader.Close())
+		errs = append(errs, m.closeReader())
 	}
 	for _, lnk := range m.links {
 		if lnk != nil {
@@ -737,6 +760,9 @@ func (m *Monitor) ProgramStats() (map[string]ebpf.ProgramStats, error) {
 		"unix_recvmsg": m.optional.UnixRecvmsg, "setsockopt": m.optional.Sockopt,
 		"sockops": m.optional.SockOps,
 	}
+	for _, tracepoint := range m.objects.observeTracepoints() {
+		programs[strings.TrimPrefix(tracepoint.program, "trace_")] = tracepoint.handle
+	}
 	result := make(map[string]ebpf.ProgramStats, len(programs))
 	var errs []error
 	for name, program := range programs {
@@ -756,7 +782,7 @@ func (m *Monitor) ProgramStats() (map[string]ebpf.ProgramStats, error) {
 func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeMetrics) error {
 	finished := make(chan struct{})
 	defer close(finished)
-	go closeReaderOnCancel(ctx, m.reader, finished)
+	go closeReaderOnCancel(ctx, readerCloser(m.closeReader), finished)
 
 	for {
 		record, err := m.reader.Read()
@@ -778,6 +804,20 @@ func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeM
 		}
 		handler(event)
 	}
+}
+
+type readerCloser func() error
+
+func (c readerCloser) Close() error { return c() }
+
+func (m *Monitor) closeReader() error {
+	m.readerMu.Lock()
+	defer m.readerMu.Unlock()
+	if m.readerClosed {
+		return nil
+	}
+	m.readerClosed = true
+	return m.reader.Close()
 }
 
 func closeReaderOnCancel(ctx context.Context, reader io.Closer, finished <-chan struct{}) {

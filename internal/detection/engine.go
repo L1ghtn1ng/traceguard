@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -24,25 +25,40 @@ type Event struct {
 }
 
 type Alert struct {
-	RuleID    string
-	Severity  string
-	Message   string
-	Tags      []string
-	Count     int
-	Window    time.Duration
-	Timestamp time.Time
-	Fields    map[string]any
+	// ID is a random identifier unique to this alert.
+	ID         string
+	RuleID     string
+	Severity   string
+	Message    string
+	Tags       []string
+	Tactics    []string
+	Techniques []string
+	Compliance []string
+	Count      int
+	Window     time.Duration
+	Timestamp  time.Time
+	Fields     map[string]any
 }
 
 type Engine struct {
-	mu         sync.Mutex
-	rules      []compiledRule
-	groups     map[groupKey]*groupState
-	groupKeys  []groupKey
-	groupNext  int
-	maxGroups  int
-	samples    int
-	maxSamples int
+	mu                sync.Mutex
+	rules             []compiledRule
+	sequences         []compiledSequence
+	sequenceStates    map[groupKey]*sequenceState
+	sequenceAlerts    map[groupKey]cooldownRecord
+	maxSequenceStates int
+	// nextProgressPrune and nextCooldownPrune are the earliest times a
+	// prune can drop anything.
+	nextProgressPrune time.Time
+	nextCooldownPrune time.Time
+	exceptions        []policy.DetectionException
+	suppressed        map[string]uint64
+	groups            map[groupKey]*groupState
+	groupKeys         []groupKey
+	groupNext         int
+	maxGroups         int
+	samples           int
+	maxSamples        int
 }
 
 type groupKey [sha256.Size]byte
@@ -51,6 +67,20 @@ type compiledRule struct {
 	rule         policy.DetectionRule
 	matchCIDRs   []netip.Prefix
 	excludeCIDRs []netip.Prefix
+	exceptions   []compiledException
+}
+
+type compiledException struct {
+	exception policy.DetectionException
+	cidrs     []netip.Prefix
+}
+
+// ExceptionStatus reports one detection exception's state and how many
+// events it has suppressed since it was first installed.
+type ExceptionStatus struct {
+	ID         string
+	Expired    bool
+	Suppressed uint64
 }
 
 type groupState struct {
@@ -59,35 +89,121 @@ type groupState struct {
 }
 
 func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
-	rules, err := compileRules(effectiveRules(custom, disabled))
+	compiled, err := Compile(policy.Bundle{DetectionRules: custom, DisabledRuleIDs: disabled})
 	if err != nil {
 		return nil, err
 	}
 	return &Engine{
-		rules:      rules,
-		groups:     make(map[groupKey]*groupState),
-		maxGroups:  policy.MaxDetectionGroups,
-		maxSamples: policy.MaxDetectionSamples,
+		rules:             compiled.rules,
+		sequenceStates:    make(map[groupKey]*sequenceState),
+		sequenceAlerts:    make(map[groupKey]cooldownRecord),
+		maxSequenceStates: policy.MaxSequenceStates,
+		suppressed:        make(map[string]uint64),
+		groups:            make(map[groupKey]*groupState),
+		maxGroups:         policy.MaxDetectionGroups,
+		maxSamples:        policy.MaxDetectionSamples,
 	}, nil
 }
 
 // CompiledRules is a validated detection rule set that Install can apply
 // without failing.
 type CompiledRules struct {
-	rules []compiledRule
+	rules      []compiledRule
+	sequences  []compiledSequence
+	exceptions []policy.DetectionException
 }
 
-// Compile validates and compiles detection rules without changing an engine.
-func Compile(custom []policy.DetectionRule, disabled []string) (CompiledRules, error) {
-	rules, err := compileRules(effectiveRules(custom, disabled))
+// KnownRuleIDs returns every rule ID a policy can alert under from the
+// detection engine: all built-in profiles, custom rules, and sequences.
+func KnownRuleIDs(bundle policy.Bundle) map[string]struct{} {
+	known := make(map[string]struct{}, len(bundle.DetectionRules)+len(bundle.DetectionSequences))
+	for _, rule := range append(builtinRules(policy.BuiltinProfiles), bundle.DetectionRules...) {
+		known[rule.ID] = struct{}{}
+	}
+	for _, sequence := range bundle.DetectionSequences {
+		known[sequence.ID] = struct{}{}
+	}
+	return known
+}
+
+// Compile validates and compiles a policy's detection rules, built-in
+// profiles, and exceptions without changing an engine. An exception may name
+// a disabled rule or one from a profile that is not enabled, but not one that
+// is neither built in nor defined.
+func Compile(bundle policy.Bundle) (CompiledRules, error) {
+	custom, exceptions := bundle.DetectionRules, bundle.DetectionExceptions
+	rules, err := compileRules(effectiveRules(bundle.BuiltinProfiles, custom, bundle.DisabledRuleIDs))
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	return CompiledRules{rules: rules}, nil
+	sequences, err := compileSequences(bundle.DetectionSequences)
+	if err != nil {
+		return CompiledRules{}, err
+	}
+	// A sequence sharing a built-in rule's ID would take that rule's
+	// exceptions while both alert under the one ID.
+	builtin := make(map[string]struct{})
+	for _, rule := range builtinRules(policy.BuiltinProfiles) {
+		builtin[rule.ID] = struct{}{}
+	}
+	for _, sequence := range bundle.DetectionSequences {
+		if _, taken := builtin[sequence.ID]; taken {
+			return CompiledRules{}, fmt.Errorf("detection sequence %q uses the ID of a built-in rule", sequence.ID)
+		}
+	}
+	// definitions holds every rule an exception may name, enabled or not, so
+	// an exception is validated against its rule even while that rule is
+	// disabled or its profile is off, and cannot fail later when the rule is
+	// enabled.
+	definitions := make(map[string]policy.DetectionRule, len(custom))
+	for _, rule := range append(builtinRules(policy.BuiltinProfiles), custom...) {
+		definitions[rule.ID] = rule
+	}
+	activeSequences := make(map[string]*compiledSequence, len(sequences))
+	for index := range sequences {
+		activeSequences[sequences[index].sequence.ID] = &sequences[index]
+	}
+	active := make(map[string]*compiledRule, len(rules))
+	for index := range rules {
+		active[rules[index].rule.ID] = &rules[index]
+	}
+	for _, exception := range exceptions {
+		cidrs, err := parseCIDRs(exception.Match.DestinationCIDRs)
+		if err != nil {
+			return CompiledRules{}, fmt.Errorf("compile detection exception %q: %w", exception.ID, err)
+		}
+		for _, id := range exception.Rules {
+			if sequence, ok := activeSequences[id]; ok {
+				if err := policy.ValidateExceptionFor(sequence.sequence.FinalStepRule(), exception); err != nil {
+					return CompiledRules{}, err
+				}
+				sequence.exceptions = append(sequence.exceptions, compiledException{exception: exception, cidrs: cidrs})
+				continue
+			}
+			definition, ok := definitions[id]
+			if !ok && slices.Contains(bundle.DisabledRuleIDs, id) {
+				// A disabled custom rule or sequence was dropped in the
+				// merge; its exception stays dormant until it returns.
+				continue
+			}
+			if !ok {
+				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
+			}
+			if err := policy.ValidateExceptionFor(definition, exception); err != nil {
+				return CompiledRules{}, err
+			}
+			rule, ok := active[id]
+			if !ok {
+				continue
+			}
+			rule.exceptions = append(rule.exceptions, compiledException{exception: exception, cidrs: cidrs})
+		}
+	}
+	return CompiledRules{rules: rules, sequences: sequences, exceptions: slices.Clone(exceptions)}, nil
 }
 
 func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error {
-	compiled, err := Compile(custom, disabled)
+	compiled, err := Compile(policy.Bundle{DetectionRules: custom, DisabledRuleIDs: disabled})
 	if err != nil {
 		return err
 	}
@@ -95,11 +211,22 @@ func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error
 	return nil
 }
 
-// Install replaces the active rules and resets grouping state.
+// Install replaces the active rules and resets grouping state. Suppression
+// counts carry over for exceptions that remain installed.
 func (e *Engine) Install(compiled CompiledRules) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	suppressed := make(map[string]uint64, len(compiled.exceptions))
+	for _, exception := range compiled.exceptions {
+		suppressed[exception.ID] = e.suppressed[exception.ID]
+	}
 	e.rules = compiled.rules
+	e.sequences = compiled.sequences
+	e.sequenceStates = make(map[groupKey]*sequenceState)
+	e.sequenceAlerts = make(map[groupKey]cooldownRecord)
+	e.nextProgressPrune, e.nextCooldownPrune = time.Time{}, time.Time{}
+	e.exceptions = compiled.exceptions
+	e.suppressed = suppressed
 	e.groups = make(map[groupKey]*groupState)
 	e.groupKeys = nil
 	e.groupNext = 0
@@ -122,7 +249,11 @@ func (e *Engine) Evaluate(event Event) []Alert {
 		rule := &e.rules[index]
 		if !slices.Contains(rule.rule.Events, event.Name) ||
 			!matches(rule.rule.Match, rule.matchCIDRs, &matchContext) ||
-			(!emptyMatch(rule.rule.Exclude) && matches(rule.rule.Exclude, rule.excludeCIDRs, &matchContext)) {
+			(!rule.rule.Exclude.Empty() && matches(rule.rule.Exclude, rule.excludeCIDRs, &matchContext)) {
+			continue
+		}
+		if id, ok := rule.suppressingException(event.Timestamp, &matchContext); ok {
+			e.suppressed[id]++
 			continue
 		}
 
@@ -181,27 +312,75 @@ func (e *Engine) Evaluate(event Event) []Alert {
 		state.lastAlert = event.Timestamp
 		alerts = append(alerts, newAlert(rule, event, count))
 	}
-	return alerts
+	return append(alerts, e.evaluateSequences(event, &matchContext)...)
+}
+
+func (r *compiledRule) suppressingException(at time.Time, context *eventMatchContext) (string, bool) {
+	return suppressingException(r.exceptions, at, context)
+}
+
+// ExceptionStatus returns every installed exception, sorted by ID.
+func (e *Engine) ExceptionStatus(now time.Time) []ExceptionStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	statuses := make([]ExceptionStatus, 0, len(e.exceptions))
+	for _, exception := range e.exceptions {
+		statuses = append(statuses, ExceptionStatus{
+			ID: exception.ID, Expired: !exception.Active(now), Suppressed: e.suppressed[exception.ID],
+		})
+	}
+	slices.SortFunc(statuses, func(left, right ExceptionStatus) int { return strings.Compare(left.ID, right.ID) })
+	return statuses
+}
+
+// RecordFields returns the alert as structured record fields: the matched
+// event's fields plus the detection metadata.
+func (a Alert) RecordFields(sourceEvent string) map[string]any {
+	fields := cloneFields(a.Fields)
+	fields["source_event"] = sourceEvent
+	fields["event"] = "detection_alert"
+	fields["alert_id"] = a.ID
+	fields["detection_rule_id"] = a.RuleID
+	fields["severity"] = a.Severity
+	fields["detection_message"] = a.Message
+	fields["tags"] = slices.Clone(a.Tags)
+	fields["threshold_count"] = a.Count
+	if a.Window > 0 {
+		fields["threshold_window"] = a.Window.String()
+	}
+	for name, values := range map[string][]string{
+		"mitre_tactics": a.Tactics, "mitre_techniques": a.Techniques, "compliance": a.Compliance,
+	} {
+		if len(values) > 0 {
+			fields[name] = slices.Clone(values)
+		}
+	}
+	return fields
 }
 
 func newAlert(rule *compiledRule, event Event, count int) Alert {
 	return Alert{
-		RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
-		Tags: slices.Clone(rule.rule.Tags), Count: count, Window: rule.rule.Threshold.Within.Duration,
+		ID: rand.Text(), RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
+		Tags: slices.Clone(rule.rule.Tags), Tactics: slices.Clone(rule.rule.MITRE.Tactics),
+		Techniques: slices.Clone(rule.rule.MITRE.Techniques), Compliance: slices.Clone(rule.rule.Compliance),
+		Count: count, Window: rule.rule.Threshold.Within.Duration,
 		Timestamp: event.Timestamp, Fields: cloneFields(event.Fields),
 	}
 }
 
+// RuleCount returns the active detection rules and sequences.
 func (e *Engine) RuleCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.rules)
+	return len(e.rules) + len(e.sequences)
 }
 
+// StateCount returns the threshold groups and in-progress sequence keys the
+// engine holds.
 func (e *Engine) StateCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.groups)
+	return len(e.groups) + len(e.sequenceStates)
 }
 
 func (e *Engine) StateSampleCount() int {
@@ -308,7 +487,7 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchUint16Field(match.Ports, fields, "peer_port", "port") &&
 		matchUint16Field(match.LocalPorts, fields, "local_port") &&
 		matchCanonicalPathGlobs(match.ExecutableGlobs, stringField(fields, "exe"), boolField(fields, "path_truncated")) &&
-		len(match.CommandGlobs) == 0 &&
+		matchGlobs(match.CommandGlobs, commandLineField(fields)) &&
 		matchCanonicalPathGlobs(match.FilePathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchLiteralPathGlobs(match.UnixPathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchStrings(match.FileAccess, stringField(fields, "file_access")) &&
@@ -322,7 +501,57 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchStrings(match.KubernetesOwners, stringField(fields, "k8s_owner")) &&
 		matchStrings(match.KubernetesApps, stringField(fields, "k8s_app")) &&
 		matchStrings(match.LSMSources, stringField(fields, "lsm_source")) &&
-		matchStrings(match.LSMLabels, stringField(fields, "lsm_label"))
+		matchStrings(match.LSMLabels, stringField(fields, "lsm_label")) &&
+		matchStrings(match.Operations, stringField(fields, "operation")) &&
+		matchStrings(match.ExecSources, stringField(fields, "exec_source")) &&
+		matchStrings(match.MountFSTypes, stringField(fields, "mount_fstype")) &&
+		matchAnyListed(match.Capabilities, fields["requested_capabilities"]) &&
+		matchStrings(match.Changes, stringField(fields, "change"))
+}
+
+// matchAnyListed reports whether any of values appears in a list field, as a
+// live []string or an archived []any.
+func matchAnyListed(values []string, field any) bool {
+	if len(values) == 0 {
+		return true
+	}
+	switch items := field.(type) {
+	case []string:
+		for _, item := range items {
+			if slices.Contains(values, item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range items {
+			if text, ok := item.(string); ok && slices.Contains(values, text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandLineField joins the redacted command_line arguments with spaces. It
+// accepts the []string a live event carries and the []any an archived record
+// decodes to.
+func commandLineField(fields map[string]any) string {
+	switch args := fields["command_line"].(type) {
+	case []string:
+		return strings.Join(args, " ")
+	case []any:
+		parts := make([]string, 0, len(args))
+		for _, arg := range args {
+			text, ok := arg.(string)
+			if !ok {
+				return ""
+			}
+			parts = append(parts, text)
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
 }
 
 func matchStrings(values []string, candidate string) bool {
@@ -574,17 +803,6 @@ func makeGroupKey(ruleID string, fields []string, values map[string]any) groupKe
 	var key groupKey
 	copy(key[:], hash.Sum(nil))
 	return key
-}
-
-func emptyMatch(match policy.DetectionMatch) bool {
-	return len(match.Actions)+len(match.Directions)+len(match.Transports)+len(match.Protocols)+
-		len(match.UIDs)+len(match.Domains)+len(match.DomainSuffixes)+len(match.DestinationCIDRs)+
-		len(match.Ports)+len(match.LocalPorts)+len(match.ExecutableGlobs)+len(match.CommandGlobs)+
-		len(match.FilePathGlobs)+len(match.UnixPathGlobs)+
-		len(match.FileAccess)+len(match.CgroupPrefixes)+len(match.Services)+len(match.ContainerIDs)+
-		len(match.PodUIDs)+len(match.KubernetesNamespace)+len(match.KubernetesPods)+
-		len(match.KubernetesAccounts)+len(match.KubernetesOwners)+len(match.KubernetesApps)+
-		len(match.LSMSources)+len(match.LSMLabels) == 0
 }
 
 func cloneFields(fields map[string]any) map[string]any {

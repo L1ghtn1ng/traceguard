@@ -58,6 +58,13 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.SetHookHealthy("lsm-exec", true)
 	registry.SetKernelFeatures(map[string]bool{"enhanced_telemetry": true, "btf": false, "bpf_lsm": true})
 	registry.IncEBPFReadError()
+	registry.SetRingBufferStats(16777216, 4096, map[string]uint64{"dns": 3, "exec": 0})
+	registry.SetPolicyDigest("old")
+	registry.SetPolicyDigest("abc123")
+	registry.SetDetectionExceptions(1, 0, map[string]uint64{"removed": 4})
+	registry.SetDetectionExceptions(2, 1, map[string]uint64{"agent-imds": 3})
+	registry.IncFileIntegrityChange("modified")
+	registry.SetFileIntegrityStats(42, true, 2)
 
 	rendered := registry.Render()
 	checks := []string{
@@ -67,6 +74,19 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`# TYPE traceguard_policy_domains gauge`,
 		`traceguard_ebpf_attached_programs 14`,
 		`traceguard_ebpf_read_errors_total 1`,
+		`# TYPE traceguard_ringbuf_dropped_total counter`,
+		`traceguard_ringbuf_dropped_total{kind="dns"} 3`,
+		`traceguard_ringbuf_dropped_total{kind="exec"} 0`,
+		`traceguard_ringbuf_size_bytes 16777216`,
+		`traceguard_ringbuf_unread_bytes 4096`,
+		`traceguard_policy_info{sha256="abc123"} 1`,
+		`traceguard_detection_exceptions{state="active"} 2`,
+		`traceguard_detection_exceptions{state="expired"} 1`,
+		`traceguard_detection_suppressed_total{exception="agent-imds"} 3`,
+		`traceguard_file_integrity_changes_total{change="modified"} 1`,
+		`traceguard_file_integrity_files 42`,
+		`traceguard_file_integrity_truncated 1`,
+		`traceguard_file_integrity_dropped_checks_total 2`,
 		`traceguard_kernel_feature_enabled{feature="bpf_lsm"} 1`,
 		`traceguard_kernel_feature_enabled{feature="btf"} 0`,
 		`traceguard_kernel_feature_enabled{feature="enhanced_telemetry"} 1`,
@@ -113,6 +133,12 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		if !strings.Contains(rendered, check) {
 			t.Fatalf("Render() missing %q in %q", check, rendered)
 		}
+	}
+	if strings.Contains(rendered, `exception="removed"`) {
+		t.Fatal("Render() kept a removed exception's suppression counter")
+	}
+	if strings.Contains(rendered, `sha256="old"`) {
+		t.Fatal("Render() kept a replaced policy digest")
 	}
 }
 

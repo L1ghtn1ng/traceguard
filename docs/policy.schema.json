@@ -10,7 +10,7 @@
     "builtin_profiles": {
       "type": "array",
       "uniqueItems": true,
-      "items": {"const": "baseline"}
+      "items": {"enum": ["baseline", "runtime"]}
     },
     "disabled_rule_ids": {
       "type": "array",
@@ -28,6 +28,65 @@
       "type": "array",
       "maxItems": 256,
       "items": {"$ref": "#/$defs/detection"}
+    },
+    "detection_exceptions": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/detection_exception"}
+    },
+    "detection_sequences": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/detection_sequence"}
+    },
+    "responses": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "rules", "action", "duration"],
+        "properties": {
+          "id": {"$ref": "#/$defs/rule_id"},
+          "rules": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/rule_id"}},
+          "action": {"enum": ["block_peer", "freeze_cgroup"]},
+          "duration": {"$ref": "#/$defs/duration"}
+        }
+      }
+    },
+    "threat_intel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feeds": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "path", "type"],
+            "properties": {
+              "id": {"allOf": [{"$ref": "#/$defs/rule_id"}, {"maxLength": 46}]},
+              "path": {"type": "string", "pattern": "^/"},
+              "type": {"enum": ["domains", "addresses"]},
+              "severity": {"enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]},
+              "block": {"type": "boolean"},
+              "cooldown": {"$ref": "#/$defs/duration"}
+            }
+          }
+        }
+      }
+    },
+    "file_integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "exclude": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "hash": {"type": "boolean"},
+        "max_hash_bytes": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+        "rescan_interval": {"$ref": "#/$defs/duration"}
+      }
     }
   },
   "$defs": {
@@ -313,7 +372,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops"]
+            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops", "memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load", "io_uring_setup", "mount", "namespace_change", "privilege_change", "file_change", "file_integrity"]
           }
         },
         "match": {"$ref": "#/$defs/detection_match"},
@@ -352,7 +411,71 @@
           "type": "array",
           "maxItems": 16,
           "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "mitre": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tactics": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^TA[0-9]{4}$"}},
+            "techniques": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"}}
+          }
+        },
+        "compliance": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
         }
+      }
+    },
+    "detection_sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "key", "within", "steps", "message"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "enabled": {"type": "boolean"},
+        "severity": {"enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]},
+        "key": {"enum": ["process", "cgroup"]},
+        "within": {"$ref": "#/$defs/duration"},
+        "cooldown": {"$ref": "#/$defs/duration"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "tags": {"$ref": "#/$defs/detection/properties/tags"},
+        "mitre": {"$ref": "#/$defs/detection/properties/mitre"},
+        "compliance": {"$ref": "#/$defs/detection/properties/compliance"},
+        "steps": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["events"],
+            "properties": {
+              "events": {"$ref": "#/$defs/detection/properties/events"},
+              "match": {"$ref": "#/$defs/detection_match"},
+              "exclude": {"$ref": "#/$defs/detection_match"}
+            }
+          }
+        }
+      }
+    },
+    "detection_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "rules", "reason", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/rule_id"}
+        },
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S"},
+        "expires": {"type": "string", "format": "date-time"},
+        "match": {"allOf": [{"$ref": "#/$defs/detection_match"}, {"minProperties": 1}]}
       }
     },
     "detection_match": {
@@ -381,7 +504,25 @@
           "$ref": "#/$defs/string_list",
           "description": "Requested AF_UNIX socket paths: exact absolute or @abstract names, or /** subtrees; valid only with unix_blocked and unix_would_block."
         },
-        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}}
+        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}},
+        "command_globs": {
+          "$ref": "#/$defs/string_list",
+          "description": "Globs over the redacted exec command line joined with spaces; valid only with exec events."
+        },
+        "exec_sources": {"type": "array", "items": {"enum": ["path", "fd"]}, "description": "Valid only with exec events."},
+        "changes": {"type": "array", "items": {"enum": ["created", "modified", "deleted", "attributes"]}, "description": "Valid only with file_integrity events."},
+        "mount_fstypes": {"$ref": "#/$defs/string_list", "description": "Requested filesystem type; valid only with mount events."},
+        "capabilities": {
+          "type": "array",
+          "items": {"enum": ["chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid", "setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw", "ipc_lock", "ipc_owner", "sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice", "sys_resource", "sys_time", "sys_tty_config", "mknod", "lease", "audit_write", "audit_control", "setfcap"]},
+          "description": "Requested capset capabilities; valid only with privilege_change events."
+        },
+        "operations": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset", "unlink", "rmdir", "rename", "chmod", "chown", "truncate"]},
+          "description": "Event operation; valid only with ptrace, process_vm, module_load, namespace_change, privilege_change, and file_change events."
+        }
       }
     }
   }
