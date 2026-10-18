@@ -253,6 +253,75 @@ func TestManagerRequestErrorsDoNotExposeURLQuery(t *testing.T) {
 	}
 }
 
+func TestManagerSendsAuthorizationFromFile(t *testing.T) {
+	t.Parallel()
+	temp := t.TempDir()
+	authorizationPath := filepath.Join(temp, "policy-authorization")
+	if err := os.WriteFile(authorizationPath, []byte("Bearer file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		URL:               "https://policy.example/v1",
+		CachePath:         filepath.Join(temp, "cache.yaml"),
+		AuthorizationFile: authorizationPath,
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	manager.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got, want := request.Header.Get("Authorization"), "Bearer file-secret"; got != want {
+			t.Errorf("authorization = %q, want %q", got, want)
+		}
+		return response(http.StatusOK, "version: 1\n", nil), nil
+	})
+	if _, _, err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestManagerRejectsInvalidAuthorizationFile(t *testing.T) {
+	t.Parallel()
+	temp := t.TempDir()
+	authorizationPath := filepath.Join(temp, "policy-authorization")
+	if err := os.WriteFile(authorizationPath, []byte("Bearer file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readablePath := filepath.Join(temp, "readable-authorization")
+	if err := os.WriteFile(readablePath, []byte("Bearer file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(readablePath, 0o644); err != nil { //nolint:gosec // the test needs a world-readable file
+		t.Fatal(err)
+	}
+	for name, tt := range map[string]struct {
+		cfg  Config
+		want string
+	}{
+		"value and file": {
+			cfg:  Config{Authorization: "Bearer value", AuthorizationFile: authorizationPath},
+			want: "must not both be set",
+		},
+		"world readable": {
+			cfg:  Config{AuthorizationFile: readablePath},
+			want: "group or other",
+		},
+		"relative": {
+			cfg:  Config{AuthorizationFile: "policy-authorization"},
+			want: "must be absolute",
+		},
+	} {
+		tt.cfg.URL = "https://policy.example/v1"
+		tt.cfg.CachePath = filepath.Join(temp, "cache.yaml")
+		_, err := NewManager(tt.cfg)
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Fatalf("%s: NewManager() error = %v, want %q", name, err, tt.want)
+		}
+		if strings.Contains(err.Error(), "secret") {
+			t.Fatalf("%s: NewManager() error %q exposes the authorization value", name, err)
+		}
+	}
+}
+
 func response(status int, body string, headers map[string]string) *http.Response {
 	header := make(http.Header)
 	for key, value := range headers {

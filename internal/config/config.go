@@ -30,46 +30,48 @@ const (
 )
 
 type Config struct {
-	Block                    bool
-	DryRun                   bool
-	EmergencyAllow           bool
-	PinEBPF                  bool
-	Unpin                    bool
-	EBPFStats                bool
-	PolicyPath               string
-	PolicyURL                string
-	PolicyCachePath          string
-	PolicyRefreshInterval    time.Duration
-	PolicyAuthorization      string
-	PolicyCAPath             string
-	PolicyClientCert         string
-	PolicyClientKey          string
-	CgroupPath               string
-	LogPath                  string
-	LogFormat                string
-	MetricsAddr              string
-	EventArchivePath         string
-	EventExportURL           string
-	EventExportAuthorization string
-	EventExportSpool         bool
-	EventExportCAPath        string
-	EventExportClientCert    string
-	EventExportClientKey     string
-	EventSyslogURL           string
-	EventSyslogFacility      string
-	EventSyslogTag           string
-	EventSyslogTimeout       time.Duration
-	EventSyslogCAPath        string
-	ProcessCacheTTL          time.Duration
-	FileAudit                bool
-	KubernetesEnrich         bool
-	KubernetesAPIURL         string
-	KubernetesTokenPath      string
-	KubernetesCAPath         string
-	KubernetesNodeName       string
-	KubernetesPoll           time.Duration
-	PrintVersion             bool
-	Doctor                   bool
+	Block                        bool
+	DryRun                       bool
+	EmergencyAllow               bool
+	PinEBPF                      bool
+	Unpin                        bool
+	EBPFStats                    bool
+	PolicyPath                   string
+	PolicyURL                    string
+	PolicyCachePath              string
+	PolicyRefreshInterval        time.Duration
+	PolicyAuthorization          string
+	PolicyAuthorizationFile      string
+	PolicyCAPath                 string
+	PolicyClientCert             string
+	PolicyClientKey              string
+	CgroupPath                   string
+	LogPath                      string
+	LogFormat                    string
+	MetricsAddr                  string
+	EventArchivePath             string
+	EventExportURL               string
+	EventExportAuthorization     string
+	EventExportAuthorizationFile string
+	EventExportSpool             bool
+	EventExportCAPath            string
+	EventExportClientCert        string
+	EventExportClientKey         string
+	EventSyslogURL               string
+	EventSyslogFacility          string
+	EventSyslogTag               string
+	EventSyslogTimeout           time.Duration
+	EventSyslogCAPath            string
+	ProcessCacheTTL              time.Duration
+	FileAudit                    bool
+	KubernetesEnrich             bool
+	KubernetesAPIURL             string
+	KubernetesTokenPath          string
+	KubernetesCAPath             string
+	KubernetesNodeName           string
+	KubernetesPoll               time.Duration
+	PrintVersion                 bool
+	Doctor                       bool
 }
 
 func Parse() (Config, error) {
@@ -135,7 +137,8 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.PolicyURL, "policy-url", envString("TRACEGUARD_POLICY_URL", ""), "HTTPS URL that returns a strict YAML v1 base policy")
 	fs.StringVar(&cfg.PolicyCachePath, "policy-cache-path", envString("TRACEGUARD_POLICY_CACHE_PATH", defaultPolicyCachePath), "absolute path to the cached remote YAML policy")
 	fs.DurationVar(&cfg.PolicyRefreshInterval, "policy-refresh-interval", policyRefreshDefault, "remote YAML policy refresh interval")
-	fs.StringVar(&cfg.PolicyAuthorization, "policy-authorization", envString("TRACEGUARD_POLICY_AUTHORIZATION", ""), "optional Authorization header value for the remote YAML policy")
+	fs.StringVar(&cfg.PolicyAuthorization, "policy-authorization", envString("TRACEGUARD_POLICY_AUTHORIZATION", ""), "optional Authorization header value for the remote YAML policy; prefer TRACEGUARD_POLICY_AUTHORIZATION, as command-line values are visible in process listings")
+	fs.StringVar(&cfg.PolicyAuthorizationFile, "policy-authorization-file", envString("TRACEGUARD_POLICY_AUTHORIZATION_FILE", ""), "absolute path to a root-only file, such as ${CREDENTIALS_DIRECTORY}/policy-authorization, holding the Authorization header value for the remote YAML policy")
 	fs.StringVar(&cfg.PolicyCAPath, "policy-ca-path", envString("TRACEGUARD_POLICY_CA_PATH", ""), "path to an optional CA bundle for the remote YAML policy")
 	fs.StringVar(&cfg.PolicyClientCert, "policy-client-cert", envString("TRACEGUARD_POLICY_CLIENT_CERT", ""), "path to an optional client certificate for the remote YAML policy")
 	fs.StringVar(&cfg.PolicyClientKey, "policy-client-key", envString("TRACEGUARD_POLICY_CLIENT_KEY", ""), "path to an optional client key for the remote YAML policy")
@@ -145,7 +148,8 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.MetricsAddr, "metrics-addr", envString("TRACEGUARD_METRICS_ADDR", defaultMetricsAddr), "listen address for /metrics and /health, for example 127.0.0.1:9091")
 	fs.StringVar(&cfg.EventArchivePath, "event-archive-path", envString("TRACEGUARD_EVENT_ARCHIVE_PATH", ""), "absolute path to an optional JSONL event archive")
 	fs.StringVar(&cfg.EventExportURL, "event-export-url", envString("TRACEGUARD_EVENT_EXPORT_URL", ""), "HTTPS URL to receive JSON event POSTs")
-	fs.StringVar(&cfg.EventExportAuthorization, "event-export-authorization", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", ""), "optional Authorization header value for HTTPS event export, for example 'Bearer token'")
+	fs.StringVar(&cfg.EventExportAuthorization, "event-export-authorization", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", ""), "optional Authorization header value for HTTPS event export, for example 'Bearer token'; prefer TRACEGUARD_EVENT_EXPORT_AUTHORIZATION, as command-line values are visible in process listings")
+	fs.StringVar(&cfg.EventExportAuthorizationFile, "event-export-authorization-file", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE", ""), "absolute path to a root-only file, such as ${CREDENTIALS_DIRECTORY}/event-export-authorization, holding the Authorization header value for HTTPS event export")
 	fs.BoolVar(&cfg.EventExportSpool, "event-export-spool", exportSpoolDefault, "durably spool failed HTTPS export batches to disk for replay")
 	fs.StringVar(&cfg.EventExportCAPath, "event-export-ca-path", envString("TRACEGUARD_EVENT_EXPORT_CA_PATH", ""), "path to an optional CA bundle for the HTTPS event export endpoint")
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
@@ -209,6 +213,12 @@ func Parse() (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.PolicyCachePath) {
 		return Config{}, errors.New("policy-cache-path must be an absolute path")
+	}
+	if err := resolveAuthorizationFile("policy-authorization", cfg.PolicyAuthorization, &cfg.PolicyAuthorizationFile); err != nil {
+		return Config{}, err
+	}
+	if err := resolveAuthorizationFile("event-export-authorization", cfg.EventExportAuthorization, &cfg.EventExportAuthorizationFile); err != nil {
+		return Config{}, err
 	}
 	if cfg.PolicyCAPath != "" && !filepath.IsAbs(cfg.PolicyCAPath) {
 		return Config{}, errors.New("policy-ca-path must be an absolute path")

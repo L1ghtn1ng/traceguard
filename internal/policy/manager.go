@@ -21,14 +21,17 @@ import (
 const userAgent = "traceguard-policy/1"
 
 type Config struct {
-	Path           string
-	URL            string
-	CachePath      string
-	RefreshPeriod  time.Duration
-	Authorization  string
-	CAPath         string
-	ClientCertPath string
-	ClientKeyPath  string
+	Path          string
+	URL           string
+	CachePath     string
+	RefreshPeriod time.Duration
+	Authorization string
+	// AuthorizationFile names a root-only file holding the Authorization
+	// header value, read once by NewManager. It excludes Authorization.
+	AuthorizationFile string
+	CAPath            string
+	ClientCertPath    string
+	ClientKeyPath     string
 	// Validate, when set, checks the merged bundle before a fetched remote
 	// document replaces the cache, conditional-request state, or the last
 	// known good remote base.
@@ -86,9 +89,10 @@ func NewManager(cfg Config) (*Manager, error) {
 		}
 	}
 	for path, name := range map[string]string{
-		cfg.CAPath:         "policy ca path",
-		cfg.ClientCertPath: "policy client certificate path",
-		cfg.ClientKeyPath:  "policy client key path",
+		cfg.CAPath:            "policy ca path",
+		cfg.ClientCertPath:    "policy client certificate path",
+		cfg.ClientKeyPath:     "policy client key path",
+		cfg.AuthorizationFile: "policy authorization file",
 	} {
 		if strings.TrimSpace(path) != "" {
 			if err := validatePath(path, name); err != nil {
@@ -98,6 +102,18 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if (strings.TrimSpace(cfg.ClientCertPath) == "") != (strings.TrimSpace(cfg.ClientKeyPath) == "") {
 		return nil, errors.New("policy client certificate and key must be configured together")
+	}
+	if strings.TrimSpace(cfg.AuthorizationFile) != "" {
+		if strings.TrimSpace(cfg.Authorization) != "" {
+			return nil, errors.New("policy authorization and authorization file must not both be set")
+		}
+		if strings.TrimSpace(cfg.URL) != "" {
+			authorization, err := safefile.ReadSecret(cfg.AuthorizationFile)
+			if err != nil {
+				return nil, fmt.Errorf("read policy authorization file: %w", err)
+			}
+			cfg.Authorization = authorization
+		}
 	}
 	transport, err := newTransport(cfg)
 	if err != nil {

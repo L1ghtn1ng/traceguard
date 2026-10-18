@@ -6,6 +6,7 @@ import (
 	"net"
 	neturl "net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,11 +16,6 @@ const redactedValue = "[REDACTED]"
 
 const maxSyslogTagBytes = 48
 
-var secretValueFlags = map[string]struct{}{
-	"policy-authorization":       {},
-	"event-export-authorization": {},
-}
-
 var urlValueFlags = map[string]struct{}{
 	"policy-url":         {},
 	"event-export-url":   {},
@@ -27,8 +23,34 @@ var urlValueFlags = map[string]struct{}{
 	"kubernetes-api-url": {},
 }
 
-// RedactCommandLine returns a copy that is safe to include in telemetry. It
-// understands both "-flag value" and "-flag=value" forms used by flag.FlagSet.
+// sensitiveNamePattern matches flag, variable, header, and query parameter
+// names whose values commonly carry credentials.
+const sensitiveNamePattern = `password|passwd|secret|token|authorization|api[-_]?key|access[-_]?key|private[-_]?key|credential|cookie|signature`
+
+// shellWordPiece matches one quoted section or unquoted byte of a shell word,
+// so values such as 'a b' or a"b"c are redacted whole.
+const shellWordPiece = `'[^']*'|"(?:[^"\\]|\\.)*"|[^\s&;|'"]`
+
+var (
+	sensitiveName = regexp.MustCompile(`(?i)` + sensitiveNamePattern)
+	// Header values run to the end of the argument or quoted shell word;
+	// NAME=value and query parameter values end at an unquoted whitespace or
+	// separator. Flags inside shell strings take the next word unless it is
+	// another flag.
+	sensitiveHeader     = regexp.MustCompile(`(?i)([\w-]*(?:` + sensitiveNamePattern + `)[\w-]*\s*:\s*)[^'"]+`)
+	sensitiveAssignment = regexp.MustCompile(`(?i)([\w.-]*(?:` + sensitiveNamePattern + `)[\w.-]*\s*=\s*)(?:` + shellWordPiece + `)+`)
+	sensitiveShellFlag  = regexp.MustCompile(`(?i)((?:^|\s)--?[\w.-]*(?:` + sensitiveNamePattern + `)[\w.-]*\s+)` +
+		`(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^-\s&;|'"])(?:` + shellWordPiece + `)*`)
+	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@\s'"]+@`)
+)
+
+// RedactCommandLine returns a copy with credentials removed from TraceGuard
+// flags and from common credential forms in monitored command lines: values of
+// sensitive-named flags, NAME=value and Header: value pairs, sensitive query
+// parameters, and URL userinfo. It understands both "-flag value" and
+// "-flag=value" forms, as separate arguments or inside a shell string such as
+// the script of sh -c, where quoted values are redacted whole. Redaction is best effort: positional secrets and
+// unrecognized spellings are retained.
 func RedactCommandLine(args []string) []string {
 	redacted := make([]string, 0, len(args))
 	redactNext := false
@@ -46,12 +68,12 @@ func RedactCommandLine(args []string) []string {
 		}
 
 		name, value, hasValue := splitFlag(arg)
-		if _, sensitive := secretValueFlags[name]; sensitive {
+		if name != "" && sensitiveName.MatchString(name) {
 			if hasValue {
 				redacted = append(redacted, arg[:len(arg)-len(value)]+redactedValue)
 			} else {
 				redacted = append(redacted, arg)
-				redactNext = true
+				redactNext = !readsSecretFromStdin(name)
 			}
 			continue
 		}
@@ -64,9 +86,32 @@ func RedactCommandLine(args []string) []string {
 			}
 			continue
 		}
-		redacted = append(redacted, arg)
+		redacted = append(redacted, redactCommandLineValue(arg))
 	}
 	return redacted
+}
+
+func redactCommandLineValue(arg string) string {
+	if !strings.ContainsAny(arg, ":= \t\n") {
+		return arg
+	}
+	arg = urlUserinfo.ReplaceAllString(arg, "${1}"+redactedValue+"@")
+	arg = sensitiveHeader.ReplaceAllString(arg, "${1}"+redactedValue)
+	arg = sensitiveShellFlag.ReplaceAllStringFunc(arg, func(match string) string {
+		prefix := sensitiveShellFlag.FindStringSubmatch(match)[1]
+		if readsSecretFromStdin(strings.TrimLeft(strings.TrimSpace(prefix), "-")) {
+			return match
+		}
+		return prefix + redactedValue
+	})
+	return sensitiveAssignment.ReplaceAllString(arg, "${1}"+redactedValue)
+}
+
+// readsSecretFromStdin reports whether a sensitive-named flag, such as
+// docker login --password-stdin, takes no value because the secret is read
+// from standard input.
+func readsSecretFromStdin(name string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), "-stdin")
 }
 
 func splitFlag(arg string) (name, value string, hasValue bool) {

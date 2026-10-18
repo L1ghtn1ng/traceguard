@@ -275,6 +275,66 @@ detections:
       - persistence
       - configuration
 
+  # Inbound TCP connection events are emitted once per received SYN. ports
+  # matches the remote peer port, so the listening port is local_ports. This
+  # tightens baseline.inbound-ssh-bruteforce for an SSH service on port 2222.
+  - id: inbound-ssh-bruteforce-alt-port
+    severity: warning
+    events:
+      - connection
+    match:
+      directions:
+        - inbound
+      protocols:
+        - tcp
+      local_ports:
+        - 2222
+    threshold:
+      count: 10
+      within: 1m
+      group_by:
+        - peer
+    cooldown: 10m
+    message: a remote address opened repeated SSH connections
+    tags:
+      - ssh
+      - brute-force
+
+  # Bind decisions carry the requested local address and port.
+  - id: privileged-port-bind-denied
+    severity: warning
+    events:
+      - bind_blocked
+      - bind_would_block
+    match:
+      local_ports:
+        - 22
+        - 80
+        - 443
+    cooldown: 5m
+    message: a process attempted to bind a privileged service port
+    tags:
+      - persistence
+      - network
+
+  # Unix socket decisions carry the requested socket path. Abstract socket
+  # names start with @.
+  - id: container-runtime-socket-denied
+    severity: error
+    events:
+      - unix_blocked
+      - unix_would_block
+    match:
+      unix_path_globs:
+        - /var/run/docker.sock
+        - /run/docker.sock
+        - /run/containerd/**
+    cooldown: 5m
+    message: a process attempted to reach a container runtime socket
+    tags:
+      - privilege-escalation
+      - container
+
   # A disabled rule only needs an ID and enabled: false. This is useful when a
   # local overlay temporarily turns off a remote custom detection by ID.
   - id: experimental-disabled-rule

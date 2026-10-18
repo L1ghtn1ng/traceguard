@@ -4,6 +4,26 @@ All notable changes to TraceGuard are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added `-policy-authorization-file` / `TRACEGUARD_POLICY_AUTHORIZATION_FILE` and `-event-export-authorization-file` / `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE`, which read the `Authorization` header value from a root-only file so it stays out of the daemon's command line and environment. A leading `${CREDENTIALS_DIRECTORY}` is expanded for systemd `LoadCredential=`; group- or world-accessible files, symlinks, and setting both a value and a file are rejected.
+- Added the `local_ports` detection selector for the local port of connection, egress, bind, and sockops events, so rules can match connections to a listening port and bind decisions by port.
+- Added the `unix_path_globs` detection selector for `unix_blocked` and `unix_would_block` socket paths, including `@` abstract names.
+- Added the `peer` threshold group field as a clearer name for the peer address of inbound connections.
+- Added the `baseline.inbound-ssh-bruteforce` detection: 20 inbound TCP connection attempts to port 22 from one address within a minute.
+
+### Changed
+
+- Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
+
+### Security
+
+- Installed the packaged `/etc/traceguard/traceguard.env` as `0600 root:root`, and tightened an existing file to that mode on package install and upgrade, so authorization values stored there are not readable by other local users.
+- Closed a DNS policy bypass through IPv6 extension-header chains: a packet with six extension headers now reaches DNS policy, and in block mode a packet whose chain is too long to parse is dropped because it could hide DNS.
+- Broadened `current_cmdline` redaction of monitored processes to password-, token-, and key-style flags, `NAME=value` and `Header: value` arguments, query parameters, URL credentials, and the same forms inside `sh -c` strings, including quoted values and space-separated flags. Redaction is best effort, and `current_cmdline` should still be treated as sensitive.
+- Documented the environment file and the new authorization file inputs instead of command-line flags for `Authorization` values, which are visible in process listings.
+- Pinned GoReleaser in the release workflow to v2.18.3 instead of `latest`.
+
 ## [1.7.0] - 2026-10-17
 
 ### Upgrade notes

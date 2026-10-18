@@ -38,15 +38,18 @@ type Config struct {
 	DomainsPath         string
 	ExportURL           string
 	ExportAuthorization string
-	ExportSpool         bool
-	ExportCAPath        string
-	ExportClientCert    string
-	ExportClientKey     string
-	SyslogURL           string
-	SyslogFacility      string
-	SyslogTag           string
-	SyslogTimeout       time.Duration
-	SyslogCAPath        string
+	// ExportAuthorizationFile names a root-only file holding the
+	// Authorization header value. It excludes ExportAuthorization.
+	ExportAuthorizationFile string
+	ExportSpool             bool
+	ExportCAPath            string
+	ExportClientCert        string
+	ExportClientKey         string
+	SyslogURL               string
+	SyslogFacility          string
+	SyslogTag               string
+	SyslogTimeout           time.Duration
+	SyslogCAPath            string
 }
 
 type Recorder struct {

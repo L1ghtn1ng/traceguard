@@ -50,6 +50,20 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 	if parsed.User != nil {
 		return nil, errors.New("export url must not contain user credentials; use the authorization header or mTLS")
 	}
+	authorization := strings.TrimSpace(cfg.ExportAuthorization)
+	if strings.TrimSpace(cfg.ExportAuthorizationFile) != "" {
+		if authorization != "" {
+			return nil, errors.New("export authorization and authorization file must not both be set")
+		}
+		if !filepath.IsAbs(cfg.ExportAuthorizationFile) {
+			return nil, errors.New("export authorization file must be an absolute path")
+		}
+		secret, err := safefile.ReadSecret(cfg.ExportAuthorizationFile)
+		if err != nil {
+			return nil, fmt.Errorf("read export authorization file: %w", err)
+		}
+		authorization = strings.TrimSpace(secret)
+	}
 
 	// The recorder owns the export worker lifetime. Keep it alive through run
 	// context cancellation so events emitted during shutdown are drained by Close.
@@ -76,7 +90,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 			CheckRedirect: checkHTTPSRedirect,
 		},
 		target:        parsed.String(),
-		authorization: strings.TrimSpace(cfg.ExportAuthorization),
+		authorization: authorization,
 		queue:         make(chan json.RawMessage, exportQueueSize),
 		metrics:       metrics,
 		cancel:        cancel,

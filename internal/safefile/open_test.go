@@ -148,3 +148,86 @@ func TestWriteFileAtomicCleansRenameTarget(t *testing.T) {
 		t.Fatalf("content = %q, want payload", got)
 	}
 }
+
+func writeSecretFile(t *testing.T, payload string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "authorization")
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod secret file: %v", err)
+	}
+	return path
+}
+
+func TestReadSecretTrimsTrailingNewline(t *testing.T) {
+	t.Parallel()
+
+	for payload, want := range map[string]string{ //nolint:gosec // fake test credential
+		"Bearer file-token\n":   "Bearer file-token",
+		"Bearer file-token\r\n": "Bearer file-token",
+		"Bearer file-token":     "Bearer file-token",
+	} {
+		got, err := ReadSecret(writeSecretFile(t, payload, 0o400))
+		if err != nil {
+			t.Fatalf("ReadSecret(%q) error = %v", payload, err)
+		}
+		if got != want {
+			t.Fatalf("ReadSecret(%q) = %q, want %q", payload, got, want)
+		}
+	}
+}
+
+func TestReadSecretRejectsGroupOrOtherModes(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o620, 0o602, 0o644, 0o660} {
+		_, err := ReadSecret(writeSecretFile(t, "Bearer file-token\n", mode))
+		if err == nil || !strings.Contains(err.Error(), "group or other") {
+			t.Fatalf("ReadSecret mode %04o error = %v, want mode rejection", mode, err)
+		}
+		if strings.Contains(err.Error(), "file-token") {
+			t.Fatalf("ReadSecret mode %04o error %q exposes the secret", mode, err)
+		}
+	}
+}
+
+func TestReadSecretRejectsUnsafeContent(t *testing.T) {
+	t.Parallel()
+
+	for name, payload := range map[string]string{
+		"empty":     "",
+		"blank":     " \n",
+		"multiline": "Bearer one\nBearer two\n",
+		"nul":       "Bearer one\x00two",
+		"oversized": strings.Repeat("a", MaxSecretBytes+1),
+	} {
+		if _, err := ReadSecret(writeSecretFile(t, payload, 0o600)); err == nil {
+			t.Fatalf("ReadSecret accepted %s file", name)
+		}
+	}
+}
+
+func TestReadSecretRejectsSymlinksAndNonRegularFiles(t *testing.T) {
+	t.Parallel()
+
+	target := writeSecretFile(t, "Bearer file-token\n", 0o600)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	if _, err := ReadSecret(link); err == nil {
+		t.Fatal("ReadSecret followed symlink")
+	}
+	fifo := filepath.Join(t.TempDir(), "authorization.fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("Mkfifo returned error: %v", err)
+	}
+	if _, err := ReadSecret(fifo); err == nil || !strings.Contains(err.Error(), "not regular") {
+		t.Fatalf("ReadSecret FIFO error = %v, want non-regular file rejection", err)
+	}
+	if _, err := ReadSecret("authorization"); err == nil {
+		t.Fatal("ReadSecret accepted relative path")
+	}
+}

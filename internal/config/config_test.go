@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -683,6 +684,96 @@ func TestRedactCommandLineProtectsCredentialsAndURLQueries(t *testing.T) {
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("redacted command line %q missing %q", rendered, want)
+		}
+	}
+}
+
+func TestRedactCommandLineProtectsMonitoredProcessCredentials(t *testing.T) {
+	t.Parallel()
+
+	args := []string{
+		"/usr/bin/tool",
+		"--password", "flag-secret",
+		"--db-password=equals-secret",
+		"-token", "token-secret",
+		"--api-key=key-secret",
+		"-H", "Authorization: Bearer header-secret",
+		"--header=X-Auth-Token: header-token-secret",
+		"-H", "Cookie: session=cookie-secret; theme=cookie-tail",
+		"AWS_SECRET_ACCESS_KEY=env-secret",
+		"postgres://admin:dsn-secret@db.example/app",
+		"https://api.example/v1?user=alice&access_token=query-secret",
+		"sh", "-c", "curl -H 'Authorization: Basic shell-secret' https://bob:shell-dsn-secret@api.example",
+	}
+	got := RedactCommandLine(args)
+	rendered := strings.Join(got, " ")
+	for _, secret := range []string{
+		"flag-secret", "equals-secret", "token-secret", "key-secret", "header-secret", "header-token-secret",
+		"cookie-secret", "cookie-tail", "env-secret", "dsn-secret", "query-secret", "shell-secret", "shell-dsn-secret",
+	} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("redacted command line retained %q: %q", secret, rendered)
+		}
+	}
+	for _, want := range []string{
+		"--password " + redactedValue,
+		"--db-password=" + redactedValue,
+		"Authorization: " + redactedValue,
+		"AWS_SECRET_ACCESS_KEY=" + redactedValue,
+		"postgres://" + redactedValue + "@db.example/app",
+		"https://api.example/v1?user=alice&access_token=" + redactedValue,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("redacted command line %q missing %q", rendered, want)
+		}
+	}
+
+	plain := []string{
+		"/usr/bin/dig", "-p", "53", "--timeout=5", "example.com", "https://example.com/path?q=1", "/etc/passwd", "PATH=/usr/bin",
+		"sh", "-c", "dig -p 53 --timeout 5 example.com && echo done",
+	}
+	if got := RedactCommandLine(plain); !slices.Equal(got, plain) {
+		t.Fatalf("RedactCommandLine(%q) = %q, want unchanged", plain, got)
+	}
+}
+
+func TestRedactCommandLineKeepsArgumentAfterStdinSecretFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"docker", "login", "--password-stdin", "-u", "alice"},
+		{"docker", "login", "--password-stdin", "registry.example"},
+	} {
+		if got := RedactCommandLine(args); !slices.Equal(got, args) {
+			t.Errorf("RedactCommandLine(%q) = %q, want unchanged", args, got)
+		}
+	}
+	got := RedactCommandLine([]string{"docker", "login", "--password-stdin", "--password", "secret"})
+	if want := []string{"docker", "login", "--password-stdin", "--password", redactedValue}; !slices.Equal(got, want) {
+		t.Fatalf("RedactCommandLine() = %q, want %q", got, want)
+	}
+}
+
+func TestRedactCommandLineProtectsShellStringCredentials(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		script string
+		want   string
+	}{
+		{script: "PASSWORD='quoted secret' sleep 60", want: "PASSWORD=" + redactedValue + " sleep 60"},
+		{script: `TOKEN="double \"quoted\" secret"; run`, want: "TOKEN=" + redactedValue + "; run"},
+		{script: `API_KEY=mixed'quoted secret'tail run`, want: "API_KEY=" + redactedValue + " run"},
+		{script: "curl --password secret https://example.com", want: "curl --password " + redactedValue + " https://example.com"},
+		{script: "mysql -u app --db-password 'quoted secret' app", want: "mysql -u app --db-password " + redactedValue + " app"},
+		{script: "tool --token\tsecret|cat", want: "tool --token\t" + redactedValue + "|cat"},
+		{script: "docker login --password-stdin -u app", want: "docker login --password-stdin -u app"},
+		{script: "docker login --password-stdin registry.example", want: "docker login --password-stdin registry.example"},
+		{script: "docker login --password-stdin registry.example --token secret", want: "docker login --password-stdin registry.example --token " + redactedValue},
+	} {
+		got := RedactCommandLine([]string{"sh", "-c", test.script})
+		if got[2] != test.want {
+			t.Errorf("RedactCommandLine(sh -c %q) = %q, want %q", test.script, got[2], test.want)
 		}
 	}
 }

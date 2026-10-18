@@ -67,12 +67,22 @@ nfpms:
     section: admin
     priority: optional
     bindir: /usr/bin
+    # config|noreplace keeps an edited env file on upgrade with its old mode.
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+    archlinux:
+      scripts:
+        postupgrade: packaging/scripts/postinstall.sh
     contents:
       - src: packaging/systemd/traceguard.service
         dst: '{{ if eq .Format "deb" }}/lib/systemd/system/traceguard.service{{ else }}/usr/lib/systemd/system/traceguard.service{{ end }}'
       - src: packaging/default/traceguard.env
         dst: /etc/traceguard/traceguard.env
         type: config|noreplace
+        file_info:
+          mode: 0600
+          owner: root
+          group: root
       - src: README.md
         dst: /usr/share/doc/traceguard/README.md
       - src: examples/policy.yaml

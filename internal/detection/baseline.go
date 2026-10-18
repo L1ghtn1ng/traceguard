@@ -55,6 +55,27 @@ func BaselineRules() []policy.DetectionRule {
 			},
 		},
 		{
+			ID:       "baseline.inbound-ssh-bruteforce",
+			Enabled:  &enabled,
+			Severity: "warning",
+			Events:   []string{"connection"},
+			Match: policy.DetectionMatch{
+				Directions: []string{"inbound"},
+				Protocols:  []string{"tcp"},
+				LocalPorts: []uint16{22},
+			},
+			// Inbound TCP telemetry is one event per received SYN, so this
+			// counts connection attempts from one remote address.
+			Threshold: policy.Threshold{
+				Count:   20,
+				Within:  policy.Duration{Duration: time.Minute},
+				GroupBy: []string{"peer"},
+			},
+			Cooldown: policy.Duration{Duration: 10 * time.Minute},
+			Message:  "a remote address opened repeated SSH connections",
+			Tags:     []string{"baseline", "ssh", "brute-force", "credential-access"},
+		},
+		{
 			ID:       "baseline.policy-denial-burst",
 			Enabled:  &enabled,
 			Severity: "notice",
