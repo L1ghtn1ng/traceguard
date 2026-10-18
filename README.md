@@ -26,6 +26,7 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - support batched authenticated HTTPS export with durable retry spooling
 - export structured events to remote syslog over UDP, TCP, or TLS
 - support optional `Authorization` headers and mTLS for HTTPS event export
+- optionally send HTTPS export and syslog records as OCSF 1.3.0 events
 - optionally enrich pod-scoped events with Kubernetes namespace, pod, node, workload, service account, container, and image metadata
 - run a built-in environment doctor check before deployment
 - optionally pin eBPF maps, programs, and cgroup/tracepoint links across daemon restarts
@@ -81,6 +82,8 @@ The user-space service:
 - avoids shelling out or executing fetched content
 
 ## Requirements
+
+See [kernel support](docs/kernel-support.md) for what each feature needs from the kernel.
 
 - Linux 6.12 or newer with cgroup v2 mounted at `/sys/fs/cgroup`
 - eBPF support for cgroup egress and tracepoints
@@ -366,6 +369,36 @@ Remote syslog supports `syslog+udp://`, `syslog+tcp://`, and `syslog+tls://`
 URLs. It is best-effort and does not spool failed sends; use HTTPS export when
 durable retry is required.
 
+Send HTTPS export and syslog records as [OCSF](https://schema.ocsf.io/) 1.3.0
+events instead of the TraceGuard format:
+
+```bash
+sudo ./traceguard \
+  -event-export-url https://siem.example/ingest \
+  -event-schema ocsf
+```
+
+| TraceGuard events | OCSF class |
+| --- | --- |
+| `dns`, `blocked` | DNS Activity (4003) |
+| `connection`, `resolver*`, `egress_*`, `bind_*`, `unix_*`, `sockopt_*`, `tcp_sockops` | Network Activity (4001) |
+| `exec*`, `ptrace`, `process_vm`, `privilege_change`, `memfd_create`, `io_uring_setup`, `namespace_change` | Process Activity (1007) |
+| `module_load`, `bpf_prog_load` | Kernel Extension Activity (1002) |
+| `file_access`, `file_created`, `file_*block*`, `file_change`, `file_integrity`, `mount` | File System Activity (1001) |
+| `detection_alert` | Detection Finding (2004), with ATT&CK techniques and tactics in `attacks` |
+| Heartbeats and daemon status | Base Event (0) |
+
+Fields that map to an OCSF attribute move there: the acting process and user
+to `actor`, endpoints to `src_endpoint` and `dst_endpoint`, paths and digests
+to `file`, and enforcement outcomes to `action_id` and `disposition_id`. Every
+other field, including the TraceGuard `event` name, is kept under `unmapped`,
+so nothing is lost. An event over the 32 KiB record limit drops `unmapped` and
+records `unmapped.telemetry_truncated=true`. The local event archive and logs
+keep the TraceGuard format, which `-replay` reads.
+
+Amazon Security Lake accepts OCSF 1.3 or earlier, but as Apache Parquet objects
+per event class; send OCSF JSON through a collector that writes Parquet.
+
 Environment variables can be used instead of flags:
 
 - `TRACEGUARD_BLOCK`
@@ -412,6 +445,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_POLICY_SIGNING_KEY`
 - `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
 - `TRACEGUARD_SECURITY_EVENTS`
+- `TRACEGUARD_EVENT_SCHEMA`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -433,6 +467,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
 - security events enabled: `TRACEGUARD_SECURITY_EVENTS=true`
+- HTTPS export and syslog records in the TraceGuard format: `TRACEGUARD_EVENT_SCHEMA=traceguard`
 - connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
 - strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
 - remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set

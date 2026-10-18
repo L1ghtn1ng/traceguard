@@ -286,6 +286,9 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "file-audit", enabledDetail(cfg.FileAudit))
 	check(true, "selinux", selinuxStatus(env))
 	check(true, "apparmor", apparmorStatus(env))
+	for _, finding := range hostPosture(env.readFile, features) {
+		info(finding.level, finding.name, finding.detail)
+	}
 	if cfg.KubernetesEnrich {
 		parsed, err := url.Parse(cfg.KubernetesAPIURL)
 		check(err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil,

@@ -258,6 +258,7 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
+		"TRACEGUARD_EVENT_SCHEMA",
 	)
 
 	cfg, err := Parse()
@@ -287,6 +288,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if !cfg.SecurityEvents {
 		t.Fatal("SecurityEvents = false, want packaged default true")
+	}
+	if cfg.EventSchema != "traceguard" {
+		t.Fatalf("EventSchema = %q, want packaged default traceguard", cfg.EventSchema)
 	}
 	if cfg.KubernetesEnrich {
 		t.Fatal("KubernetesEnrich = true, want packaged default false")
@@ -731,6 +735,7 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
+		"TRACEGUARD_EVENT_SCHEMA",
 	} {
 		t.Setenv(key, "")
 	}

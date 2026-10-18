@@ -35,9 +35,14 @@ type exportSink struct {
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 	spool         *spoolStore
+	encode        recordEncoder
 }
 
 func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*exportSink, error) {
+	encode, err := newRecordEncoder(cfg.Schema)
+	if err != nil {
+		return nil, err
+	}
 	// Never include the raw URL or the *url.Error in returned errors: the
 	// query string may carry secrets such as access tokens.
 	parsed, err := neturl.Parse(strings.TrimSpace(cfg.ExportURL))
@@ -95,6 +100,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		metrics:       metrics,
 		cancel:        cancel,
 		spool:         spool,
+		encode:        encode,
 	}
 	sink.updateQueueDepth()
 	sink.updateSpoolFiles()
@@ -105,7 +111,7 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 }
 
 func (e *exportSink) Enqueue(entry record) {
-	payload, err := marshalSingleRecord(entry)
+	payload, err := e.encode(entry)
 	if err != nil {
 		e.metrics.IncEventExport("error")
 		return

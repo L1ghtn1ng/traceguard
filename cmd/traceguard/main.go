@@ -136,6 +136,7 @@ func run() (exitCode int) {
 		SyslogTag:               cfg.EventSyslogTag,
 		SyslogTimeout:           cfg.EventSyslogTimeout,
 		SyslogCAPath:            cfg.EventSyslogCAPath,
+		Schema:                  cfg.EventSchema,
 	})
 	if err != nil {
 		reportLoggerError(logger, "initialize event recorder", err)

@@ -50,6 +50,10 @@ type Config struct {
 	SyslogTag               string
 	SyslogTimeout           time.Duration
 	SyslogCAPath            string
+	// Schema selects the record format for HTTPS export and syslog:
+	// SchemaTraceGuard (the default) or SchemaOCSF. Local sinks always use
+	// the TraceGuard format.
+	Schema string
 }
 
 type Recorder struct {

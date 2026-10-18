@@ -1240,6 +1240,7 @@ trusted through its file ownership, and the signing key requires
 | `-strict-hooks` | `TRACEGUARD_STRICT_HOOKS` | Refuse to start when any optional eBPF hook cannot be loaded or attached, instead of running with reduced coverage. |
 | `-heartbeat-interval` | `TRACEGUARD_HEARTBEAT_INTERVAL` | Interval between heartbeat events; defaults to `5m`, and `0` disables them. |
 | `-connection-dedupe-window` | `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` | Window for suppressing repeated connection and TCP retransmit events from the same flow; defaults to `1m`, at most `1h`, and `0` disables suppression. |
+| `-event-schema` | `TRACEGUARD_EVENT_SCHEMA` | Record format for HTTPS export and syslog: `traceguard` (default) or `ocsf` for OCSF 1.3.0 events. |
 | `-security-events` | `TRACEGUARD_SECURITY_EVENTS` | Attach the observe-only [security event](#security-events) tracepoints; enabled by default. |
 | `-replay` | — | Evaluate detection rules over an absolute-path JSONL archive and exit. See [Testing rules with replay](#testing-rules-with-replay). |
 

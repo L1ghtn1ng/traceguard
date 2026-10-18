@@ -66,6 +66,7 @@ type Config struct {
 	EventSyslogTag               string
 	EventSyslogTimeout           time.Duration
 	EventSyslogCAPath            string
+	EventSchema                  string
 	ProcessCacheTTL              time.Duration
 	FileAudit                    bool
 	SecurityEvents               bool
@@ -185,6 +186,7 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventSyslogTag, "event-syslog-tag", envString("TRACEGUARD_EVENT_SYSLOG_TAG", defaultSyslogTag), "remote syslog app-name/tag")
 	fs.DurationVar(&cfg.EventSyslogTimeout, "event-syslog-timeout", syslogTimeoutDefault, "remote syslog connection/write timeout")
 	fs.StringVar(&cfg.EventSyslogCAPath, "event-syslog-ca-path", envString("TRACEGUARD_EVENT_SYSLOG_CA_PATH", ""), "path to an optional CA bundle for syslog+tls")
+	fs.StringVar(&cfg.EventSchema, "event-schema", envString("TRACEGUARD_EVENT_SCHEMA", "traceguard"), "record format for HTTPS export and syslog: traceguard or ocsf")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", processCacheDefault, "how long to cache process metadata from /proc")
 	fs.BoolVar(&cfg.FileAudit, "file-audit", fileAuditDefault, "emit file access audit events for open-style syscalls")
 	fs.BoolVar(&cfg.SecurityEvents, "security-events", securityEventsDefault, "emit memfd, ptrace, process memory, module load, BPF program load, io_uring, mount, namespace, and privilege-change events")
@@ -324,6 +326,15 @@ func Parse() (Config, error) {
 	}
 	if cfg.ProcessCacheTTL <= 0 {
 		return Config{}, errors.New("process-cache-ttl must be positive")
+	}
+	cfg.EventSchema = strings.ToLower(strings.TrimSpace(cfg.EventSchema))
+	if cfg.EventSchema == "" {
+		cfg.EventSchema = "traceguard"
+	}
+	switch cfg.EventSchema {
+	case "traceguard", "ocsf":
+	default:
+		return Config{}, errors.New("event-schema must be traceguard or ocsf")
 	}
 	if cfg.HeartbeatInterval < 0 {
 		return Config{}, errors.New("heartbeat-interval must not be negative")

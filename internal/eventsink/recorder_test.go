@@ -1587,7 +1587,7 @@ func TestUDPRecordIsAlwaysWithinPayloadBudget(t *testing.T) {
 			"cmdline": []string{strings.Repeat("\x00", maxRecordStringBytes)},
 		},
 	}
-	payload, err := marshalUDPRecord(entry, 2048)
+	payload, err := marshalUDPRecord(entry, 2048, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
@@ -1609,7 +1609,7 @@ func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
 		Message:   message,
 		Hostname:  "worker-1",
 		Fields:    map[string]any{"event": "exec"},
-	}, maxSyslogUDPPayloadBytes)
+	}, maxSyslogUDPPayloadBytes, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
@@ -1623,7 +1623,7 @@ func TestUDPRecordKeepsRecordsThatAlreadyFit(t *testing.T) {
 		Message:   strings.Repeat("\x00", maxRecordMessageBytes),
 		Hostname:  "worker-1",
 		Fields:    map[string]any{"event": "exec"},
-	}, 2048)
+	}, 2048, marshalSingleRecord)
 	if err != nil {
 		t.Fatalf("marshalUDPRecord returned error: %v", err)
 	}
