@@ -179,3 +179,34 @@ func TestDecodeFileChangeEvent(t *testing.T) {
 		t.Fatalf("file change event = %+v", event)
 	}
 }
+
+func TestDecodeKeepsSignedDirfdHighBit(t *testing.T) {
+	t.Parallel()
+
+	const atFDCWD = uint32(0xffffff9c)
+	for _, kind := range []uint32{EventFileChange, EventExec} {
+		var encoded bytes.Buffer
+		if err := binary.Write(&encoded, binary.NativeEndian, rawEvent{Kind: kind, FileMode: atFDCWD}); err != nil {
+			t.Fatal(err)
+		}
+		event, err := decodeEvent(encoded.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.FileMode != atFDCWD || event.PathTruncated {
+			t.Fatalf("kind %d: FileMode = %#x truncated %t, want AT_FDCWD kept intact", kind, event.FileMode, event.PathTruncated)
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := binary.Write(&encoded, binary.NativeEndian, rawEvent{Kind: EventFileBlocked, FileMode: pathTruncatedFlag | 0o4}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.FileMode != 0o4 || !event.PathTruncated {
+		t.Fatalf("enforcement event FileMode = %#x truncated %t, want the flag split out", event.FileMode, event.PathTruncated)
+	}
+}

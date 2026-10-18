@@ -177,7 +177,7 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		LocalAddress:     decodeAddress(raw.Family, raw.LocalAddr),
 		LocalPort:        raw.LocalPort,
 		FileFlags:        raw.FileFlags,
-		FileMode:         raw.FileMode &^ pathTruncatedFlag,
+		FileMode:         raw.FileMode,
 		PathTruncated:    isPathEnforcementEvent(raw.Kind) && raw.FileMode&pathTruncatedFlag != 0,
 		KernelUID:        raw.KernelUID,
 		CgroupID:         raw.CgroupID,
@@ -190,6 +190,12 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		EventSource:      eventSourceName(raw.EventSource),
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
+	}
+	// Only path enforcement events keep the truncation flag in file_mode;
+	// exec and file change events carry a signed dirfd there, whose high bit
+	// is set for AT_FDCWD.
+	if isPathEnforcementEvent(raw.Kind) {
+		event.FileMode &^= pathTruncatedFlag
 	}
 	if raw.Kind == EventExec {
 		event.Operation = raw.RuleID
