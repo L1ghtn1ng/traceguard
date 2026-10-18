@@ -198,8 +198,20 @@ func TestNotifyIntegrityReportsWatchedWrites(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "etc", "cron.d", "job"), []byte("* * * * * root x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	event := ebpf.Event{Kind: ebpf.EventFileAccess, PID: 1, Filename: "/etc/cron.d/job", FileFlags: 0x41}
-	notifyIntegrity(watcher, t.TempDir(), event, map[string]any{"program": "bash", "event": "file_created"})
+	// openat(dirfd 7, "job") resolves through the descriptor, not the
+	// working directory.
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "1", "fd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/cron.d", filepath.Join(procRoot, "1", "fd", "7")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/home/user", filepath.Join(procRoot, "1", "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	event := ebpf.Event{Kind: ebpf.EventFileAccess, PID: 1, Filename: "job", FileFlags: 0x41, Value: 7}
+	notifyIntegrity(watcher, procRoot, event, map[string]any{"program": "bash", "event": "file_created"})
 	readOnly := ebpf.Event{Kind: ebpf.EventFileAccess, PID: 1, Filename: "/etc/cron.d/job", FileFlags: 0}
 	notifyIntegrity(watcher, t.TempDir(), readOnly, map[string]any{"program": "cat"})
 

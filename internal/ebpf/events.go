@@ -142,7 +142,8 @@ type Event struct {
 	ArgsTruncated bool
 	// NewPath is a rename's destination, and Value a file change's argument:
 	// the mode for chmod, uid | gid << 32 for chown, the length for truncate,
-	// or the destination dirfd for rename.
+	// or the destination dirfd for rename. For a file audit event, Value is
+	// the open's dirfd.
 	NewPath string
 	Value   uint64
 }
@@ -203,6 +204,11 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		event.ArgsTruncated = raw.FileFlags&execArgvTruncated != 0
 		event.FileFlags &^= execArgvTruncated
 		event.Port = 0
+		return event, nil
+	}
+	if raw.Kind == EventFileAccess {
+		event.Value = raw.SocketCookie
+		event.SocketCookie = 0
 		return event, nil
 	}
 	if raw.Kind == EventFileChange {
