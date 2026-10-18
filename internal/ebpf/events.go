@@ -146,6 +146,9 @@ type Event struct {
 	// the open's dirfd.
 	NewPath string
 	Value   uint64
+	// MountNamespace is the mount namespace inode number of a file audit or
+	// file change event's process, captured in the kernel; 0 when unknown.
+	MountNamespace uint32
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -205,6 +208,11 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		event.FileFlags &^= execArgvTruncated
 		event.Port = 0
 		return event, nil
+	}
+	if raw.Kind == EventFileAccess || raw.Kind == EventFileChange {
+		// These events carry the mount namespace in addr instead.
+		event.MountNamespace = byteOrder.Uint32(raw.Addr[:4])
+		event.Address = ""
 	}
 	if raw.Kind == EventFileAccess {
 		event.Value = raw.SocketCookie

@@ -305,9 +305,22 @@ struct lsm_path_value {
 	char path[4096];
 };
 
+struct ns_common {
+	unsigned int inum;
+} __attribute__((preserve_access_index));
+
+struct mnt_namespace {
+	struct ns_common ns;
+} __attribute__((preserve_access_index));
+
+struct nsproxy {
+	struct mnt_namespace *mnt_ns;
+} __attribute__((preserve_access_index));
+
 struct task_struct {
 	struct task_struct *group_leader;
 	__u64 start_boottime;
+	struct nsproxy *nsproxy;
 } __attribute__((preserve_access_index));
 
 struct domain_key {
@@ -1201,6 +1214,35 @@ static __always_inline __u64 current_process_start_time(void)
 		return 0;
 	}
 	return start_boottime / NSEC_PER_USER_HZ_TICK;
+}
+
+/* current_mnt_ns returns the calling task's mount namespace inode number, or
+ * 0 when it cannot be read.
+ */
+static __always_inline __u32 current_mnt_ns(void)
+{
+	struct task_struct *task = bpf_get_current_task();
+	struct nsproxy *nsproxy = 0;
+	struct mnt_namespace *mnt_ns = 0;
+	unsigned int inum = 0;
+
+	if (!task || bpf_probe_read_kernel(&nsproxy, sizeof(nsproxy), __builtin_preserve_access_index(&task->nsproxy)) < 0 || !nsproxy ||
+		bpf_probe_read_kernel(&mnt_ns, sizeof(mnt_ns), __builtin_preserve_access_index(&nsproxy->mnt_ns)) < 0 || !mnt_ns ||
+		bpf_probe_read_kernel(&inum, sizeof(inum), __builtin_preserve_access_index(&mnt_ns->ns.inum)) < 0) {
+		return 0;
+	}
+	return inum;
+}
+
+/* set_event_mnt_ns records the mount namespace in addr, which file audit and
+ * file change events do not otherwise use, so a path can be checked against
+ * the right namespace after the process has exited.
+ */
+static __always_inline void set_event_mnt_ns(struct event *event)
+{
+	__u32 inum = current_mnt_ns();
+
+	__builtin_memcpy(event->addr, &inum, sizeof(inum));
 }
 
 static __always_inline int daemon_is_exempt(const struct settings *cfg)
@@ -3963,6 +4005,7 @@ static __always_inline int emit_file_access_event(__u64 dirfd, const char *filen
 	event->file_flags = (__u32)flags;
 	event->file_mode = (__u32)mode;
 	event->socket_cookie = (__u32)dirfd;
+	set_event_mnt_ns(event);
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
@@ -4187,6 +4230,7 @@ static __always_inline int emit_file_change(__u32 operation, __u64 dirfd, const 
 	event->file_mode = (__u32)dirfd;
 	event->file_flags = (__u32)flags;
 	event->socket_cookie = value;
+	set_event_mnt_ns(event);
 	bpf_probe_read_user_str(event->filename, sizeof(event->filename), path);
 	bpf_ringbuf_submit(event, 0);
 	return 0;
@@ -4217,6 +4261,7 @@ static __always_inline int emit_file_pair(const struct file_pair *pair)
 	event->file_mode = (__u32)pair->old_dirfd;
 	event->file_flags = pair->flags;
 	event->socket_cookie = (__u32)pair->new_dirfd;
+	set_event_mnt_ns(event);
 	bpf_probe_read_user_str(event->filename, sizeof(event->filename), pair->old_path);
 	bpf_probe_read_user_str(event->domain, sizeof(event->domain), pair->new_path);
 	bpf_ringbuf_submit(event, 0);

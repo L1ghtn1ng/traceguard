@@ -529,6 +529,7 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	raw.FileFlags = 0x40
 	raw.FileMode = 0o600
 	raw.SocketCookie = 7
+	binary.NativeEndian.PutUint32(raw.Addr[:4], 4026531841)
 	copy(raw.Comm[:], "cat")
 	copy(raw.Filename[:], "/etc/passwd")
 
@@ -555,6 +556,9 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	}
 	if event.Value != 7 || event.SocketCookie != 0 {
 		t.Fatalf("Value = %d SocketCookie = %d, want the dirfd in Value", event.Value, event.SocketCookie)
+	}
+	if event.MountNamespace != 4026531841 || event.Address != "" {
+		t.Fatalf("MountNamespace = %d Address = %q, want the namespace from addr", event.MountNamespace, event.Address)
 	}
 }
 

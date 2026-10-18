@@ -159,17 +159,19 @@ func (s scanner) scanTree(path string, subtree bool, result *scanResult) bool {
 	return err == nil && s.withinLimit(result)
 }
 
+// withinLimit reports whether the scan has not had to drop an entry.
 func (s scanner) withinLimit(result *scanResult) bool {
-	if len(result.states) >= MaxFiles {
-		result.truncated = true
-		return false
-	}
-	return true
+	return !result.truncated
 }
 
 // record stores path's state, or marks it unreadable when it exists but
-// cannot be read.
+// cannot be read. An entry beyond MaxFiles truncates the scan; a watch with
+// exactly MaxFiles entries is complete.
 func (s scanner) record(path string, result *scanResult) {
+	if _, seen := result.states[path]; !seen && len(result.states) >= MaxFiles {
+		result.truncated = true
+		return
+	}
 	state, err := s.stat(path)
 	switch {
 	case err == nil:
