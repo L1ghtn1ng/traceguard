@@ -137,6 +137,14 @@ func Convert(record Record) map[string]any {
 	if _, ok := event["action_id"]; ok {
 		metadata["profiles"] = []string{"security_control"}
 	}
+	// These classes require an actor. When the record has none, as for a
+	// periodic file integrity rescan, it is present but empty: unknown.
+	switch class {
+	case ClassFileSystemActivity, ClassProcessActivity, ClassKernelExtensionActivity:
+		if _, ok := event["actor"]; !ok {
+			event["actor"] = map[string]any{}
+		}
+	}
 	category := map[int]int{
 		ClassFileSystemActivity: categorySystem, ClassKernelExtensionActivity: categorySystem,
 		ClassProcessActivity: categorySystem, ClassDetectionFinding: categoryFindings,
@@ -195,6 +203,8 @@ func classify(name string, c *converter) (int, int) {
 			return ClassFileSystemActivity, 4 // Delete
 		case "rename":
 			return ClassFileSystemActivity, 5 // Rename
+		case "link", "symlink":
+			return ClassFileSystemActivity, 1 // Create
 		case "truncate":
 			return ClassFileSystemActivity, 3 // Update
 		default:
@@ -229,8 +239,11 @@ func severityID(level string) int {
 	}
 }
 
-// mapActor fills actor.process and actor.user from event-time identity. A
+// mapActor fills actor.process and actor.user from event-time identity, or
+// from the socket cache's cached_* identity when that attributed the event. A
 // file integrity change carries its triggering process as actor_* fields.
+// current_exe is read from /proc later and may name a different binary, so it
+// stays unmapped.
 func mapActor(event map[string]any, c *converter) {
 	prefix := ""
 	if _, ok := c.fields["pid"]; !ok {
@@ -242,15 +255,21 @@ func mapActor(event map[string]any, c *converter) {
 	if pid, ok := c.take(prefix + "pid"); ok {
 		process["pid"] = pid
 	}
-	if name := c.text(prefix + "program"); name != "" {
+	name := c.text(prefix + "program")
+	if name == "" {
+		name = c.text("cached_program")
+	}
+	if name != "" {
 		process["name"] = name
 	}
-	if exe := c.text(prefix + "current_exe"); exe != "" {
-		process["file"] = fileObject(exe, 1)
-	}
 	actor := map[string]any{}
-	if uid, ok := c.take(prefix + "kernel_uid"); ok {
+	uid, ok := c.take(prefix + "kernel_uid")
+	if ok {
 		c.take(prefix + "uid")
+	} else {
+		uid, ok = c.take("cached_uid")
+	}
+	if ok {
 		actor["user"] = map[string]any{"uid": fmt.Sprint(uid)}
 	}
 	if len(process) > 0 {
@@ -298,20 +317,33 @@ func mapNetwork(event map[string]any, c *converter) {
 	localAddress, _ := c.take("local_address")
 	localPort, _ := c.take("local_port")
 	peer, local := endpoint(peerAddress, peerPort), endpoint(localAddress, localPort)
+	// An AF_UNIX decision names its socket path, its only endpoint.
+	if path := c.text("path"); path != "" {
+		peer["name"] = path
+	}
 	info := map[string]any{}
 	if protocol := c.text("socket_protocol"); protocol != "" {
 		info["protocol_name"] = protocol
 	}
+	source, destination := local, peer
 	switch c.text("direction") {
 	case "inbound":
-		info["direction_id"] = 1
-		event["src_endpoint"], event["dst_endpoint"] = peer, local
+		info["direction_id"] = 1 // Inbound
+		source, destination = peer, local
 	case "outbound":
-		info["direction_id"] = 2
-		event["src_endpoint"], event["dst_endpoint"] = local, peer
+		info["direction_id"] = 2 // Outbound
 	default:
-		event["src_endpoint"], event["dst_endpoint"] = local, peer
+		if len(info) > 0 {
+			info["direction_id"] = 0 // Unknown
+		}
 	}
+	// dst_endpoint is required, so it is written even when the record has
+	// no peer, as for a socket option; the optional src_endpoint only when
+	// the record describes it.
+	if len(source) > 0 {
+		event["src_endpoint"] = source
+	}
+	event["dst_endpoint"] = destination
 	if len(info) > 0 {
 		event["connection_info"] = info
 	}
@@ -369,10 +401,15 @@ func mapFile(event map[string]any, name string, c *converter) {
 			fileType = c.peek("previous_file_type")
 		}
 		file = fileObject(c.text("path"), fileTypeIDs[fileType])
-		if digest := c.text("sha256"); digest != "" {
+		// A deletion describes the file as it was.
+		state := ""
+		if _, current := c.fields["file_type"]; !current {
+			state = "previous_"
+		}
+		if digest := c.text(state + "sha256"); digest != "" {
 			file["hashes"] = []map[string]any{{"algorithm_id": 3, "algorithm": "SHA-256", "value": digest}}
 		}
-		if size, ok := c.take("size"); ok {
+		if size, ok := c.take(state + "size"); ok {
 			file["size"] = size
 		}
 	case "mount":

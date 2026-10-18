@@ -16,7 +16,7 @@ import (
 )
 
 // File change operation codes mirror FILE_CHANGE_* in traceguard.c.
-var fileChangeOperations = map[uint32]string{0: "unlink", 1: "rename", 2: "chmod", 3: "chown", 4: "truncate"}
+var fileChangeOperations = map[uint32]string{0: "unlink", 1: "rename", 2: "chmod", 3: "chown", 4: "truncate", 5: "link", 6: "symlink"}
 
 const (
 	atFDCWD     = 0xffffff9c // AT_FDCWD as the unsigned dirfd field carries it
@@ -39,7 +39,7 @@ func appendFileChangeFields(fields map[string]any, event ebpf.Event) {
 		fields["requested_flags"] = event.FileFlags
 	}
 	switch operation {
-	case "rename":
+	case "rename", "link", "symlink":
 		fields["new_path"] = event.NewPath
 	case "chmod":
 		fields["requested_mode"] = fmt.Sprintf("%04o", event.Value&0o7777)
@@ -101,6 +101,10 @@ var integrityActorFields = []string{
 // notifyIntegrity queues integrity checks for the files an audit or change
 // event may have modified.
 func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fields map[string]any) {
+	// Most hosts watch nothing, so do no /proc lookups for them.
+	if !watcher.Enabled() {
+		return
+	}
 	var paths []string
 	switch event.Kind {
 	case ebpf.EventFileAccess:
@@ -109,28 +113,25 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 		}
 		paths = append(paths, event.Filename)
 	case ebpf.EventFileChange:
-		paths = append(paths, event.Filename)
+		// A link or symlink changes only the path it creates; a symlink's
+		// first path is just its target text.
+		if operation := fileChangeOperations[event.Operation]; operation != "link" && operation != "symlink" {
+			paths = append(paths, event.Filename)
+		} else {
+			paths = append(paths, "")
+		}
 		if event.NewPath != "" {
 			paths = append(paths, event.NewPath)
 		}
 	default:
 		return
 	}
-	if !sharesMountNamespace(procRoot, event.PID) {
-		// The paths name files in the process's own mount namespace, such
-		// as a container's /etc, not the host files that are watched.
-		return
-	}
-	actor := fim.Actor{}
-	for _, name := range integrityActorFields {
-		if value, ok := fields[name]; ok {
-			actor["actor_"+name] = value
-		}
-	}
+	var watched []string
 	for index, requested := range paths {
 		dirfd := event.FileMode
 		if index == 1 {
-			// A rename's destination is relative to its new dirfd.
+			// The created path of a rename, link, or symlink is relative
+			// to its new dirfd.
 			dirfd = uint32(event.Value) //nolint:gosec // the low word is the dirfd
 		}
 		if event.Kind == ebpf.EventFileAccess {
@@ -140,8 +141,22 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 		}
 		path, ok := resolveRequestedPath(procRoot, event.PID, dirfd, requested)
 		if ok && watcher.Watched(path) {
-			watcher.Notify(path, actor)
+			watched = append(watched, path)
 		}
+	}
+	// The paths name files in the process's own mount namespace, such as a
+	// container's /etc, not the host files that are watched.
+	if len(watched) == 0 || !sharesMountNamespace(procRoot, event.PID) {
+		return
+	}
+	actor := fim.Actor{}
+	for _, name := range integrityActorFields {
+		if value, ok := fields[name]; ok {
+			actor["actor_"+name] = value
+		}
+	}
+	for _, path := range watched {
+		watcher.Notify(path, actor)
 	}
 }
 

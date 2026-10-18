@@ -1048,7 +1048,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 		t.Fatalf("symlink spool directory: %v", err)
 	}
 
-	_, err := newSpoolStore(link)
+	_, err := newSpoolStore(link, SchemaTraceGuard)
 	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
 		t.Fatalf("newSpoolStore error = %v, want symlink traversal rejection", err)
 	}
@@ -1057,7 +1057,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 func TestSpoolStoreRejectsOversizedPayload(t *testing.T) {
 	t.Parallel()
 
-	store, err := newSpoolStore(t.TempDir())
+	store, err := newSpoolStore(t.TempDir(), SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestSpoolStoreRejectsByteCapacityExceeded(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	store, err := newSpoolStore(dir)
+	store, err := newSpoolStore(dir, SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
@@ -1561,6 +1561,30 @@ func TestFileAuditFingerprintUsesFixedDigestAndRequestedPath(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("distinct requested paths produced the same file-audit fingerprint")
+	}
+}
+
+func TestFileAuditFingerprintSeparatesFileChangeRequests(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]any{"event": "file_change", "requested_path": "/etc/hosts", "program": "sh"}
+	seen := map[recordFingerprint]string{}
+	for name, extra := range map[string]map[string]any{
+		"unlink":       {"operation": "unlink"},
+		"chmod 0644":   {"operation": "chmod", "requested_mode": "0644"},
+		"chmod 4755":   {"operation": "chmod", "requested_mode": "4755"},
+		"rename":       {"operation": "rename", "new_path": "/etc/hosts.bak"},
+		"rename other": {"operation": "rename", "new_path": "/tmp/x"},
+		"chown":        {"operation": "chown", "requested_uid": uint32(0)},
+		"truncate":     {"operation": "truncate", "truncate_length": uint64(0)},
+	} {
+		fields := maps.Clone(base)
+		maps.Copy(fields, extra)
+		fingerprint := fingerprintFileAuditRecord("file_change", fields)
+		if other, ok := seen[fingerprint]; ok {
+			t.Errorf("%s and %s share a fingerprint, so one would be suppressed", name, other)
+		}
+		seen[fingerprint] = name
 	}
 }
 

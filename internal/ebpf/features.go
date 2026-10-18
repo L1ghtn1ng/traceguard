@@ -120,6 +120,7 @@ func (f KernelFeatures) FeatureGates() map[string]bool {
 		"btf":                  f.BTFAvailable,
 		"bpf_lsm":              f.BPFLSMAvailable,
 		"lsm_program_type":     f.LSMProgramType,
+		"task_storage":         f.TaskStorage,
 		"enhanced_telemetry":   f.EnhancedTelemetry,
 	}
 }

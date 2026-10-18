@@ -951,6 +951,14 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 				return fmt.Errorf("operation %q is not carried by events %v", operation, events)
 			}
 		}
+		// Every listed event must be able to match, or part of the rule
+		// silently never fires.
+		for _, event := range events {
+			carried := SecurityEventOperations[event]
+			if !slices.ContainsFunc(match.Operations, func(operation string) bool { return slices.Contains(carried, operation) }) {
+				return fmt.Errorf("event %q carries none of operations %v", event, match.Operations)
+			}
+		}
 	}
 	return nil
 }
@@ -1030,7 +1038,7 @@ var SecurityEventOperations = map[string][]string{
 	"module_load":      {"init_module", "finit_module"},
 	"namespace_change": {"setns", "unshare"},
 	"privilege_change": {"setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"},
-	"file_change":      {"unlink", "rmdir", "rename", "chmod", "chown", "truncate"},
+	"file_change":      {"unlink", "rmdir", "rename", "link", "symlink", "chmod", "chown", "truncate"},
 }
 
 var supportedGroupFields = []string{

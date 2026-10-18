@@ -51,6 +51,17 @@ func TestRunEvaluatesArchivedEventsWithBaseline(t *testing.T) {
 	if record["event"] != "detection_alert" || record["source_event"] != "connection" || record["timestamp"] != "2026-10-18T10:00:01Z" {
 		t.Fatalf("alert record = %v", record)
 	}
+	// The same archive replays to the same alert IDs.
+	var again bytes.Buffer
+	if _, err := Run(Config{ArchivePath: writeFile(t, "events.jsonl", archive)}, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.String() != alerts.String() {
+		t.Fatalf("replays differ:\n%s\n%s", alerts.String(), again.String())
+	}
+	if id, _ := record["alert_id"].(string); len(id) != 26 {
+		t.Fatalf("alert_id = %v, want a 26-character ID", record["alert_id"])
+	}
 }
 
 func TestRunAppliesPolicyRulesAndExceptions(t *testing.T) {
