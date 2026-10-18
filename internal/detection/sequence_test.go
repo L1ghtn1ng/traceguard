@@ -242,3 +242,40 @@ func TestSequenceIDsAndDisabledExceptions(t *testing.T) {
 		t.Fatalf("StateCount = %d, want the in-progress sequence counted", got)
 	}
 }
+
+func TestSequencesSkipEventsNoStepUses(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	if _, used := engine.sequences[0].events["file_access"]; used {
+		t.Fatal("file_access listed as a step event")
+	}
+	for _, name := range []string{"exec", "connection"} {
+		if _, used := engine.sequences[0].events[name]; !used {
+			t.Fatalf("%s missing from the step events", name)
+		}
+	}
+}
+
+func TestFullSequenceTablePrunesOnlyWhenSomethingCanExpire(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	engine.maxSequenceStates = 2
+	for pid := range uint32(2) {
+		engine.Evaluate(sequenceEvent(1, "exec", pid+10, 1, shellExec))
+	}
+	engine.Evaluate(sequenceEvent(2, "exec", 99, 1, shellExec))
+	if next := engine.nextProgressPrune; !next.Equal(time.Unix(1, 0).Add(time.Minute)) {
+		t.Fatalf("next prune = %v, want when the oldest key expires", next)
+	}
+	// Before then, a full table is not walked again; after, it makes room.
+	engine.Evaluate(sequenceEvent(30, "exec", 98, 1, shellExec))
+	if len(engine.sequenceStates) != 2 {
+		t.Fatalf("states = %d, want the full table unchanged", len(engine.sequenceStates))
+	}
+	engine.Evaluate(sequenceEvent(62, "exec", 97, 1, shellExec))
+	if _, ok := sequenceKey("shell-then-egress", policy.SequenceKeyProcess, sequenceEvent(62, "exec", 97, 1, nil).Fields); !ok || len(engine.sequenceStates) != 1 {
+		t.Fatalf("states after expiry = %d, want only the new key", len(engine.sequenceStates))
+	}
+}

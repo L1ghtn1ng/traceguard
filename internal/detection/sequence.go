@@ -16,6 +16,9 @@ type compiledSequence struct {
 	sequence   policy.DetectionSequence
 	steps      []compiledStep
 	exceptions []compiledException
+	// events holds every event name a step can match, so other events
+	// skip the sequence before any key is hashed.
+	events map[string]struct{}
 }
 
 type compiledStep struct {
@@ -75,7 +78,13 @@ func compileSequences(sequences []policy.DetectionSequence) ([]compiledSequence,
 			}
 			steps = append(steps, compiledStep{step: step, matchCIDRs: matchCIDRs, excludeCIDRs: excludeCIDRs})
 		}
-		compiled = append(compiled, compiledSequence{sequence: sequence, steps: steps})
+		events := make(map[string]struct{})
+		for _, step := range sequence.Steps {
+			for _, name := range step.Events {
+				events[name] = struct{}{}
+			}
+		}
+		compiled = append(compiled, compiledSequence{sequence: sequence, steps: steps, events: events})
 	}
 	return compiled, nil
 }
@@ -127,6 +136,9 @@ func (e *Engine) evaluateSequences(event Event, context *eventMatchContext) []Al
 	var alerts []Alert
 	for index := range e.sequences {
 		sequence := &e.sequences[index]
+		if _, used := sequence.events[event.Name]; !used {
+			continue
+		}
 		key, ok := sequenceKey(sequence.sequence.ID, sequence.sequence.Key, event.Fields)
 		if !ok {
 			continue
@@ -192,13 +204,17 @@ func (e *Engine) advanceSequence(sequence *compiledSequence, key groupKey, event
 		}
 		if state == nil {
 			if len(e.sequenceStates) >= e.maxSequenceStates {
-				e.pruneSequenceStates(event.Timestamp)
+				e.pruneSequenceProgress(event.Timestamp)
 				if len(e.sequenceStates) >= e.maxSequenceStates {
 					continue
 				}
 			}
 			state = &sequenceState{window: window, partial: make([]partialMatch, final)}
 			e.sequenceStates[key] = state
+			// A new key may expire before every key the last prune kept.
+			if expiry := event.Timestamp.Add(window); !e.nextProgressPrune.IsZero() && expiry.Before(e.nextProgressPrune) {
+				e.nextProgressPrune = expiry
+			}
 		}
 		if current := state.partial[step]; !current.ok || !candidate.started.Before(current.started) {
 			state.partial[step] = candidate
@@ -211,7 +227,7 @@ func (e *Engine) advanceSequence(sequence *compiledSequence, key groupKey, event
 // after pruning, the one that expires soonest makes room.
 func (e *Engine) recordSequenceAlert(key groupKey, record cooldownRecord) {
 	if _, ok := e.sequenceAlerts[key]; !ok && len(e.sequenceAlerts) >= e.maxSequenceStates {
-		e.pruneSequenceStates(record.at)
+		e.pruneSequenceCooldowns(record.at)
 		if len(e.sequenceAlerts) >= e.maxSequenceStates {
 			var soonest groupKey
 			var soonestUntil time.Time
@@ -224,21 +240,58 @@ func (e *Engine) recordSequenceAlert(key groupKey, record cooldownRecord) {
 		}
 	}
 	e.sequenceAlerts[key] = record
+	if !e.nextCooldownPrune.IsZero() && record.until().Before(e.nextCooldownPrune) {
+		e.nextCooldownPrune = record.until()
+	}
 }
 
 // pruneSequenceStates drops partial matches past their own sequence's window
 // and cooldown records past their own cooldown.
 func (e *Engine) pruneSequenceStates(now time.Time) {
+	e.nextProgressPrune, e.nextCooldownPrune = time.Time{}, time.Time{}
+	e.pruneSequenceProgress(now)
+	e.pruneSequenceCooldowns(now)
+}
+
+// pruneSequenceProgress drops expired partial matches. Until the earliest
+// remaining one can expire, a full table has nothing to drop, so later calls
+// return at once instead of walking every key for each matching event.
+func (e *Engine) pruneSequenceProgress(now time.Time) {
+	if now.Before(e.nextProgressPrune) {
+		return
+	}
+	var next time.Time
 	for key, state := range e.sequenceStates {
 		if !state.expire(now) {
 			delete(e.sequenceStates, key)
+			continue
+		}
+		for _, partial := range state.partial {
+			if expiry := partial.started.Add(state.window); partial.ok && (next.IsZero() || expiry.Before(next)) {
+				next = expiry
+			}
 		}
 	}
+	e.nextProgressPrune = next
+}
+
+// pruneSequenceCooldowns drops ended cooldown records, skipping the walk
+// until the earliest remaining one ends.
+func (e *Engine) pruneSequenceCooldowns(now time.Time) {
+	if now.Before(e.nextCooldownPrune) {
+		return
+	}
+	var next time.Time
 	for key, record := range e.sequenceAlerts {
 		if !now.Before(record.until()) {
 			delete(e.sequenceAlerts, key)
+			continue
+		}
+		if next.IsZero() || record.until().Before(next) {
+			next = record.until()
 		}
 	}
+	e.nextCooldownPrune = next
 }
 
 func suppressingException(exceptions []compiledException, at time.Time, context *eventMatchContext) (string, bool) {

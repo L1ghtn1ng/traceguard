@@ -110,6 +110,11 @@ func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
 		return "", false, err
 	}
 	directory := filepath.Join(f.Root, path)
+	// The cgroup may have been removed and its path reused since the scan;
+	// freeze only the cgroup the alert named.
+	if current, err := f.id(directory); err != nil || current != id {
+		return "", false, &RefusedError{Reason: fmt.Sprintf("cgroup %d no longer exists", id)}
+	}
 	if state, err := os.ReadFile(filepath.Join(directory, "cgroup.freeze")); err == nil && strings.TrimSpace(string(state)) == "1" { //nolint:gosec // cgroupfs path from a validated scan
 		return path, false, nil
 	}

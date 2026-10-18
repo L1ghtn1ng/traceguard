@@ -47,6 +47,10 @@ type Engine struct {
 	sequenceStates    map[groupKey]*sequenceState
 	sequenceAlerts    map[groupKey]cooldownRecord
 	maxSequenceStates int
+	// nextProgressPrune and nextCooldownPrune are the earliest times a
+	// prune can drop anything.
+	nextProgressPrune time.Time
+	nextCooldownPrune time.Time
 	exceptions        []policy.DetectionException
 	suppressed        map[string]uint64
 	groups            map[groupKey]*groupState
@@ -220,6 +224,7 @@ func (e *Engine) Install(compiled CompiledRules) {
 	e.sequences = compiled.sequences
 	e.sequenceStates = make(map[groupKey]*sequenceState)
 	e.sequenceAlerts = make(map[groupKey]cooldownRecord)
+	e.nextProgressPrune, e.nextCooldownPrune = time.Time{}, time.Time{}
 	e.exceptions = compiled.exceptions
 	e.suppressed = suppressed
 	e.groups = make(map[groupKey]*groupState)

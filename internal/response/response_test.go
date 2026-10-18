@@ -622,3 +622,29 @@ func TestFailedExtensionKeepsTheRecordedDeadline(t *testing.T) {
 		t.Fatalf("the block outlived the deadline its kernel entry has: active %d", h.responder.Active())
 	}
 }
+
+func TestFreezeRefusesAReplacedCgroup(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "kubepods.slice", "pod-a"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kubepods.slice", "pod-a", "cgroup.freeze"), []byte("0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freezer := &CgroupFreezer{
+		Root: root, self: func() (string, error) { return "/system.slice/traceguard.service", nil },
+		scan: func(context.Context, string) ([]cgroupinfo.Entry, error) {
+			return []cgroupinfo.Entry{{ID: 1, Path: "/", Level: 0}, {ID: 5, Path: "/kubepods.slice/pod-a", Level: 2}}, nil
+		},
+		// The path now belongs to a new cgroup with another ID.
+		id: func(string) (uint64, error) { return 50, nil },
+	}
+	if _, _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "no longer exists") {
+		t.Fatalf("Freeze of a replaced cgroup = %v, want a refusal", err)
+	}
+	if state, _ := os.ReadFile(filepath.Join(root, "kubepods.slice", "pod-a", "cgroup.freeze")); string(state) != "0" { //nolint:gosec // test path
+		t.Fatalf("the replacement was frozen: cgroup.freeze = %q", state)
+	}
+}
