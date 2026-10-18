@@ -255,6 +255,8 @@ const (
 	traceguardDNSRecvmsgCompatProgLsmFileOpen             = "lsm_file_open"
 	traceguardDNSRecvmsgCompatProgTraceBind4              = "trace_bind4"
 	traceguardDNSRecvmsgCompatProgTraceBind6              = "trace_bind6"
+	traceguardDNSRecvmsgCompatProgTraceBpf                = "trace_bpf"
+	traceguardDNSRecvmsgCompatProgTraceCapset             = "trace_capset"
 	traceguardDNSRecvmsgCompatProgTraceConnect4           = "trace_connect4"
 	traceguardDNSRecvmsgCompatProgTraceConnect6           = "trace_connect6"
 	traceguardDNSRecvmsgCompatProgTraceConnectUnix        = "trace_connect_unix"
@@ -263,19 +265,35 @@ const (
 	traceguardDNSRecvmsgCompatProgTraceDns                = "trace_dns"
 	traceguardDNSRecvmsgCompatProgTraceExecve             = "trace_execve"
 	traceguardDNSRecvmsgCompatProgTraceExecveat           = "trace_execveat"
+	traceguardDNSRecvmsgCompatProgTraceFinitModule        = "trace_finit_module"
+	traceguardDNSRecvmsgCompatProgTraceInitModule         = "trace_init_module"
+	traceguardDNSRecvmsgCompatProgTraceIoUringSetup       = "trace_io_uring_setup"
+	traceguardDNSRecvmsgCompatProgTraceMemfdCreate        = "trace_memfd_create"
+	traceguardDNSRecvmsgCompatProgTraceMount              = "trace_mount"
 	traceguardDNSRecvmsgCompatProgTraceOpen               = "trace_open"
 	traceguardDNSRecvmsgCompatProgTraceOpenat             = "trace_openat"
 	traceguardDNSRecvmsgCompatProgTraceOpenat2            = "trace_openat2"
 	traceguardDNSRecvmsgCompatProgTracePostBind4          = "trace_post_bind4"
 	traceguardDNSRecvmsgCompatProgTracePostBind6          = "trace_post_bind6"
+	traceguardDNSRecvmsgCompatProgTraceProcessVmReadv     = "trace_process_vm_readv"
+	traceguardDNSRecvmsgCompatProgTraceProcessVmWritev    = "trace_process_vm_writev"
+	traceguardDNSRecvmsgCompatProgTracePtrace             = "trace_ptrace"
 	traceguardDNSRecvmsgCompatProgTraceRecvmsg4           = "trace_recvmsg4"
 	traceguardDNSRecvmsgCompatProgTraceRecvmsg6           = "trace_recvmsg6"
 	traceguardDNSRecvmsgCompatProgTraceRecvmsgUnix        = "trace_recvmsg_unix"
 	traceguardDNSRecvmsgCompatProgTraceSendmsg4           = "trace_sendmsg4"
 	traceguardDNSRecvmsgCompatProgTraceSendmsg6           = "trace_sendmsg6"
 	traceguardDNSRecvmsgCompatProgTraceSendmsgUnix        = "trace_sendmsg_unix"
+	traceguardDNSRecvmsgCompatProgTraceSetgid             = "trace_setgid"
+	traceguardDNSRecvmsgCompatProgTraceSetns              = "trace_setns"
+	traceguardDNSRecvmsgCompatProgTraceSetregid           = "trace_setregid"
+	traceguardDNSRecvmsgCompatProgTraceSetresgid          = "trace_setresgid"
+	traceguardDNSRecvmsgCompatProgTraceSetresuid          = "trace_setresuid"
+	traceguardDNSRecvmsgCompatProgTraceSetreuid           = "trace_setreuid"
 	traceguardDNSRecvmsgCompatProgTraceSetsockopt         = "trace_setsockopt"
+	traceguardDNSRecvmsgCompatProgTraceSetuid             = "trace_setuid"
 	traceguardDNSRecvmsgCompatProgTraceSockops            = "trace_sockops"
+	traceguardDNSRecvmsgCompatProgTraceUnshare            = "trace_unshare"
 	traceguardDNSRecvmsgCompatVarConnectionDedupeWindowNs = "connection_dedupe_window_ns"
 )
 
@@ -325,6 +343,8 @@ type traceguardDNSRecvmsgCompatProgramSpecs struct {
 	LsmFileOpen            *ebpf.ProgramSpec `ebpf:"lsm_file_open"`
 	TraceBind4             *ebpf.ProgramSpec `ebpf:"trace_bind4"`
 	TraceBind6             *ebpf.ProgramSpec `ebpf:"trace_bind6"`
+	TraceBpf               *ebpf.ProgramSpec `ebpf:"trace_bpf"`
+	TraceCapset            *ebpf.ProgramSpec `ebpf:"trace_capset"`
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.ProgramSpec `ebpf:"trace_connect_unix"`
@@ -333,19 +353,35 @@ type traceguardDNSRecvmsgCompatProgramSpecs struct {
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceFinitModule       *ebpf.ProgramSpec `ebpf:"trace_finit_module"`
+	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
+	TraceIoUringSetup      *ebpf.ProgramSpec `ebpf:"trace_io_uring_setup"`
+	TraceMemfdCreate       *ebpf.ProgramSpec `ebpf:"trace_memfd_create"`
+	TraceMount             *ebpf.ProgramSpec `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.ProgramSpec `ebpf:"trace_open"`
 	TraceOpenat            *ebpf.ProgramSpec `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.ProgramSpec `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.ProgramSpec `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.ProgramSpec `ebpf:"trace_post_bind6"`
+	TraceProcessVmReadv    *ebpf.ProgramSpec `ebpf:"trace_process_vm_readv"`
+	TraceProcessVmWritev   *ebpf.ProgramSpec `ebpf:"trace_process_vm_writev"`
+	TracePtrace            *ebpf.ProgramSpec `ebpf:"trace_ptrace"`
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_sendmsg_unix"`
+	TraceSetgid            *ebpf.ProgramSpec `ebpf:"trace_setgid"`
+	TraceSetns             *ebpf.ProgramSpec `ebpf:"trace_setns"`
+	TraceSetregid          *ebpf.ProgramSpec `ebpf:"trace_setregid"`
+	TraceSetresgid         *ebpf.ProgramSpec `ebpf:"trace_setresgid"`
+	TraceSetresuid         *ebpf.ProgramSpec `ebpf:"trace_setresuid"`
+	TraceSetreuid          *ebpf.ProgramSpec `ebpf:"trace_setreuid"`
 	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
+	TraceSetuid            *ebpf.ProgramSpec `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
+	TraceUnshare           *ebpf.ProgramSpec `ebpf:"trace_unshare"`
 }
 
 // traceguardDNSRecvmsgCompatMapSpecs contains maps before they are loaded into the kernel.
@@ -523,6 +559,8 @@ type traceguardDNSRecvmsgCompatPrograms struct {
 	LsmFileOpen            *ebpf.Program `ebpf:"lsm_file_open"`
 	TraceBind4             *ebpf.Program `ebpf:"trace_bind4"`
 	TraceBind6             *ebpf.Program `ebpf:"trace_bind6"`
+	TraceBpf               *ebpf.Program `ebpf:"trace_bpf"`
+	TraceCapset            *ebpf.Program `ebpf:"trace_capset"`
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.Program `ebpf:"trace_connect_unix"`
@@ -531,19 +569,35 @@ type traceguardDNSRecvmsgCompatPrograms struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceFinitModule       *ebpf.Program `ebpf:"trace_finit_module"`
+	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
+	TraceIoUringSetup      *ebpf.Program `ebpf:"trace_io_uring_setup"`
+	TraceMemfdCreate       *ebpf.Program `ebpf:"trace_memfd_create"`
+	TraceMount             *ebpf.Program `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
 	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TracePostBind4         *ebpf.Program `ebpf:"trace_post_bind4"`
 	TracePostBind6         *ebpf.Program `ebpf:"trace_post_bind6"`
+	TraceProcessVmReadv    *ebpf.Program `ebpf:"trace_process_vm_readv"`
+	TraceProcessVmWritev   *ebpf.Program `ebpf:"trace_process_vm_writev"`
+	TracePtrace            *ebpf.Program `ebpf:"trace_ptrace"`
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.Program `ebpf:"trace_recvmsg_unix"`
 	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.Program `ebpf:"trace_sendmsg_unix"`
+	TraceSetgid            *ebpf.Program `ebpf:"trace_setgid"`
+	TraceSetns             *ebpf.Program `ebpf:"trace_setns"`
+	TraceSetregid          *ebpf.Program `ebpf:"trace_setregid"`
+	TraceSetresgid         *ebpf.Program `ebpf:"trace_setresgid"`
+	TraceSetresuid         *ebpf.Program `ebpf:"trace_setresuid"`
+	TraceSetreuid          *ebpf.Program `ebpf:"trace_setreuid"`
 	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
+	TraceSetuid            *ebpf.Program `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
+	TraceUnshare           *ebpf.Program `ebpf:"trace_unshare"`
 }
 
 func (p *traceguardDNSRecvmsgCompatPrograms) Close() error {
@@ -552,6 +606,8 @@ func (p *traceguardDNSRecvmsgCompatPrograms) Close() error {
 		p.LsmFileOpen,
 		p.TraceBind4,
 		p.TraceBind6,
+		p.TraceBpf,
+		p.TraceCapset,
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectUnix,
@@ -560,19 +616,35 @@ func (p *traceguardDNSRecvmsgCompatPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceFinitModule,
+		p.TraceInitModule,
+		p.TraceIoUringSetup,
+		p.TraceMemfdCreate,
+		p.TraceMount,
 		p.TraceOpen,
 		p.TraceOpenat,
 		p.TraceOpenat2,
 		p.TracePostBind4,
 		p.TracePostBind6,
+		p.TraceProcessVmReadv,
+		p.TraceProcessVmWritev,
+		p.TracePtrace,
 		p.TraceRecvmsg4,
 		p.TraceRecvmsg6,
 		p.TraceRecvmsgUnix,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
 		p.TraceSendmsgUnix,
+		p.TraceSetgid,
+		p.TraceSetns,
+		p.TraceSetregid,
+		p.TraceSetresgid,
+		p.TraceSetresuid,
+		p.TraceSetreuid,
 		p.TraceSetsockopt,
+		p.TraceSetuid,
 		p.TraceSockops,
+		p.TraceUnshare,
 	)
 }
 

@@ -318,7 +318,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops"]
+            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops", "memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load", "io_uring_setup", "mount", "namespace_change", "privilege_change"]
           }
         },
         "match": {"$ref": "#/$defs/detection_match"},
@@ -404,7 +404,13 @@
           "$ref": "#/$defs/string_list",
           "description": "Requested AF_UNIX socket paths: exact absolute or @abstract names, or /** subtrees; valid only with unix_blocked and unix_would_block."
         },
-        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}}
+        "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}},
+        "operations": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"]},
+          "description": "Security event operation; valid only with ptrace, process_vm, module_load, namespace_change, and privilege_change events."
+        }
       }
     }
   }

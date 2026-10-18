@@ -35,6 +35,7 @@ func TestParseRejectsMalformedBooleanEnvironmentValues(t *testing.T) {
 		"TRACEGUARD_FILE_AUDIT",
 		"TRACEGUARD_KUBERNETES_ENRICH",
 		"TRACEGUARD_STRICT_HOOKS",
+		"TRACEGUARD_SECURITY_EVENTS",
 	}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -256,6 +257,7 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_HEARTBEAT_INTERVAL",
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
+		"TRACEGUARD_SECURITY_EVENTS",
 	)
 
 	cfg, err := Parse()
@@ -282,6 +284,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if !cfg.FileAudit {
 		t.Fatal("FileAudit = false, want packaged default true")
+	}
+	if !cfg.SecurityEvents {
+		t.Fatal("SecurityEvents = false, want packaged default true")
 	}
 	if cfg.KubernetesEnrich {
 		t.Fatal("KubernetesEnrich = true, want packaged default false")
@@ -725,6 +730,7 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_HEARTBEAT_INTERVAL",
 		"TRACEGUARD_CONNECTION_DEDUPE_WINDOW",
 		"TRACEGUARD_POLICY_SIGNING_KEY",
+		"TRACEGUARD_SECURITY_EVENTS",
 	} {
 		t.Setenv(key, "")
 	}

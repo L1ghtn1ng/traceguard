@@ -18,6 +18,7 @@ All notable changes to TraceGuard are documented in this file.
 - Added `detection_exceptions`: scoped suppressions for named detection rules with a required `reason` and an optional RFC 3339 `expires`. Suppressed events do not count toward thresholds. They are reported through `traceguard_detection_suppressed_total{exception}`, `traceguard_detection_exceptions{state}`, a one-time `detection exception expired` record, and the heartbeat.
 - Added `-replay`, which evaluates detection rules and exceptions from `-policy-path` over a JSONL or gzip event archive offline, writes alerts as JSON lines, and summarizes alert counts per rule, noisiest first.
 - Added `-connection-dedupe-window` / `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` (default `1m`, at most `1h`, `0` disables) for the previously fixed 60-second suppression of repeated connection and TCP retransmit events.
+- Added observe-only security events from syscall-entry tracepoints, enabled by `-security-events` / `TRACEGUARD_SECURITY_EVENTS` (default `true`): `memfd_create`, `ptrace` (attach, seize, traceme, and poke requests), `process_vm` reads and writes, `module_load`, `bpf_prog_load`, `io_uring_setup`, `mount`, `namespace_change`, and `privilege_change`. They are detection events with event-time kernel identity, and the new `operations` selector matches their operation.
 
 ### Changed
 
@@ -25,6 +26,7 @@ All notable changes to TraceGuard are documented in this file.
 - The ring buffer reader now starts before the initial YAML policy is loaded and applied, so events from the already-attached programs are consumed while a remote policy fetch is in progress instead of accumulating until the buffer fills. Events in that window are evaluated against the baseline detections.
 - Bumped the eBPF pin layout to version 6 for the new drop-counter map. With `-pin-ebpf`, the first start after upgrading discards the previous pins and attaches fresh programs.
 - Updated `docs/policy.md` to document pin layout version 6.
+- Bumped the eBPF pin layout to version 7, because the drop-counter map grew with the new event kinds.
 
 ### Security
 

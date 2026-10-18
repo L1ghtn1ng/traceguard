@@ -210,6 +210,24 @@ func eventKindName(kind uint32) string {
 		return "sockopt_would_block"
 	case ebpf.EventSockOps:
 		return "tcp_sockops"
+	case ebpf.EventMemfdCreate:
+		return "memfd_create"
+	case ebpf.EventPtrace:
+		return "ptrace"
+	case ebpf.EventProcessVM:
+		return "process_vm"
+	case ebpf.EventModuleLoad:
+		return "module_load"
+	case ebpf.EventBPFProgLoad:
+		return "bpf_prog_load"
+	case ebpf.EventIOURingSetup:
+		return "io_uring_setup"
+	case ebpf.EventMount:
+		return "mount"
+	case ebpf.EventNamespaceChange:
+		return "namespace_change"
+	case ebpf.EventPrivilegeChange:
+		return "privilege_change"
 	default:
 		return "unknown"
 	}

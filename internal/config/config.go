@@ -68,6 +68,7 @@ type Config struct {
 	EventSyslogCAPath            string
 	ProcessCacheTTL              time.Duration
 	FileAudit                    bool
+	SecurityEvents               bool
 	KubernetesEnrich             bool
 	KubernetesAPIURL             string
 	KubernetesTokenPath          string
@@ -121,6 +122,10 @@ func Parse() (Config, error) {
 		return Config{}, err
 	}
 	fileAuditDefault, err := envBool("TRACEGUARD_FILE_AUDIT", true)
+	if err != nil {
+		return Config{}, err
+	}
+	securityEventsDefault, err := envBool("TRACEGUARD_SECURITY_EVENTS", true)
 	if err != nil {
 		return Config{}, err
 	}
@@ -182,6 +187,7 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventSyslogCAPath, "event-syslog-ca-path", envString("TRACEGUARD_EVENT_SYSLOG_CA_PATH", ""), "path to an optional CA bundle for syslog+tls")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", processCacheDefault, "how long to cache process metadata from /proc")
 	fs.BoolVar(&cfg.FileAudit, "file-audit", fileAuditDefault, "emit file access audit events for open-style syscalls")
+	fs.BoolVar(&cfg.SecurityEvents, "security-events", securityEventsDefault, "emit memfd, ptrace, process memory, module load, BPF program load, io_uring, mount, namespace, and privilege-change events")
 	fs.BoolVar(&cfg.KubernetesEnrich, "kubernetes-enrich", kubernetesEnrichDefault, "enrich events with Kubernetes pod metadata from the API")
 	fs.StringVar(&cfg.KubernetesAPIURL, "kubernetes-api-url", envString("TRACEGUARD_KUBERNETES_API_URL", ""), "HTTPS URL for the Kubernetes API server")
 	fs.StringVar(&cfg.KubernetesTokenPath, "kubernetes-token-path", envString("TRACEGUARD_KUBERNETES_TOKEN_PATH", defaultKubeTokenPath), "path to the Kubernetes bearer token file")

@@ -176,6 +176,20 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 		}
 	}
 
+	for _, tracepoint := range objects.tracepoints() {
+		if !opts.SecurityEvents {
+			if err := removePinnedLink(opts, tracepoint.tracepoint); err != nil {
+				return nil, rollback(err)
+			}
+			continue
+		}
+		// Each syscall is optional: some architectures lack one, and the
+		// others still attach.
+		if _, err := attachTracepoint(tracepoint.tracepoint, tracepoint.handle, true); err != nil {
+			return nil, rollback(err)
+		}
+	}
+
 	if opts.FileAudit {
 		attached := 0
 		for _, spec := range []struct {

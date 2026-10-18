@@ -156,3 +156,29 @@ func TestCompileRejectsInvalidExceptionReferences(t *testing.T) {
 		t.Fatalf("identity exception on DNS rule error = %v", err)
 	}
 }
+
+func TestOperationsSelectorMatchesEventOperation(t *testing.T) {
+	t.Parallel()
+
+	compiled, err := Compile([]policy.DetectionRule{{
+		ID: "ptrace-attach", Severity: "warning", Events: []string{"ptrace"}, Message: "attach",
+		Match: policy.DetectionMatch{Operations: []string{"attach", "seize"}},
+	}}, []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Install(compiled)
+	event := func(operation string) Event {
+		return Event{Timestamp: time.Unix(1, 0), Name: "ptrace", Fields: map[string]any{"operation": operation}}
+	}
+	if alerts := engine.Evaluate(event("seize")); len(alerts) != 1 {
+		t.Fatalf("seize raised %d alerts, want 1", len(alerts))
+	}
+	if alerts := engine.Evaluate(event("traceme")); len(alerts) != 0 {
+		t.Fatalf("traceme raised %d alerts, want 0", len(alerts))
+	}
+}

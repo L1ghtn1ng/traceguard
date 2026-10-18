@@ -59,6 +59,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 	monitor, err := ebpf.NewMonitor(cfg.CgroupPath, ebpf.Options{
 		FileAudit:              cfg.FileAudit,
+		SecurityEvents:         cfg.SecurityEvents,
 		PinEBPF:                cfg.PinEBPF,
 		EnableStats:            cfg.EBPFStats,
 		ConnectionDedupeWindow: cfg.ConnectionDedupeWindow,
@@ -507,6 +508,11 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			}
 			recorder.InfoAt(event.Timestamp, eventName, fields)
 		default:
+			if ebpf.IsSecurityEvent(event.Kind) {
+				appendSecurityEventFields(fields, event, "/proc")
+				recorder.InfoAt(event.Timestamp, eventName, fields)
+				break
+			}
 			fields["kind"] = event.Kind
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}

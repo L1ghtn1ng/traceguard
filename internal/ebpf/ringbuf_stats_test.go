@@ -136,7 +136,7 @@ func TestBPFRingBufferReservationsCountDrops(t *testing.T) {
 	if got := strings.Count(text, "bpf_ringbuf_reserve("); got != 1 {
 		t.Fatalf("bpf_ringbuf_reserve call sites = %d, want only the counting reserve_event helper", got)
 	}
-	if !strings.Contains(text, "#define EVENT_KIND_MAX EVENT_SOCKOPS") {
+	if !strings.Contains(text, "#define EVENT_KIND_MAX EVENT_PRIVILEGE_CHANGE") {
 		t.Fatal("EVENT_KIND_MAX no longer tracks the last event kind; update eventKindMax with it")
 	}
 	kinds := 0

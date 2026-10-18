@@ -225,6 +225,7 @@ type DetectionMatch struct {
 	KubernetesApps      []string `yaml:"k8s_apps,omitempty"`
 	LSMSources          []string `yaml:"lsm_sources,omitempty"`
 	LSMLabels           []string `yaml:"lsm_labels,omitempty"`
+	Operations          []string `yaml:"operations,omitempty"`
 }
 
 // DetectionException suppresses alerts from the listed rules for events that
@@ -601,6 +602,7 @@ func (m DetectionMatch) validate() error {
 		"kubernetes apps":       len(m.KubernetesApps),
 		"lsm sources":           len(m.LSMSources),
 		"lsm labels":            len(m.LSMLabels),
+		"operations":            len(m.Operations),
 	} {
 		if count > MaxRuleListValues {
 			return fmt.Errorf("%s count %d exceeds %d", name, count, MaxRuleListValues)
@@ -680,7 +682,7 @@ func (m DetectionMatch) Empty() bool {
 		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
 		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
 		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
-		len(m.LSMSources)+len(m.LSMLabels) == 0
+		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {
@@ -733,6 +735,21 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 		for _, event := range events {
 			if !slices.Contains(localPortDetectionEvents, event) {
 				return fmt.Errorf("local_ports require events that carry a local port; %q is unsupported", event)
+			}
+		}
+	}
+	if len(match.Operations) > 0 {
+		var known []string
+		for _, event := range events {
+			operations, ok := SecurityEventOperations[event]
+			if !ok {
+				return fmt.Errorf("operations require security events that carry an operation; %q is unsupported", event)
+			}
+			known = append(known, operations...)
+		}
+		for _, operation := range match.Operations {
+			if !slices.Contains(known, operation) {
+				return fmt.Errorf("operation %q is not carried by events %v", operation, events)
 			}
 		}
 	}
@@ -792,6 +809,18 @@ var supportedDetectionEvents = []string{
 	"exec_blocked", "exec_would_block", "file_blocked", "file_would_block",
 	"bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block",
 	"sockopt_blocked", "sockopt_would_block", "tcp_sockops",
+	"memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load",
+	"io_uring_setup", "mount", "namespace_change", "privilege_change",
+}
+
+// SecurityEventOperations lists the operation names each security event can
+// carry in its operation field.
+var SecurityEventOperations = map[string][]string{
+	"ptrace":           {"traceme", "poketext", "pokedata", "pokeuser", "attach", "seize"},
+	"process_vm":       {"read", "write"},
+	"module_load":      {"init_module", "finit_module"},
+	"namespace_change": {"setns", "unshare"},
+	"privilege_change": {"setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"},
 }
 
 var supportedGroupFields = []string{

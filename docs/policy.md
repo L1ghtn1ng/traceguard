@@ -650,6 +650,17 @@ excluded.
 | `unix_blocked`, `unix_would_block` | AF_UNIX operation denied or evaluated in dry-run mode. |
 | `sockopt_blocked`, `sockopt_would_block` | Socket option denied or evaluated in dry-run mode. |
 | `tcp_sockops` | Observe-only TCP established, listen, retransmit, or close lifecycle signal. |
+| `memfd_create` | Anonymous memory file created, a common first step of fileless execution. |
+| `ptrace` | Ptrace attach, seize, traceme, or poke request. |
+| `process_vm` | `process_vm_readv` or `process_vm_writev` against another process. |
+| `module_load` | `init_module` or `finit_module` kernel module load request. |
+| `bpf_prog_load` | BPF program load through `bpf(BPF_PROG_LOAD)`. |
+| `io_uring_setup` | io_uring instance created. |
+| `mount` | `mount` request. |
+| `namespace_change` | `setns` or `unshare` request. |
+| `privilege_change` | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, or `capset` request. |
+
+The last nine are [security events](#security-events).
 
 ### Match and exclude conditions
 
@@ -669,6 +680,7 @@ excluded.
 | `file_path_globs` | Kernel-resolved file path globs; valid only with `file_blocked` and `file_would_block`. |
 | `unix_path_globs` | AF_UNIX socket paths; valid only with `unix_blocked` and `unix_would_block`. |
 | `file_access` | `read`, `write`, or `unknown`. |
+| `operations` | Security event operation; valid only with `ptrace`, `process_vm`, `module_load`, `namespace_change`, and `privilege_change`, and each value must be one those events carry. See [security events](#security-events). |
 
 Detection path patterns must be either a clean absolute exact path or a clean
 absolute literal stem ending in `/**`. The stem is limited to 247 bytes so it
@@ -725,7 +737,7 @@ Process-identity availability is validated when policy is loaded:
 
 | Event scope | Detection process identity |
 | --- | --- |
-| `exec`, `resolver`, `resolver_blocked`, `file_access`, `file_created`, and enforcement decisions | Contemporaneous kernel snapshot. |
+| `exec`, `resolver`, `resolver_blocked`, `file_access`, `file_created`, security events, and enforcement decisions | Contemporaneous kernel snapshot. |
 | Outbound `connection`, or UDP `connection` in either direction | Contemporaneous kernel snapshot. |
 | Inbound TCP `connection` | Listener-cache telemetry only; UID matching and process-identity grouping require the rule to exclude this scope. |
 | `dns`, `blocked`, `tcp_sockops` | Unavailable or cache-only; UID matching and process-identity grouping are rejected. |
@@ -742,6 +754,38 @@ Syscall audit events expose `requested_path` with
 `file_path_globs`, or `group_by: [path]`. LSM enforcement events expose the
 resolved canonical path as `path` or `exe` and are the supported source for
 path-based detections.
+
+### Security events
+
+With `-security-events`, enabled by default, TraceGuard attaches observe-only
+syscall-entry tracepoints for operations used in kernel tampering, fileless
+execution, process injection, container escape, and privilege changes. Each
+syscall attaches independently, so one that an architecture lacks is skipped
+without affecting the others, and none of them denies anything.
+
+Values come from the syscall's requested arguments at entry, marked
+`value_source=syscall-requested`; an event does not mean the call succeeded.
+High-rate requests are filtered in the kernel: `ptrace` emits only `traceme`,
+`attach`, `seize`, and the `poke*` writes, and `bpf` emits only program loads.
+
+| Event | Fields | `operations` |
+| --- | --- | --- |
+| `memfd_create` | `memfd_name`, `memfd_flags` (`cloexec`, `allow_sealing`, `hugetlb`, `noexec_seal`, `exec`) | — |
+| `ptrace` | `operation`, `target_pid` | `traceme`, `poketext`, `pokedata`, `pokeuser`, `attach`, `seize` |
+| `process_vm` | `operation`, `target_pid` | `read`, `write` |
+| `module_load` | `operation`, `module_params`; for `finit_module` also `module_fd`, `module_flags`, and `module_path` when the descriptor can be read from `/proc` | `init_module`, `finit_module` |
+| `bpf_prog_load` | `bpf_prog_type`, such as `kprobe`, `tracepoint`, `xdp`, or `lsm` | — |
+| `io_uring_setup` | `io_uring_entries`, `io_uring_flags` | — |
+| `mount` | `mount_source`, `mount_target`, `mount_fstype`, `mount_flags` | — |
+| `namespace_change` | `operation`, `namespace_types` (`mount`, `uts`, `ipc`, `user`, `pid`, `net`, `cgroup`, `time`, or `any` for `setns` without a type); `setns_fd` for `setns` | `setns`, `unshare` |
+| `privilege_change` | `operation`; `requested_uid` or `requested_gid`, the requested effective ID, omitted when the call leaves it unchanged; `requested_capabilities` for `capset`, from the low 32 capability bits | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, `capset` |
+
+These events carry a contemporaneous kernel identity, so `uids` selectors and
+process-identity grouping work on them. Resolving `module_path` reads
+`/proc/<pid>/fd`, which needs ptrace access to the loading process; the field is
+omitted when that fails. Disable the group with `-security-events=false` or
+`TRACEGUARD_SECURITY_EVENTS=false` if their volume is unwanted; `setuid`-family
+calls from login and cron services are the most frequent.
 
 ### Thresholds and grouping
 
@@ -1007,6 +1051,7 @@ trusted through its file ownership, and the signing key requires
 | `-strict-hooks` | `TRACEGUARD_STRICT_HOOKS` | Refuse to start when any optional eBPF hook cannot be loaded or attached, instead of running with reduced coverage. |
 | `-heartbeat-interval` | `TRACEGUARD_HEARTBEAT_INTERVAL` | Interval between heartbeat events; defaults to `5m`, and `0` disables them. |
 | `-connection-dedupe-window` | `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` | Window for suppressing repeated connection and TCP retransmit events from the same flow; defaults to `1m`, at most `1h`, and `0` disables suppression. |
+| `-security-events` | `TRACEGUARD_SECURITY_EVENTS` | Attach the observe-only [security event](#security-events) tracepoints; enabled by default. |
 | `-replay` | — | Evaluate detection rules over an absolute-path JSONL archive and exit. See [Testing rules with replay](#testing-rules-with-replay). |
 
 ### Refresh, cache, and health behavior
@@ -1068,7 +1113,7 @@ process before its non-reusable daemon identity is published.
 
 `-pin-ebpf` pins maps, programs, and cgroup/tracepoint links beneath
 `/sys/fs/bpf/traceguard`. A small pinned map named `layout` records layout
-version 6, the 32-byte settings ABI, the 632-byte event ABI, and the selected
+version 7, the 32-byte settings ABI, the 632-byte event ABI, and the selected
 eBPF object. Missing metadata, unreadable pins, or an incompatible layout are
 discarded and loaded fresh. Compatible maps are adopted, missing maps are
 created, programs are replaced, and existing persistent links are updated,

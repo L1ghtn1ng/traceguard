@@ -8,7 +8,7 @@ import (
 
 // eventKindMax mirrors EVENT_KIND_MAX in traceguard.c; ringbuf_drops holds
 // one per-CPU counter for every kind from 0 through this value.
-const eventKindMax = EventSockOps
+const eventKindMax = EventPrivilegeChange
 
 // RingBufferStats is a point-in-time view of the shared event ring buffer.
 type RingBufferStats struct {

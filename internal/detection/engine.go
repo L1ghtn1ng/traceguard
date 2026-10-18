@@ -421,7 +421,8 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchStrings(match.KubernetesOwners, stringField(fields, "k8s_owner")) &&
 		matchStrings(match.KubernetesApps, stringField(fields, "k8s_app")) &&
 		matchStrings(match.LSMSources, stringField(fields, "lsm_source")) &&
-		matchStrings(match.LSMLabels, stringField(fields, "lsm_label"))
+		matchStrings(match.LSMLabels, stringField(fields, "lsm_label")) &&
+		matchStrings(match.Operations, stringField(fields, "operation"))
 }
 
 func matchStrings(values []string, candidate string) bool {

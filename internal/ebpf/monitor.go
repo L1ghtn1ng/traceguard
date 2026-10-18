@@ -255,6 +255,9 @@ type Options struct {
 	PinEBPF     bool
 	PinPath     string
 	EnableStats bool
+	// SecurityEvents attaches the memfd, ptrace, process memory, module,
+	// BPF, io_uring, mount, namespace, and privilege-change tracepoints.
+	SecurityEvents bool
 	// ConnectionDedupeWindow suppresses repeated connection and TCP
 	// retransmit events for the same flow; zero disables suppression.
 	ConnectionDedupeWindow time.Duration
@@ -289,6 +292,7 @@ type monitorObjects struct {
 	TraceOpenat            *ebpf.Program `ebpf:"trace_openat"`
 	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
+	securityPrograms
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
@@ -394,6 +398,7 @@ func (o *monitorObjects) Close() error {
 			errs = append(errs, closer.Close())
 		}
 	}
+	errs = append(errs, o.securityPrograms.Close())
 	return errors.Join(errs...)
 }
 
@@ -747,6 +752,9 @@ func (m *Monitor) ProgramStats() (map[string]ebpf.ProgramStats, error) {
 		"unix_connect": m.optional.UnixConnect, "unix_sendmsg": m.optional.UnixSendmsg,
 		"unix_recvmsg": m.optional.UnixRecvmsg, "setsockopt": m.optional.Sockopt,
 		"sockops": m.optional.SockOps,
+	}
+	for _, tracepoint := range m.objects.tracepoints() {
+		programs[strings.TrimPrefix(tracepoint.program, "trace_")] = tracepoint.handle
 	}
 	result := make(map[string]ebpf.ProgramStats, len(programs))
 	var errs []error

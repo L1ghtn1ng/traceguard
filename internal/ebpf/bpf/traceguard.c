@@ -39,7 +39,45 @@
 #define EVENT_SOCKOPT_BLOCKED 18
 #define EVENT_SOCKOPT_WOULD_BLOCK 19
 #define EVENT_SOCKOPS 20
-#define EVENT_KIND_MAX EVENT_SOCKOPS
+#define EVENT_MEMFD_CREATE 21
+#define EVENT_PTRACE 22
+#define EVENT_PROCESS_VM 23
+#define EVENT_MODULE_LOAD 24
+#define EVENT_BPF_PROG_LOAD 25
+#define EVENT_IO_URING_SETUP 26
+#define EVENT_MOUNT 27
+#define EVENT_NAMESPACE_CHANGE 28
+#define EVENT_PRIVILEGE_CHANGE 29
+#define EVENT_KIND_MAX EVENT_PRIVILEGE_CHANGE
+
+/* Security events reuse generic event fields: rule_id carries the
+ * operation, file_flags the flags argument, file_mode the target PID or
+ * requested ID, filename the primary string argument, and domain a
+ * secondary string argument. Values are the syscall's requested arguments
+ * at entry, not its outcome.
+ */
+#define PROCESS_VM_READ 0
+#define PROCESS_VM_WRITE 1
+#define MODULE_LOAD_INIT 0
+#define MODULE_LOAD_FINIT 1
+#define NAMESPACE_SETNS 0
+#define NAMESPACE_UNSHARE 1
+#define PRIVILEGE_SETUID 0
+#define PRIVILEGE_SETGID 1
+#define PRIVILEGE_SETREUID 2
+#define PRIVILEGE_SETREGID 3
+#define PRIVILEGE_SETRESUID 4
+#define PRIVILEGE_SETRESGID 5
+#define PRIVILEGE_CAPSET 6
+#define MOUNT_SOURCE_LEN 192
+#define MOUNT_FSTYPE_OFFSET MOUNT_SOURCE_LEN
+#define TRACEGUARD_BPF_PROG_LOAD 5
+#define TRACEGUARD_PTRACE_TRACEME 0
+#define TRACEGUARD_PTRACE_POKETEXT 4
+#define TRACEGUARD_PTRACE_POKEDATA 5
+#define TRACEGUARD_PTRACE_POKEUSER 6
+#define TRACEGUARD_PTRACE_ATTACH 16
+#define TRACEGUARD_PTRACE_SEIZE 0x4206
 #define POLICY_DECISION_NONE 0
 #define POLICY_DECISION_ALLOW 1
 #define POLICY_DECISION_BLOCK 2
@@ -3822,6 +3860,210 @@ static __always_inline int emit_file_access_event(const char *filename, __u64 fl
 	}
 	bpf_ringbuf_submit(event, 0);
 	return 0;
+}
+
+static __always_inline struct event *start_security_event(__u32 kind, __u32 operation)
+{
+	struct event *event = reserve_event(kind);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, kind, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	return event;
+}
+
+static __always_inline int emit_security_ids(__u32 kind, __u32 operation, __u64 flags, __u64 argument)
+{
+	struct event *event = start_security_event(kind, operation);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)flags;
+	event->file_mode = (__u32)argument;
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_memfd_create")
+int trace_memfd_create(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MEMFD_CREATE, 0);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)ctx->args[1];
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[0]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+/* Only requests that attach to, or write into, another process are emitted;
+ * tracers issue other requests at very high rates.
+ */
+SEC("tracepoint/syscalls/sys_enter_ptrace")
+int trace_ptrace(struct trace_event_raw_sys_enter *ctx)
+{
+	unsigned long request = ctx->args[0];
+
+	switch (request) {
+	case TRACEGUARD_PTRACE_TRACEME:
+	case TRACEGUARD_PTRACE_POKETEXT:
+	case TRACEGUARD_PTRACE_POKEDATA:
+	case TRACEGUARD_PTRACE_POKEUSER:
+	case TRACEGUARD_PTRACE_ATTACH:
+	case TRACEGUARD_PTRACE_SEIZE:
+		return emit_security_ids(EVENT_PTRACE, (__u32)request, 0, ctx->args[1]);
+	default:
+		return 0;
+	}
+}
+
+SEC("tracepoint/syscalls/sys_enter_process_vm_readv")
+int trace_process_vm_readv(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PROCESS_VM, PROCESS_VM_READ, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_process_vm_writev")
+int trace_process_vm_writev(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PROCESS_VM, PROCESS_VM_WRITE, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_init_module")
+int trace_init_module(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MODULE_LOAD, MODULE_LOAD_INIT);
+
+	if (!event) {
+		return 0;
+	}
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[2]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_finit_module")
+int trace_finit_module(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MODULE_LOAD, MODULE_LOAD_FINIT);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_mode = (__u32)ctx->args[0];
+	event->file_flags = (__u32)ctx->args[2];
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[1]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+/* Map and object operations are routine for BPF tooling; only program loads
+ * are emitted.
+ */
+SEC("tracepoint/syscalls/sys_enter_bpf")
+int trace_bpf(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 prog_type = 0;
+
+	if (ctx->args[0] != TRACEGUARD_BPF_PROG_LOAD) {
+		return 0;
+	}
+	bpf_probe_read_user(&prog_type, sizeof(prog_type), (const void *)ctx->args[1]);
+	return emit_security_ids(EVENT_BPF_PROG_LOAD, TRACEGUARD_BPF_PROG_LOAD, 0, prog_type);
+}
+
+SEC("tracepoint/syscalls/sys_enter_io_uring_setup")
+int trace_io_uring_setup(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 flags = 0;
+
+	/* struct io_uring_params begins with sq_entries, cq_entries, flags. */
+	bpf_probe_read_user(&flags, sizeof(flags), (const char *)ctx->args[1] + 2 * sizeof(__u32));
+	return emit_security_ids(EVENT_IO_URING_SETUP, 0, flags, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_mount")
+int trace_mount(struct trace_event_raw_sys_enter *ctx)
+{
+	struct event *event = start_security_event(EVENT_MOUNT, 0);
+
+	if (!event) {
+		return 0;
+	}
+	event->file_flags = (__u32)ctx->args[3];
+	bpf_probe_read_user_str(event->domain, MOUNT_SOURCE_LEN, (const char *)ctx->args[0]);
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), (const char *)ctx->args[1]);
+	bpf_probe_read_user_str(event->domain + MOUNT_FSTYPE_OFFSET, sizeof(event->domain) - MOUNT_FSTYPE_OFFSET,
+		(const char *)ctx->args[2]);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setns")
+int trace_setns(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_NAMESPACE_CHANGE, NAMESPACE_SETNS, ctx->args[1], ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unshare")
+int trace_unshare(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_NAMESPACE_CHANGE, NAMESPACE_UNSHARE, ctx->args[0], 0);
+}
+
+/* For the set*id family file_mode carries the requested effective ID, or
+ * 0xffffffff when the call leaves it unchanged.
+ */
+SEC("tracepoint/syscalls/sys_enter_setuid")
+int trace_setuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETUID, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setgid")
+int trace_setgid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETGID, 0, ctx->args[0]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setreuid")
+int trace_setreuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETREUID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setregid")
+int trace_setregid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETREGID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresuid")
+int trace_setresuid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETRESUID, 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresgid")
+int trace_setresgid(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_SETRESGID, 0, ctx->args[1]);
+}
+
+/* file_flags carries the low 32 bits of the requested effective set. */
+SEC("tracepoint/syscalls/sys_enter_capset")
+int trace_capset(struct trace_event_raw_sys_enter *ctx)
+{
+	__u32 effective = 0;
+
+	bpf_probe_read_user(&effective, sizeof(effective), (const void *)ctx->args[1]);
+	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_CAPSET, effective, 0);
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")

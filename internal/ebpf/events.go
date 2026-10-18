@@ -18,6 +18,7 @@ const (
 	domainSize          = 256
 	maxDNSWireNameBytes = 255
 	filenameSize        = 248
+	mountSourceSize     = 192
 	pathTruncatedFlag   = uint32(1 << 31)
 	timestampOffsetTTL  = time.Second
 )
@@ -57,6 +58,15 @@ const (
 	EventSockoptBlocked
 	EventSockoptWouldBlock
 	EventSockOps
+	EventMemfdCreate
+	EventPtrace
+	EventProcessVM
+	EventModuleLoad
+	EventBPFProgLoad
+	EventIOURingSetup
+	EventMount
+	EventNamespaceChange
+	EventPrivilegeChange
 )
 
 type rawEvent struct {
@@ -119,6 +129,11 @@ type Event struct {
 	RuleID           string
 	ProcessStartTime uint64
 	PolicyDecision   string
+	// Operation is the security event's operation code, such as the ptrace
+	// request or the namespace or privilege syscall.
+	Operation   uint32
+	MountSource string
+	MountFSType string
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -165,6 +180,14 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
 	}
+	if IsSecurityEvent(raw.Kind) {
+		event.Operation = raw.RuleID
+		if raw.Kind == EventMount {
+			event.MountSource = zeroTerminated(raw.Domain[:mountSourceSize])
+			event.MountFSType = zeroTerminated(raw.Domain[mountSourceSize:])
+		}
+		return event, nil
+	}
 	if isDNSPolicyEvent(raw.Kind) {
 		event.Domain = decodeQName(raw.Domain[:])
 		event.PolicyDecision = policyDecisionName(raw.RuleID)
@@ -175,6 +198,12 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		}
 	}
 	return event, nil
+}
+
+// IsSecurityEvent reports whether kind is one of the observe-only security
+// syscall events.
+func IsSecurityEvent(kind uint32) bool {
+	return kind >= EventMemfdCreate && kind <= EventPrivilegeChange
 }
 
 func isEnforcementPolicyEvent(kind uint32) bool {

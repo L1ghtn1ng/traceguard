@@ -10,6 +10,7 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - detect outbound DNS-over-TLS resolver connections
 - detect configured DNS-over-HTTPS resolver connections
 - trace `execve` and `execveat` activity so newly spawned programs are visible
+- observe memfd creation, ptrace and cross-process memory access, kernel module and BPF program loads, io_uring setup, mounts, namespace changes, and privilege changes
 - audit file access through open-style syscall tracepoints when enabled
 - optionally block DNS lookups defined by local or remote YAML policy
 - enforce exact and suffix DNS policies, with allow rules taking precedence
@@ -52,6 +53,7 @@ TraceGuard uses a set of eBPF programs:
 - an observe-only `sockops` program reports selected TCP lifecycle callbacks
 - `tracepoint/syscalls/sys_enter_execve*` emits process execution events
 - `tracepoint/syscalls/sys_enter_open*` and `sys_enter_creat` emit file access audit events when file auditing is enabled
+- observe-only syscall-entry tracepoints for `memfd_create`, `ptrace`, `process_vm_readv`/`writev`, `init_module`/`finit_module`, `bpf`, `io_uring_setup`, `mount`, `setns`, `unshare`, the `set*id` family, and `capset` emit security events when enabled
 
 The user-space service:
 
@@ -408,6 +410,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_HEARTBEAT_INTERVAL`
 - `TRACEGUARD_POLICY_SIGNING_KEY`
 - `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
+- `TRACEGUARD_SECURITY_EVENTS`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -428,6 +431,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
+- security events enabled: `TRACEGUARD_SECURITY_EVENTS=true`
 - connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
 - strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
 - remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
