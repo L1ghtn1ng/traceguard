@@ -9,6 +9,8 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+const postInstallScript = "packaging/scripts/postinstall.sh"
+
 func TestPackagedEnvironmentFileIsRootOnly(t *testing.T) {
 	t.Parallel()
 
@@ -18,6 +20,14 @@ func TestPackagedEnvironmentFileIsRootOnly(t *testing.T) {
 	}
 	var config struct {
 		NFPMs []struct {
+			Scripts struct {
+				PostInstall string `yaml:"postinstall"`
+			} `yaml:"scripts"`
+			ArchLinux struct {
+				Scripts struct {
+					PostUpgrade string `yaml:"postupgrade"`
+				} `yaml:"scripts"`
+			} `yaml:"archlinux"`
 			Contents []struct {
 				Dst      string `yaml:"dst"`
 				FileInfo struct {
@@ -48,6 +58,20 @@ func TestPackagedEnvironmentFileIsRootOnly(t *testing.T) {
 		}
 		if !found {
 			t.Fatal("package does not install /etc/traceguard/traceguard.env")
+		}
+		// config|noreplace keeps an edited file's existing mode on upgrade.
+		if pkg.Scripts.PostInstall != postInstallScript || pkg.ArchLinux.Scripts.PostUpgrade != postInstallScript {
+			t.Fatalf("package scripts = postinstall %q, archlinux postupgrade %q; want %q for both",
+				pkg.Scripts.PostInstall, pkg.ArchLinux.Scripts.PostUpgrade, postInstallScript)
+		}
+	}
+	script, err := os.ReadFile("../../" + postInstallScript)
+	if err != nil {
+		t.Fatalf("read post-install script: %v", err)
+	}
+	for _, want := range []string{"chown root:root \"$env_file\"", "chmod 0600 \"$env_file\""} {
+		if !strings.Contains(string(script), want) {
+			t.Fatalf("post-install script does not run %q", want)
 		}
 	}
 }

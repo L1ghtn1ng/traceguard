@@ -67,6 +67,12 @@ nfpms:
     section: admin
     priority: optional
     bindir: /usr/bin
+    # config|noreplace keeps an edited env file on upgrade with its old mode.
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+    archlinux:
+      scripts:
+        postupgrade: packaging/scripts/postinstall.sh
     contents:
       - src: packaging/systemd/traceguard.service
         dst: '{{ if eq .Format "deb" }}/lib/systemd/system/traceguard.service{{ else }}/usr/lib/systemd/system/traceguard.service{{ end }}'

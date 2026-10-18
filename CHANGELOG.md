@@ -18,9 +18,9 @@ All notable changes to TraceGuard are documented in this file.
 
 ### Security
 
-- Installed the packaged `/etc/traceguard/traceguard.env` as `0600 root:root`, so authorization values stored there are not readable by other local users.
+- Installed the packaged `/etc/traceguard/traceguard.env` as `0600 root:root`, and tightened an existing file to that mode on package install and upgrade, so authorization values stored there are not readable by other local users.
 - Closed a DNS policy bypass through IPv6 extension-header chains: a packet with six extension headers now reaches DNS policy, and in block mode a packet whose chain is too long to parse is dropped because it could hide DNS.
-- Broadened `current_cmdline` redaction of monitored processes to password-, token-, and key-style flags, `NAME=value` and `Header: value` arguments, query parameters, URL credentials, and `sh -c` strings. Redaction is best effort, and `current_cmdline` should still be treated as sensitive.
+- Broadened `current_cmdline` redaction of monitored processes to password-, token-, and key-style flags, `NAME=value` and `Header: value` arguments, query parameters, URL credentials, and the same forms inside `sh -c` strings, including quoted values and space-separated flags. Redaction is best effort, and `current_cmdline` should still be treated as sensitive.
 - Documented the environment file and the new authorization file inputs instead of command-line flags for `Authorization` values, which are visible in process listings.
 - Pinned GoReleaser in the release workflow to v2.18.3 instead of `latest`.
 
