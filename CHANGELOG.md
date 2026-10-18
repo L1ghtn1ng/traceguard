@@ -20,6 +20,9 @@ All notable changes to TraceGuard are documented in this file.
 - Added `-connection-dedupe-window` / `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` (default `1m`, at most `1h`, `0` disables) for the previously fixed 60-second suppression of repeated connection and TCP retransmit events.
 - Added observe-only security events from syscall-entry tracepoints, enabled by `-security-events` / `TRACEGUARD_SECURITY_EVENTS` (default `true`): `memfd_create`, `ptrace` (attach, seize, traceme, and poke requests), `process_vm` reads and writes, `module_load`, `bpf_prog_load`, `io_uring_setup`, `mount`, `namespace_change`, and `privilege_change`. They are detection events with event-time kernel identity, and the new `operations` selector matches their operation.
 - Added kernel-captured exec command lines: `exec` events now carry `exec_syscall`, a redacted `command_line` of up to 32 arguments and 255 bytes read at syscall entry, `command_line_truncated`, and `exec_source` (`path`, or `fd` with `exec_fd` for `execveat(AT_EMPTY_PATH)` and `/proc/<pid>/fd` or `/dev/fd` paths). The `command_globs` detection selector is accepted again for `exec` events and matches this command line, and the new `exec_sources` selector matches the source.
+- Added `mitre` (`tactics`, `techniques`) and `compliance` fields to detection rules, carried on alerts as `mitre_tactics`, `mitre_techniques`, and `compliance`. Baseline rules now carry ATT&CK mappings.
+- Added the opt-in `runtime` detection profile, enabled with `builtin_profiles: [runtime]`, with eight rules over security and exec events: kernel module load, BPF program load, ptrace attach or write, process memory write, fileless exec, namespace join, sensitive filesystem mount, and sensitive capability request. It is off by default so upgrades do not change existing alerting.
+- Added the `mount_fstypes` and `capabilities` detection selectors for `mount` and `privilege_change` events.
 
 ### Changed
 

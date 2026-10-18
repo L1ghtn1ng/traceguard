@@ -59,7 +59,7 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 		}
 		// Compile detections before the kernel commit so a failure cannot
 		// leave the kernel and controller on different policies.
-		detections, err = detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs, bundle.DetectionExceptions)
+		detections, err = detection.Compile(bundle)
 		if err != nil {
 			return fmt.Errorf("compile detection policy: %w", err)
 		}
@@ -93,7 +93,7 @@ func validateBundleForMode(cfg config.Config, bundle policyconfig.Bundle) error 
 	if err := validateRulesForMode(cfg, bundle.DNS); err != nil {
 		return err
 	}
-	if _, err := detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs, bundle.DetectionExceptions); err != nil {
+	if _, err := detection.Compile(bundle); err != nil {
 		return fmt.Errorf("compile detection policy: %w", err)
 	}
 	return nil

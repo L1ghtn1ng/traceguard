@@ -24,14 +24,17 @@ type Event struct {
 }
 
 type Alert struct {
-	RuleID    string
-	Severity  string
-	Message   string
-	Tags      []string
-	Count     int
-	Window    time.Duration
-	Timestamp time.Time
-	Fields    map[string]any
+	RuleID     string
+	Severity   string
+	Message    string
+	Tags       []string
+	Tactics    []string
+	Techniques []string
+	Compliance []string
+	Count      int
+	Window     time.Duration
+	Timestamp  time.Time
+	Fields     map[string]any
 }
 
 type Engine struct {
@@ -75,7 +78,7 @@ type groupState struct {
 }
 
 func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
-	compiled, err := Compile(custom, disabled, nil)
+	compiled, err := Compile(policy.Bundle{DetectionRules: custom, DisabledRuleIDs: disabled})
 	if err != nil {
 		return nil, err
 	}
@@ -95,16 +98,18 @@ type CompiledRules struct {
 	exceptions []policy.DetectionException
 }
 
-// Compile validates and compiles detection rules and their exceptions without
-// changing an engine. An exception may name a disabled rule, but not one that
+// Compile validates and compiles a policy's detection rules, built-in
+// profiles, and exceptions without changing an engine. An exception may name
+// a disabled rule or one from a profile that is not enabled, but not one that
 // is neither built in nor defined.
-func Compile(custom []policy.DetectionRule, disabled []string, exceptions []policy.DetectionException) (CompiledRules, error) {
-	rules, err := compileRules(effectiveRules(custom, disabled))
+func Compile(bundle policy.Bundle) (CompiledRules, error) {
+	custom, exceptions := bundle.DetectionRules, bundle.DetectionExceptions
+	rules, err := compileRules(effectiveRules(bundle.BuiltinProfiles, custom, bundle.DisabledRuleIDs))
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	known := make(map[string]struct{}, len(custom)+len(BaselineRules()))
-	for _, rule := range append(BaselineRules(), custom...) {
+	known := make(map[string]struct{}, len(custom))
+	for _, rule := range append(builtinRules(policy.BuiltinProfiles), custom...) {
 		known[rule.ID] = struct{}{}
 	}
 	active := make(map[string]*compiledRule, len(rules))
@@ -134,7 +139,7 @@ func Compile(custom []policy.DetectionRule, disabled []string, exceptions []poli
 }
 
 func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error {
-	compiled, err := Compile(custom, disabled, nil)
+	compiled, err := Compile(policy.Bundle{DetectionRules: custom, DisabledRuleIDs: disabled})
 	if err != nil {
 		return err
 	}
@@ -280,13 +285,22 @@ func (a Alert) RecordFields(sourceEvent string) map[string]any {
 	if a.Window > 0 {
 		fields["threshold_window"] = a.Window.String()
 	}
+	for name, values := range map[string][]string{
+		"mitre_tactics": a.Tactics, "mitre_techniques": a.Techniques, "compliance": a.Compliance,
+	} {
+		if len(values) > 0 {
+			fields[name] = slices.Clone(values)
+		}
+	}
 	return fields
 }
 
 func newAlert(rule *compiledRule, event Event, count int) Alert {
 	return Alert{
 		RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
-		Tags: slices.Clone(rule.rule.Tags), Count: count, Window: rule.rule.Threshold.Within.Duration,
+		Tags: slices.Clone(rule.rule.Tags), Tactics: slices.Clone(rule.rule.MITRE.Tactics),
+		Techniques: slices.Clone(rule.rule.MITRE.Techniques), Compliance: slices.Clone(rule.rule.Compliance),
+		Count: count, Window: rule.rule.Threshold.Within.Duration,
 		Timestamp: event.Timestamp, Fields: cloneFields(event.Fields),
 	}
 }
@@ -423,7 +437,32 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchStrings(match.LSMSources, stringField(fields, "lsm_source")) &&
 		matchStrings(match.LSMLabels, stringField(fields, "lsm_label")) &&
 		matchStrings(match.Operations, stringField(fields, "operation")) &&
-		matchStrings(match.ExecSources, stringField(fields, "exec_source"))
+		matchStrings(match.ExecSources, stringField(fields, "exec_source")) &&
+		matchStrings(match.MountFSTypes, stringField(fields, "mount_fstype")) &&
+		matchAnyListed(match.Capabilities, fields["requested_capabilities"])
+}
+
+// matchAnyListed reports whether any of values appears in a list field, as a
+// live []string or an archived []any.
+func matchAnyListed(values []string, field any) bool {
+	if len(values) == 0 {
+		return true
+	}
+	switch items := field.(type) {
+	case []string:
+		for _, item := range items {
+			if slices.Contains(values, item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range items {
+			if text, ok := item.(string); ok && slices.Contains(values, text) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // commandLineField joins the redacted command_line arguments with spaces. It

@@ -205,11 +205,11 @@ func TestExceptionWatcherPublishesMetricsAndRecordsExpiryOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := detection.Compile(nil, nil, []policyconfig.DetectionException{{
+	compiled, err := detection.Compile(policyconfig.Bundle{DetectionExceptions: []policyconfig.DetectionException{{
 		ID: "agent-imds", Rules: []string{"baseline.cloud-metadata-access"}, Reason: "agent",
 		Expires: policyconfig.Timestamp{Time: time.Unix(100, 0)},
 		Match:   policyconfig.DetectionMatch{UIDs: []uint32{0}},
-	}})
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}

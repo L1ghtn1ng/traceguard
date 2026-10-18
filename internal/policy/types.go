@@ -33,7 +33,21 @@ const (
 	MaxResolverHostnames            = 256
 )
 
-var ruleIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var (
+	ruleIDPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	mitreTacticPattern    = regexp.MustCompile(`^TA[0-9]{4}$`)
+	mitreTechniquePattern = regexp.MustCompile(`^T[0-9]{4}(\.[0-9]{3})?$`)
+)
+
+const (
+	// ProfileBaseline is always enabled.
+	ProfileBaseline = "baseline"
+	// ProfileRuntime adds runtime threat detections over security events.
+	ProfileRuntime = "runtime"
+)
+
+// BuiltinProfiles lists every built-in detection profile.
+var BuiltinProfiles = []string{ProfileBaseline, ProfileRuntime}
 
 type Duration struct {
 	time.Duration
@@ -196,6 +210,15 @@ type DetectionRule struct {
 	Cooldown  Duration       `yaml:"cooldown,omitempty"`
 	Message   string         `yaml:"message"`
 	Tags      []string       `yaml:"tags,omitempty"`
+	MITRE     MITRE          `yaml:"mitre,omitempty"`
+	// Compliance holds free-form control references, such as pci-dss:10.2.7.
+	Compliance []string `yaml:"compliance,omitempty"`
+}
+
+// MITRE maps a detection to MITRE ATT&CK tactic and technique IDs.
+type MITRE struct {
+	Tactics    []string `yaml:"tactics,omitempty"`
+	Techniques []string `yaml:"techniques,omitempty"`
 }
 
 type DetectionMatch struct {
@@ -227,6 +250,8 @@ type DetectionMatch struct {
 	LSMLabels           []string `yaml:"lsm_labels,omitempty"`
 	Operations          []string `yaml:"operations,omitempty"`
 	ExecSources         []string `yaml:"exec_sources,omitempty"`
+	MountFSTypes        []string `yaml:"mount_fstypes,omitempty"`
+	Capabilities        []string `yaml:"capabilities,omitempty"`
 }
 
 // DetectionException suppresses alerts from the listed rules for events that
@@ -270,7 +295,7 @@ func (d Document) Validate() error {
 		return fmt.Errorf("unsupported policy version %d, want %d", d.Version, Version)
 	}
 	for _, profile := range d.BuiltinProfiles {
-		if profile != "baseline" {
+		if !slices.Contains(BuiltinProfiles, profile) {
 			return fmt.Errorf("unsupported builtin profile %q", profile)
 		}
 	}
@@ -514,6 +539,31 @@ func (r DetectionRule) validate() error {
 			return fmt.Errorf("invalid tag %q", tag)
 		}
 	}
+	for name, values := range map[string][]string{
+		"mitre tactic": r.MITRE.Tactics, "mitre technique": r.MITRE.Techniques, "compliance reference": r.Compliance,
+	} {
+		if len(values) > 16 {
+			return fmt.Errorf("%s count %d exceeds 16", name, len(values))
+		}
+		if err := validateUnique(values, name); err != nil {
+			return err
+		}
+	}
+	for _, tactic := range r.MITRE.Tactics {
+		if !mitreTacticPattern.MatchString(tactic) {
+			return fmt.Errorf("invalid mitre tactic %q; use an ID such as TA0005", tactic)
+		}
+	}
+	for _, technique := range r.MITRE.Techniques {
+		if !mitreTechniquePattern.MatchString(technique) {
+			return fmt.Errorf("invalid mitre technique %q; use an ID such as T1055 or T1055.008", technique)
+		}
+	}
+	for _, reference := range r.Compliance {
+		if strings.TrimSpace(reference) == "" || len(reference) > 64 {
+			return fmt.Errorf("invalid compliance reference %q", reference)
+		}
+	}
 	if r.Cooldown.Duration < 0 {
 		return fmt.Errorf("cooldown must not be negative")
 	}
@@ -605,6 +655,8 @@ func (m DetectionMatch) validate() error {
 		"lsm labels":            len(m.LSMLabels),
 		"operations":            len(m.Operations),
 		"exec sources":          len(m.ExecSources),
+		"mount fstypes":         len(m.MountFSTypes),
+		"capabilities":          len(m.Capabilities),
 	} {
 		if count > MaxRuleListValues {
 			return fmt.Errorf("%s count %d exceeds %d", name, count, MaxRuleListValues)
@@ -686,7 +738,8 @@ func (m DetectionMatch) Empty() bool {
 		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
 		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
 		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
-		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations)+len(m.ExecSources) == 0
+		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations)+len(m.ExecSources)+
+		len(m.MountFSTypes)+len(m.Capabilities) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {
@@ -742,14 +795,27 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 			}
 		}
 	}
-	for name, count := range map[string]int{"command_globs": len(match.CommandGlobs), "exec_sources": len(match.ExecSources)} {
-		if count == 0 {
+	for _, selector := range []struct {
+		name, event, reason string
+		count               int
+	}{
+		{"command_globs", "exec", "whose command line is captured at syscall entry", len(match.CommandGlobs)},
+		{"exec_sources", "exec", "whose executable source is captured at syscall entry", len(match.ExecSources)},
+		{"mount_fstypes", "mount", "which carry the requested filesystem type", len(match.MountFSTypes)},
+		{"capabilities", "privilege_change", "whose capset requests carry capabilities", len(match.Capabilities)},
+	} {
+		if selector.count == 0 {
 			continue
 		}
 		for _, event := range events {
-			if event != "exec" {
-				return fmt.Errorf("%s require exec events, whose command line and executable source are captured at syscall entry; %q is unsupported", name, event)
+			if event != selector.event {
+				return fmt.Errorf("%s require %s events, %s; %q is unsupported", selector.name, selector.event, selector.reason, event)
 			}
+		}
+	}
+	for _, capability := range match.Capabilities {
+		if !slices.Contains(CapabilityNames, capability) {
+			return fmt.Errorf("unsupported capability %q", capability)
 		}
 	}
 	if len(match.Operations) > 0 {
@@ -825,6 +891,15 @@ var supportedDetectionEvents = []string{
 	"sockopt_blocked", "sockopt_would_block", "tcp_sockops",
 	"memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load",
 	"io_uring_setup", "mount", "namespace_change", "privilege_change",
+}
+
+// CapabilityNames lists the capabilities a capset event can report: the low
+// 32 capability bits, in bit order.
+var CapabilityNames = []string{
+	"chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid",
+	"setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw", "ipc_lock", "ipc_owner",
+	"sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice",
+	"sys_resource", "sys_time", "sys_tty_config", "mknod", "lease", "audit_write", "audit_control", "setfcap",
 }
 
 // SecurityEventOperations lists the operation names each security event can

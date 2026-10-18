@@ -19,7 +19,7 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - mediate inet binds, AF_UNIX operations, and selected socket options
 - observe TCP established, listen, retransmit, and close sockops signals
 - load a strict YAML v1 policy from a local file, HTTPS endpoint, or both
-- emit bounded alert-only detections over fully enriched events, with a default baseline
+- emit bounded alert-only detections over fully enriched events, with a default baseline and an opt-in runtime threat profile, mapped to MITRE ATT&CK
 - expose health and Prometheus-style metrics over HTTP
 - optionally archive JSON events locally and export them to an HTTPS collector
 - support batched authenticated HTTPS export with durable retry spooling

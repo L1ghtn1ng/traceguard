@@ -51,3 +51,32 @@ func TestExecSelectorValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectionMetadataAndRuntimeSelectorValidation(t *testing.T) {
+	t.Parallel()
+
+	rule := func(events, extra string) string {
+		return "version: 1\nbuiltin_profiles: [baseline, runtime]\ndetections:\n  - id: probe\n    severity: warning\n    message: probe\n    events: " +
+			events + "\n" + extra
+	}
+	if _, err := Parse([]byte(rule("[privilege_change]", "    match: {operations: [capset], capabilities: [sys_admin]}\n    mitre: {tactics: [TA0004], techniques: [T1548, T1055.008]}\n    compliance: [pci-dss:10.2.7]\n"))); err != nil {
+		t.Fatalf("valid metadata rejected: %v", err)
+	}
+	for name, test := range map[string]struct {
+		events, extra, want string
+	}{
+		"bad tactic":          {"[exec]", "    mitre: {tactics: [Defense Evasion]}\n", "invalid mitre tactic"},
+		"bad technique":       {"[exec]", "    mitre: {techniques: [T1055.8]}\n", "invalid mitre technique"},
+		"empty compliance":    {"[exec]", "    compliance: [\" \"]\n", "invalid compliance reference"},
+		"fstype on exec":      {"[exec]", "    match: {mount_fstypes: [debugfs]}\n", "mount_fstypes require mount events"},
+		"unknown capability":  {"[privilege_change]", "    match: {capabilities: [cap_sys_admin]}\n", `unsupported capability "cap_sys_admin"`},
+		"capability on mount": {"[mount]", "    match: {capabilities: [sys_admin]}\n", "capabilities require privilege_change events"},
+	} {
+		if _, err := Parse([]byte(rule(test.events, test.extra))); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: error = %v, want %q", name, err, test.want)
+		}
+	}
+	if _, err := Parse([]byte("version: 1\nbuiltin_profiles: [advanced]\n")); err == nil || !strings.Contains(err.Error(), "unsupported builtin profile") {
+		t.Fatalf("unknown profile error = %v", err)
+	}
+}

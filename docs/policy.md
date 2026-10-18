@@ -70,7 +70,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | Field | Purpose |
 | --- | --- |
 | `version` | Policy format version. The only supported value is `1`. |
-| `builtin_profiles` | Explicitly lists built-in detection profiles. The only supported profile is `baseline`, which is enabled by default. |
+| `builtin_profiles` | Built-in detection profiles: `baseline`, always enabled, and the opt-in `runtime` profile. |
 | `disabled_rule_ids` | Removes enforcement, custom detection, or built-in detection rule IDs after policy sources are merged. |
 | `dns` | Domain and encrypted-resolver block/allow entries. |
 | `egress` | Outbound TCP/UDP policy, including the default action. |
@@ -624,6 +624,8 @@ Or after a threshold:
 | `cooldown` | No | Suppresses another alert for the same rule and group for this duration. |
 | `message` | Yes when enabled | Human-readable alert text. |
 | `tags` | No | Up to 16 labels, each at most 64 characters. |
+| `mitre` | No | MITRE ATT&CK mapping: `tactics` such as `TA0005` and `techniques` such as `T1055` or `T1055.008`, up to 16 each. |
+| `compliance` | No | Up to 16 free-form control references, such as `pci-dss:10.2.7`, each at most 64 characters. |
 
 As with egress rules, values within one match list are OR conditions and
 different non-empty fields are AND conditions. The `exclude` block uses the
@@ -679,6 +681,8 @@ The last nine are [security events](#security-events).
 | `executable_globs` | Kernel-resolved executable path globs; valid only with `exec_blocked` and `exec_would_block`. |
 | `command_globs` | Globs over the redacted command line joined with spaces, where `*` also matches `/`; valid only with `exec`. See [exec command lines](#exec-command-lines). |
 | `exec_sources` | `path`, or `fd` for an executable named by file descriptor; valid only with `exec`. |
+| `mount_fstypes` | Requested filesystem type, such as `debugfs`; valid only with `mount`. |
+| `capabilities` | Matches when any listed capability is in a `capset` request's `requested_capabilities`; valid only with `privilege_change`. Names are lowercase without the `cap_` prefix, such as `sys_admin`. |
 | `file_path_globs` | Kernel-resolved file path globs; valid only with `file_blocked` and `file_would_block`. |
 | `unix_path_globs` | AF_UNIX socket paths; valid only with `unix_blocked` and `unix_would_block`. |
 | `file_access` | `read`, `write`, or `unknown`. |
@@ -870,6 +874,11 @@ The baseline rules are enabled by default:
 | `baseline.inbound-ssh-bruteforce` | Twenty inbound TCP connection attempts to local port 22 from the same remote address within one minute, with a ten-minute cooldown per address. Redefine it with your SSH port or threshold, or disable it on bastion hosts that legitimately receive many connections from one address. |
 | `baseline.policy-denial-burst` | Five resolver, egress, exec, file, bind, Unix, or sockopt denials within one minute for the same cgroup and executable. Plaintext DNS packet decisions are excluded because their process identity may be cache-only. |
 
+Baseline rules carry MITRE ATT&CK mappings: `baseline.cloud-metadata-access`
+is `TA0006`/`T1552.005`, `baseline.direct-email-egress` is `TA0010`, `TA0011`
+/`T1048`, `T1071.003`, and `baseline.inbound-ssh-bruteforce` is
+`TA0006`/`T1110`.
+
 Disable a baseline rule:
 
 ```yaml
@@ -894,6 +903,48 @@ detections:
     message: sustained policy denial burst
     tags: [baseline, policy]
 ```
+
+### Runtime detection profile
+
+The `runtime` profile adds detections over [security events](#security-events)
+and exec command sources. It is off by default, so upgrading never changes
+which alerts a host raises; enable it explicitly:
+
+```yaml
+version: 1
+builtin_profiles: [runtime]
+```
+
+Every runtime rule groups by the acting cgroup and executable with a cooldown,
+so one noisy process cannot hide another's first occurrence.
+
+| Rule ID | Severity | Detects | ATT&CK |
+| --- | --- | --- | --- |
+| `runtime.kernel-module-load` | warning | An `init_module` or `finit_module` request. | `TA0003`, `TA0005` / `T1547.006` |
+| `runtime.bpf-program-load` | notice | A BPF program load. Container networking and observability agents load programs routinely; add exceptions for them. | `TA0005` / `T1014` |
+| `runtime.ptrace-attach` | warning | Ptrace `attach`, `seize`, or a `poke*` write into another process. | `TA0004`, `TA0005` / `T1055.008` |
+| `runtime.process-memory-write` | warning | `process_vm_writev` into another process. | `TA0004`, `TA0005` / `T1055` |
+| `runtime.fileless-exec` | warning | An exec of a file descriptor instead of a path, as from a memfd. runc re-executes itself this way when it starts a container. | `TA0005` / `T1620` |
+| `runtime.namespace-join` | notice | `setns` into another namespace, as `nsenter` does. Container runtimes do this routinely. | `TA0004` / `T1611` |
+| `runtime.sensitive-filesystem-mount` | warning | A `debugfs`, `tracefs`, or `securityfs` mount. systemd mounts these once at boot. | `TA0004` / `T1611` |
+| `runtime.sensitive-capability-request` | notice | A `capset` request for `sys_admin`, `sys_module`, `sys_ptrace`, or `sys_rawio`. | `TA0004` / `T1548` |
+
+Tune them with [exceptions](#detection-exceptions), for example for runc on a
+container host:
+
+```yaml
+version: 1
+builtin_profiles: [runtime]
+detection_exceptions:
+  - id: runc-self-reexec
+    rules: [runtime.fileless-exec]
+    reason: runc re-executes itself from a memfd at container start
+    match:
+      uids: [0]
+```
+
+Measure a profile's noise on recorded events with
+[replay](#testing-rules-with-replay) before enabling it on a fleet.
 
 ### Detection exceptions
 
@@ -967,7 +1018,8 @@ Alerts use `event=detection_alert`. They retain the source event fields and add:
 - `severity`;
 - `detection_message`;
 - `tags`;
-- `threshold_count` and, for threshold rules, `threshold_window`.
+- `threshold_count` and, for threshold rules, `threshold_window`;
+- `mitre_tactics`, `mitre_techniques`, and `compliance`, when the rule sets them.
 
 Telemetry is bounded before it reaches any sink: messages and individual
 strings are limited to 4 KiB, records to 128 fields and 32 KiB serialized,

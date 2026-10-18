@@ -33,7 +33,7 @@ func installExceptions(t *testing.T, exceptions ...policy.DetectionException) *E
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, err := Compile(nil, []string{"baseline.direct-email-egress", "baseline.policy-denial-burst"}, exceptions)
+	compiled, err := Compile(policy.Bundle{DisabledRuleIDs: []string{"baseline.direct-email-egress", "baseline.policy-denial-burst"}, DetectionExceptions: exceptions})
 	if err != nil {
 		t.Fatalf("Compile returned error: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestExceptedEventsDoNotCountTowardThresholds(t *testing.T) {
 		ID: "root-burst", Rules: []string{"outbound-burst"}, Reason: "root is expected",
 		Match: policy.DetectionMatch{UIDs: []uint32{0}},
 	}
-	compiled, err := Compile([]policy.DetectionRule{rule}, []string{"baseline.cloud-metadata-access"}, []policy.DetectionException{exception})
+	compiled, err := Compile(policy.Bundle{DetectionRules: []policy.DetectionRule{rule}, DisabledRuleIDs: []string{"baseline.cloud-metadata-access"}, DetectionExceptions: []policy.DetectionException{exception}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestInstallKeepsSuppressionCountsForRetainedExceptions(t *testing.T) {
 	engine.Evaluate(metadataEvent(1, 0))
 	engine.Evaluate(metadataEvent(2, 0))
 
-	compiled, err := Compile(nil, nil, []policy.DetectionException{metadataException(time.Time{})})
+	compiled, err := Compile(policy.Bundle{DetectionExceptions: []policy.DetectionException{metadataException(time.Time{})}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,12 +133,12 @@ func TestCompileRejectsInvalidExceptionReferences(t *testing.T) {
 
 	unknown := metadataException(time.Time{})
 	unknown.Rules = []string{"no-such-rule"}
-	if _, err := Compile(nil, nil, []policy.DetectionException{unknown}); err == nil || !strings.Contains(err.Error(), "unknown rule") {
+	if _, err := Compile(policy.Bundle{DetectionExceptions: []policy.DetectionException{unknown}}); err == nil || !strings.Contains(err.Error(), "unknown rule") {
 		t.Fatalf("unknown rule error = %v", err)
 	}
 
 	disabled := metadataException(time.Time{})
-	if _, err := Compile(nil, []string{"baseline.cloud-metadata-access"}, []policy.DetectionException{disabled}); err != nil {
+	if _, err := Compile(policy.Bundle{DisabledRuleIDs: []string{"baseline.cloud-metadata-access"}, DetectionExceptions: []policy.DetectionException{disabled}}); err != nil {
 		t.Fatalf("exception for a disabled rule returned error: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestCompileRejectsInvalidExceptionReferences(t *testing.T) {
 		ID: "dns-root", Rules: []string{"dns-watch"}, Reason: "root lookups",
 		Match: policy.DetectionMatch{UIDs: []uint32{0}},
 	}
-	if _, err := Compile([]policy.DetectionRule{dnsRule}, nil, []policy.DetectionException{byUID}); err == nil || !strings.Contains(err.Error(), "event-time process identity") {
+	if _, err := Compile(policy.Bundle{DetectionRules: []policy.DetectionRule{dnsRule}, DetectionExceptions: []policy.DetectionException{byUID}}); err == nil || !strings.Contains(err.Error(), "event-time process identity") {
 		t.Fatalf("identity exception on DNS rule error = %v", err)
 	}
 }
@@ -160,10 +160,10 @@ func TestCompileRejectsInvalidExceptionReferences(t *testing.T) {
 func TestOperationsSelectorMatchesEventOperation(t *testing.T) {
 	t.Parallel()
 
-	compiled, err := Compile([]policy.DetectionRule{{
+	compiled, err := Compile(policy.Bundle{DetectionRules: []policy.DetectionRule{{
 		ID: "ptrace-attach", Severity: "warning", Events: []string{"ptrace"}, Message: "attach",
 		Match: policy.DetectionMatch{Operations: []string{"attach", "seize"}},
-	}}, []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}, nil)
+	}}, DisabledRuleIDs: []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +186,10 @@ func TestOperationsSelectorMatchesEventOperation(t *testing.T) {
 func TestExecSelectorsMatchCommandLineAndSource(t *testing.T) {
 	t.Parallel()
 
-	compiled, err := Compile([]policy.DetectionRule{{
+	compiled, err := Compile(policy.Bundle{DetectionRules: []policy.DetectionRule{{
 		ID: "fd-curl", Severity: "warning", Events: []string{"exec"}, Message: "fd curl",
 		Match: policy.DetectionMatch{CommandGlobs: []string{"curl *http://*"}, ExecSources: []string{"fd"}},
-	}}, []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}, nil)
+	}}, DisabledRuleIDs: []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}})
 	if err != nil {
 		t.Fatal(err)
 	}

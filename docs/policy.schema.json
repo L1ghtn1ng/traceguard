@@ -10,7 +10,7 @@
     "builtin_profiles": {
       "type": "array",
       "uniqueItems": true,
-      "items": {"const": "baseline"}
+      "items": {"enum": ["baseline", "runtime"]}
     },
     "disabled_rule_ids": {
       "type": "array",
@@ -357,6 +357,20 @@
           "type": "array",
           "maxItems": 16,
           "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "mitre": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tactics": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^TA[0-9]{4}$"}},
+            "techniques": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^T[0-9]{4}(\\.[0-9]{3})?$"}}
+          }
+        },
+        "compliance": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
         }
       }
     },
@@ -410,6 +424,12 @@
           "description": "Globs over the redacted exec command line joined with spaces; valid only with exec events."
         },
         "exec_sources": {"type": "array", "items": {"enum": ["path", "fd"]}, "description": "Valid only with exec events."},
+        "mount_fstypes": {"$ref": "#/$defs/string_list", "description": "Requested filesystem type; valid only with mount events."},
+        "capabilities": {
+          "type": "array",
+          "items": {"enum": ["chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid", "setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw", "ipc_lock", "ipc_owner", "sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice", "sys_resource", "sys_time", "sys_tty_config", "mknod", "lease", "audit_write", "audit_control", "setfcap"]},
+          "description": "Requested capset capabilities; valid only with privilege_change events."
+        },
         "operations": {
           "type": "array",
           "maxItems": 256,

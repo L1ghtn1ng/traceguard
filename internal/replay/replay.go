@@ -126,7 +126,7 @@ func newEngine(policyPath string) (*detection.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	compiled, err := detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs, bundle.DetectionExceptions)
+	compiled, err := detection.Compile(bundle)
 	if err != nil {
 		return nil, fmt.Errorf("compile detection policy: %w", err)
 	}

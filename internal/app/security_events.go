@@ -8,6 +8,7 @@ import (
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
+	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 )
 
 // Operation codes mirror the PROCESS_VM_*, MODULE_LOAD_*, NAMESPACE_*, and
@@ -36,15 +37,6 @@ func namedBits(value uint32, names []string) []string {
 }
 
 var memfdFlagNames = []string{"cloexec", "allow_sealing", "hugetlb", "noexec_seal", "exec"}
-
-// capabilityNames covers the low 32 capability bits that capset's first
-// data word carries.
-var capabilityNames = []string{
-	"chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid",
-	"setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw", "ipc_lock", "ipc_owner",
-	"sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice",
-	"sys_resource", "sys_time", "sys_tty_config", "mknod", "lease", "audit_write", "audit_control", "setfcap",
-}
 
 // namespaceFlags maps CLONE_NEW* bits to namespace names.
 var namespaceFlags = []struct {
@@ -142,7 +134,7 @@ func appendSecurityEventFields(fields map[string]any, event ebpf.Event, procRoot
 				fields["requested_gid"] = event.FileMode
 			}
 		case "capset":
-			fields["requested_capabilities"] = namedBits(event.FileFlags, capabilityNames)
+			fields["requested_capabilities"] = namedBits(event.FileFlags, policyconfig.CapabilityNames)
 		}
 	}
 }
