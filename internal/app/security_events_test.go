@@ -75,6 +75,9 @@ func TestAppendSecurityEventFields(t *testing.T) {
 		{"finit_module", ebpf.Event{Kind: ebpf.EventModuleLoad, PID: 42, Operation: 1, FileMode: 3}, map[string]any{
 			"operation": "finit_module", "module_fd": uint32(3), "module_flags": uint32(0), "module_path": "/lib/modules/rootkit.ko",
 		}},
+		{"init_module params", ebpf.Event{Kind: ebpf.EventModuleLoad, Filename: "debug=1 password=hunter2 verbose"}, map[string]any{
+			"operation": "init_module", "module_param_names": []string{"debug", "password", "verbose"},
+		}},
 		{"bpf", ebpf.Event{Kind: ebpf.EventBPFProgLoad, FileMode: 29}, map[string]any{"bpf_prog_type": "lsm"}},
 		{"bpf unknown", ebpf.Event{Kind: ebpf.EventBPFProgLoad, FileMode: 999}, map[string]any{"bpf_prog_type": "unknown_999"}},
 		{"mount", ebpf.Event{Kind: ebpf.EventMount, MountSource: "/dev/sda1", Filename: "/mnt", MountFSType: "ext4", FileFlags: 1}, map[string]any{

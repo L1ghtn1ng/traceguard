@@ -3894,6 +3894,16 @@ static __always_inline void copy_exec_argv(struct event *event, const char *cons
 		if (copied <= 0) {
 			break;
 		}
+		if (copied == EXEC_ARGV_BYTES) {
+			/* The read filled its limit, so the argument is either exactly
+			 * EXEC_ARGV_BYTES - 1 bytes long or was cut at that length.
+			 */
+			char next = 0;
+
+			if (bpf_probe_read_user(&next, sizeof(next), arg + EXEC_ARGV_BYTES - 1) != 0 || next) {
+				event->file_flags |= EXEC_ARGV_TRUNCATED;
+			}
+		}
 		offset += (__u32)copied;
 		argc++;
 		if (index == EXEC_ARGV_MAX - 1) {
@@ -3902,9 +3912,9 @@ static __always_inline void copy_exec_argv(struct event *event, const char *cons
 			}
 		}
 	}
-	if (offset >= EXEC_ARGV_BYTES) {
-		/* The last argument reached the end of the copied bytes, so it may
-		 * have been cut.
+	if (offset > EXEC_ARGV_BYTES) {
+		/* The last argument runs past the bytes the event carries. One that
+		 * ends exactly at the limit fits with its terminator.
 		 */
 		event->file_flags |= EXEC_ARGV_TRUNCATED;
 	}

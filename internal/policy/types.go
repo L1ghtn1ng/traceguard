@@ -105,8 +105,8 @@ type FileIntegrityPolicy struct {
 	// Hash enables SHA-256 content hashing; it defaults to true.
 	Hash *bool `yaml:"hash,omitempty"`
 	// MaxHashBytes caps the size of a hashed file; larger files are compared
-	// by metadata only.
-	MaxHashBytes int64 `yaml:"max_hash_bytes,omitempty"`
+	// by metadata only. 0 selects the default, so an overlay can restore it.
+	MaxHashBytes *int64 `yaml:"max_hash_bytes,omitempty"`
 	// RescanInterval is the full rescan period; 0 disables periodic rescans.
 	RescanInterval *Duration `yaml:"rescan_interval,omitempty"`
 }
@@ -119,10 +119,10 @@ func (f FileIntegrityPolicy) HashEnabled() bool { return f.Hash == nil || *f.Has
 
 // HashLimit returns the largest file size that is hashed.
 func (f FileIntegrityPolicy) HashLimit() int64 {
-	if f.MaxHashBytes == 0 {
+	if f.MaxHashBytes == nil || *f.MaxHashBytes == 0 {
 		return DefaultFileIntegrityHashBytes
 	}
-	return f.MaxHashBytes
+	return *f.MaxHashBytes
 }
 
 // Rescan returns the periodic rescan interval, 0 when disabled.
@@ -150,7 +150,7 @@ func (f FileIntegrityPolicy) validate() error {
 			}
 		}
 	}
-	if f.MaxHashBytes < 0 || f.MaxHashBytes > MaxFileIntegrityHashBytes {
+	if f.MaxHashBytes != nil && (*f.MaxHashBytes < 0 || *f.MaxHashBytes > MaxFileIntegrityHashBytes) {
 		return fmt.Errorf("max_hash_bytes must be between 0 and %d", MaxFileIntegrityHashBytes)
 	}
 	if f.RescanInterval != nil && f.RescanInterval.Duration != 0 && f.RescanInterval.Duration < MinFileIntegrityRescan {

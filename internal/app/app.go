@@ -148,7 +148,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	workers.Go(func() { integrity.Run(ctx, newIntegrityEmitter(recorder, metrics, detector)) })
 	integrityStats := &integrityStatsWatcher{watcher: integrity, metrics: metrics, recorder: recorder}
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, integrityStats.collect) })
-	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector, integrity)
+	detections := newDetectionGate(func(timestamp time.Time, name string, fields map[string]any) {
+		emitDetectionAlerts(detector, recorder, metrics, timestamp, name, fields)
+	})
+	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detections, integrity)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
 	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity)
@@ -253,6 +256,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	exceptions := newExceptionWatcher(detector, metrics, recorder)
 	exceptions.collect(time.Now())
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, exceptions.collect) })
+	if skipped := detections.arm(); skipped > 0 {
+		recorder.Error("detection skipped events read while policy loaded", nil, map[string]any{"skipped_events": skipped})
+	}
 
 	started = true
 	monitor.KeepPins()
@@ -274,12 +280,17 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 // newEventHandler enriches, records, and evaluates detections for each
 // kernel event read from the ring buffer.
-func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine, integrity *fim.Watcher) func(ebpf.Event) {
+func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detections *detectionGate, integrity *fim.Watcher) func(ebpf.Event) {
 	selfPID := uint32(os.Getpid()) //nolint:gosec // PIDs fit in 32 bits
 	return func(event ebpf.Event) {
 		// File integrity hashing opens every watched file; auditing the
 		// daemon's own file activity would only report that work.
 		if (event.Kind == ebpf.EventFileAccess || event.Kind == ebpf.EventFileChange) && event.PID == selfPID {
+			return
+		}
+		// File change hooks stay attached for file integrity monitoring;
+		// without file auditing, their events serve only that.
+		if event.Kind == ebpf.EventFileChange && !cfg.FileAudit && !integrity.Enabled() {
 			return
 		}
 		process, hit := lookupProcessForEvent(processCache, event)
@@ -453,8 +464,11 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			notifyIntegrity(integrity, "/proc", event, fields)
 		case ebpf.EventFileChange:
 			appendFileChangeFields(fields, event)
-			recorder.InfoAt(event.Timestamp, eventName, fields)
 			notifyIntegrity(integrity, "/proc", event, fields)
+			if !cfg.FileAudit {
+				return
+			}
+			recorder.InfoAt(event.Timestamp, eventName, fields)
 		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 			fields["direction"] = event.Direction
 			fields["peer_address"] = event.Address
@@ -536,6 +550,6 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			fields["kind"] = event.Kind
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}
-		emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
+		detections.submit(event.Timestamp, eventName, fields)
 	}
 }

@@ -822,7 +822,7 @@ High-rate requests are filtered in the kernel: `ptrace` emits only `traceme`,
 | `memfd_create` | `memfd_name`, `memfd_flags` (`cloexec`, `allow_sealing`, `hugetlb`, `noexec_seal`, `exec`) | — |
 | `ptrace` | `operation`, `target_pid` | `traceme`, `poketext`, `pokedata`, `pokeuser`, `attach`, `seize` |
 | `process_vm` | `operation`, `target_pid` | `read`, `write` |
-| `module_load` | `operation`, `module_params`; for `finit_module` also `module_fd`, `module_flags`, and `module_path` when the descriptor can be read from `/proc` | `init_module`, `finit_module` |
+| `module_load` | `operation`, `module_param_names` (parameter names only; values are dropped because they can hold credentials); for `finit_module` also `module_fd`, `module_flags`, and `module_path` when the descriptor can be read from `/proc` | `init_module`, `finit_module` |
 | `bpf_prog_load` | `bpf_prog_type`, such as `kprobe`, `tracepoint`, `xdp`, or `lsm` | — |
 | `io_uring_setup` | `io_uring_entries`, `io_uring_flags` | — |
 | `mount` | `mount_source`, `mount_target`, `mount_fstype`, `mount_flags` | — |
@@ -948,7 +948,13 @@ detection_exceptions:
     reason: runc re-executes itself from a memfd at container start
     match:
       uids: [0]
+      command_globs: ["runc init"]
 ```
+
+The command line is chosen by the process that calls exec, so any root process
+can present `runc init`; the exception narrows the rule, it does not
+authenticate runc. Check the command line your runtime records, which varies by
+runtime and version, before copying the glob.
 
 Measure a profile's noise on recorded events with
 [replay](#testing-rules-with-replay) before enabling it on a fleet.
@@ -1061,7 +1067,7 @@ file_integrity:
 | `paths` | — | Exact clean absolute paths, or subtrees ending in `/**`. Watching starts when at least one is set. |
 | `exclude` | — | Paths or subtrees within `paths` to skip. |
 | `hash` | `true` | Record a SHA-256 of each regular file. |
-| `max_hash_bytes` | 16 MiB | Larger files are compared by size and modification time instead; at most 1 GiB. |
+| `max_hash_bytes` | 16 MiB | Larger files are compared by size and modification time instead; at most 1 GiB. `0` selects the default. |
 | `rescan_interval` | `1h` | Period of the full rescan; `0` disables it, otherwise at least `1m`. |
 
 A remote base and local overlay watch the union of their `paths` and
@@ -1080,15 +1086,22 @@ is `1` and a `file integrity baseline truncated` error is recorded.
 
 Changes are then found two ways:
 
-- With file auditing on, a write or create open and a
-  [file change event](#file-change-events) on a watched path, or on a directory
-  above one, such as a renamed parent, queue that path. One second later
+- A [file change event](#file-change-events) on a watched path, or on a
+  directory above one, such as a renamed parent, queues that path, as does a
+  write or create open when file auditing is on. One second later
   TraceGuard rechecks it and compares it with the baseline, so a burst of writes
   produces one report. Relative paths are resolved through the process's
   `/proc` working directory or descriptor, which needs ptrace access to the
-  process; paths that cannot be resolved wait for the rescan.
+  process; paths that cannot be resolved wait for the rescan. Events from
+  processes in another mount namespace, such as a container's, are skipped,
+  because their paths name that namespace's files; the rescan covers writes
+  they make to host files through bind mounts.
 - Every `rescan_interval`, a full rescan reports any difference events missed,
   such as writes through a descriptor opened earlier.
+
+With file auditing off, writes reach file integrity monitoring only through
+the rescan, and TraceGuard records an error saying so when the policy is
+applied; with `rescan_interval: 0` as well, content changes go unseen.
 
 Each difference is recorded as a `file_integrity` event and evaluated by
 detection rules:
@@ -1117,7 +1130,9 @@ specific subtrees to `/**`.
 
 ### File change events
 
-With file auditing, `file_change` events report path-based unlink, rmdir,
+The file change hooks attach whether or not file auditing is on, so file
+integrity monitoring always sees these requests; `file_change` events are
+recorded only with file auditing. They report path-based unlink, rmdir,
 rename, chmod, chown, and truncate requests at syscall entry, with
 `requested_path`, `operation`, and as relevant `new_path`, `requested_mode`,
 `requested_uid`, `requested_gid`, `truncate_length`, `requested_dirfd`, and
