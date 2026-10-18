@@ -34,6 +34,11 @@
       "maxItems": 256,
       "items": {"$ref": "#/$defs/detection_exception"}
     },
+    "detection_sequences": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/detection_sequence"}
+    },
     "file_integrity": {
       "type": "object",
       "additionalProperties": false,
@@ -382,6 +387,38 @@
           "maxItems": 16,
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      }
+    },
+    "detection_sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "key", "within", "steps", "message"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "enabled": {"type": "boolean"},
+        "severity": {"enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]},
+        "key": {"enum": ["process", "cgroup"]},
+        "within": {"$ref": "#/$defs/duration"},
+        "cooldown": {"$ref": "#/$defs/duration"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "tags": {"$ref": "#/$defs/detection/properties/tags"},
+        "mitre": {"$ref": "#/$defs/detection/properties/mitre"},
+        "compliance": {"$ref": "#/$defs/detection/properties/compliance"},
+        "steps": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["events"],
+            "properties": {
+              "events": {"$ref": "#/$defs/detection/properties/events"},
+              "match": {"$ref": "#/$defs/detection_match"},
+              "exclude": {"$ref": "#/$defs/detection_match"}
+            }
+          }
         }
       }
     },

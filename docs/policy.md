@@ -82,6 +82,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | `sockopt` | Selected `setsockopt` level/name policy. |
 | `detections` | Alert-only rules evaluated against enriched TraceGuard events. |
 | `detection_exceptions` | Scoped, expiring suppressions for named detection rules. |
+| `detection_sequences` | Correlation rules that alert when ordered steps match for one process or cgroup within a window. |
 | `file_integrity` | Files whose content and attributes are baselined and compared after changes. |
 
 A minimal document is:
@@ -993,6 +994,53 @@ one with the same ID. Each exception reports through:
 - the heartbeat's `detection_exceptions` and `expired_detection_exceptions`
   fields.
 
+### Detection sequences
+
+A sequence alerts when its steps match in order for the same key within a time
+window, which single-event rules cannot express:
+
+```yaml
+version: 1
+detection_sequences:
+  - id: web-shell-egress
+    severity: critical
+    key: cgroup
+    within: 5m
+    steps:
+      - events: [exec]
+        match:
+          command_globs: ["sh -c *", "bash -c *"]
+      - events: [connection]
+        match:
+          directions: [outbound]
+    cooldown: 30m
+    message: a shell started in a cgroup that then connected out
+    mitre:
+      tactics: [TA0002, TA0011]
+      techniques: [T1059.004]
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | Yes | Unique among rules and sequences. |
+| `key` | Yes | `process` follows one process by its event-time PID and start time, across execs; `cgroup` follows its event-time cgroup ID, such as one container or service. |
+| `within` | Yes | Window from the first step's event, at most one hour. |
+| `steps` | Yes | Two to eight steps, each with `events` and optional `match` and `exclude`, using the same fields as rules. |
+| `cooldown` | No | Suppresses another alert for the same key. |
+| `severity`, `message`, `tags`, `mitre`, `compliance`, `enabled` | As for rules | |
+
+Both keys come from the kernel's event-time snapshot, so every step must use
+events with that identity: DNS packet events, sockops, file integrity
+changes, and connection steps that may match inbound TCP are rejected.
+
+Each key advances one step at a time. An event that matches the next step
+moves it on; events that match no step, or a later step out of order, are
+ignored. When the window passes, progress resets. The alert carries the final
+event's fields, `threshold_count` as the step count, `threshold_window`, and
+`sequence_started`. Exceptions may name a sequence; their match is checked
+against the final event. At most 64 sequences and 16,384 in-progress keys are
+kept; when that is full, new sequences start only as old ones expire.
+
 ### Testing rules with replay
 
 `-replay` evaluates detection rules over a JSONL event archive written by
@@ -1410,6 +1458,8 @@ Important limits:
 | Detection rules | 256 |
 | Detection exceptions | 256 |
 | Detection exception reason | 512 bytes |
+| Detection sequences | 64, with 2 to 8 steps each |
+| In-progress sequence keys | 16,384 |
 | File integrity paths and excludes | 256 |
 | File integrity baseline | 100,000 entries |
 | Values in one rule list | 256 |

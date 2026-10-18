@@ -85,6 +85,9 @@ func Merge(base, overlay Document) (Bundle, error) {
 	for _, rule := range overlay.DetectionRules {
 		overlayIDs[rule.ID] = struct{}{}
 	}
+	for _, sequence := range overlay.DetectionSequences {
+		overlayIDs[sequence.ID] = struct{}{}
+	}
 	mergeDetectionByID := func(baseRules, overlayRules []DetectionRule) []DetectionRule {
 		merged := make(map[string]DetectionRule, len(baseRules)+len(overlayRules))
 		for _, rule := range baseRules {
@@ -152,6 +155,7 @@ func Merge(base, overlay Document) (Bundle, error) {
 		},
 		DetectionRules:      mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
 		DetectionExceptions: mergeExceptionsByID(base.DetectionExceptions, overlay.DetectionExceptions),
+		DetectionSequences:  mergeSequencesByID(base.DetectionSequences, overlay.DetectionSequences, disabled),
 		FileIntegrity:       mergeFileIntegrity(base.FileIntegrity, overlay.FileIntegrity),
 		BuiltinProfiles:     profiles,
 		DisabledRuleIDs:     disabledIDs,
@@ -171,6 +175,7 @@ func (b Bundle) Validate() error {
 		Exec: b.Exec, File: b.File, Bind: b.Bind, Unix: b.Unix,
 		Sockopt: b.Sockopt, DetectionRules: slices.Clone(b.DetectionRules),
 		DetectionExceptions: slices.Clone(b.DetectionExceptions),
+		DetectionSequences:  slices.Clone(b.DetectionSequences),
 		FileIntegrity:       b.FileIntegrity,
 	}
 	if err := document.Validate(); err != nil {

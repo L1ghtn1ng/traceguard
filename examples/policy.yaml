@@ -363,3 +363,24 @@ file_integrity:
   hash: true
   max_hash_bytes: 16777216
   rescan_interval: 1h
+
+# Sequences correlate ordered steps for one process or cgroup within a window.
+detection_sequences:
+  - id: web-shell-egress
+    severity: critical
+    key: cgroup
+    within: 5m
+    steps:
+      - events: [exec]
+        match:
+          command_globs:
+            - "sh -c *"
+            - "bash -c *"
+      - events: [connection]
+        match:
+          directions: [outbound]
+    cooldown: 30m
+    message: a shell started in a cgroup that then connected out
+    mitre:
+      tactics: [TA0002, TA0011]
+      techniques: [T1059.004]

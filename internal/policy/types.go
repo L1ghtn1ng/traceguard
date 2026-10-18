@@ -94,6 +94,7 @@ type Document struct {
 	Sockopt             SockoptPolicy        `yaml:"sockopt,omitempty"`
 	DetectionRules      []DetectionRule      `yaml:"detections,omitempty"`
 	DetectionExceptions []DetectionException `yaml:"detection_exceptions,omitempty"`
+	DetectionSequences  []DetectionSequence  `yaml:"detection_sequences,omitempty"`
 	FileIntegrity       FileIntegrityPolicy  `yaml:"file_integrity,omitempty"`
 }
 
@@ -355,6 +356,7 @@ type Bundle struct {
 	Sockopt             SockoptPolicy
 	DetectionRules      []DetectionRule
 	DetectionExceptions []DetectionException
+	DetectionSequences  []DetectionSequence
 	FileIntegrity       FileIntegrityPolicy
 	BuiltinProfiles     []string
 	DisabledRuleIDs     []string
@@ -385,6 +387,9 @@ func (d Document) Validate() error {
 	}
 	if len(d.DetectionRules) > MaxDetectionRules {
 		return fmt.Errorf("detection rule count %d exceeds %d", len(d.DetectionRules), MaxDetectionRules)
+	}
+	if len(d.DetectionSequences) > MaxDetectionSequences {
+		return fmt.Errorf("detection sequence count %d exceeds %d", len(d.DetectionSequences), MaxDetectionSequences)
 	}
 	if len(d.DetectionExceptions) > MaxDetectionExceptions {
 		return fmt.Errorf("detection exception count %d exceeds %d", len(d.DetectionExceptions), MaxDetectionExceptions)
@@ -494,6 +499,15 @@ func (d Document) Validate() error {
 			return fmt.Errorf("detection exception %q: %w", exception.ID, err)
 		}
 	}
+	for index := range d.DetectionSequences {
+		sequence := &d.DetectionSequences[index]
+		if err := validateID(sequence.ID, "detection_sequences", index); err != nil {
+			return err
+		}
+		if err := sequence.validate(); err != nil {
+			return fmt.Errorf("detection sequence %q: %w", sequence.ID, err)
+		}
+	}
 	if _, err := parseDNS(d.DNS); err != nil {
 		return err
 	}
@@ -585,57 +599,11 @@ func (r DetectionRule) validate() error {
 	if r.Enabled != nil && !*r.Enabled {
 		return nil
 	}
-	switch r.Severity {
-	case "debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency":
-	default:
-		return fmt.Errorf("unsupported severity %q", r.Severity)
+	if err := validateAlertMetadata(r.Severity, r.Message, r.Tags, r.MITRE, r.Compliance); err != nil {
+		return err
 	}
-	if len(r.Events) == 0 {
-		return fmt.Errorf("events must not be empty")
-	}
-	for _, event := range r.Events {
-		if !slices.Contains(supportedDetectionEvents, event) {
-			return fmt.Errorf("unsupported event %q", event)
-		}
-	}
-	if strings.TrimSpace(r.Message) == "" {
-		return fmt.Errorf("message must not be empty")
-	}
-	if len(r.Message) > MaxDetectionMessageBytes {
-		return fmt.Errorf("message length %d exceeds %d bytes", len(r.Message), MaxDetectionMessageBytes)
-	}
-	if len(r.Tags) > 16 {
-		return fmt.Errorf("tag count %d exceeds 16", len(r.Tags))
-	}
-	for _, tag := range r.Tags {
-		if strings.TrimSpace(tag) == "" || len(tag) > 64 {
-			return fmt.Errorf("invalid tag %q", tag)
-		}
-	}
-	for name, values := range map[string][]string{
-		"mitre tactic": r.MITRE.Tactics, "mitre technique": r.MITRE.Techniques, "compliance reference": r.Compliance,
-	} {
-		if len(values) > 16 {
-			return fmt.Errorf("%s count %d exceeds 16", name, len(values))
-		}
-		if err := validateUnique(values, name); err != nil {
-			return err
-		}
-	}
-	for _, tactic := range r.MITRE.Tactics {
-		if !mitreTacticPattern.MatchString(tactic) {
-			return fmt.Errorf("invalid mitre tactic %q; use an ID such as TA0005", tactic)
-		}
-	}
-	for _, technique := range r.MITRE.Techniques {
-		if !mitreTechniquePattern.MatchString(technique) {
-			return fmt.Errorf("invalid mitre technique %q; use an ID such as T1055 or T1055.008", technique)
-		}
-	}
-	for _, reference := range r.Compliance {
-		if strings.TrimSpace(reference) == "" || len(reference) > 64 {
-			return fmt.Errorf("invalid compliance reference %q", reference)
-		}
+	if err := validateEventNames(r.Events); err != nil {
+		return err
 	}
 	if r.Cooldown.Duration < 0 {
 		return fmt.Errorf("cooldown must not be negative")
@@ -693,6 +661,67 @@ func (r DetectionRule) validate() error {
 					return fmt.Errorf("threshold group field %q requires resolved-path enforcement events; %q is unsupported", field, event)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// validateAlertMetadata checks the fields every alert-producing rule shares.
+func validateAlertMetadata(severity, message string, tags []string, mitre MITRE, compliance []string) error {
+	switch severity {
+	case "debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency":
+	default:
+		return fmt.Errorf("unsupported severity %q", severity)
+	}
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("message must not be empty")
+	}
+	if len(message) > MaxDetectionMessageBytes {
+		return fmt.Errorf("message length %d exceeds %d bytes", len(message), MaxDetectionMessageBytes)
+	}
+	if len(tags) > 16 {
+		return fmt.Errorf("tag count %d exceeds 16", len(tags))
+	}
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) == "" || len(tag) > 64 {
+			return fmt.Errorf("invalid tag %q", tag)
+		}
+	}
+	for name, values := range map[string][]string{
+		"mitre tactic": mitre.Tactics, "mitre technique": mitre.Techniques, "compliance reference": compliance,
+	} {
+		if len(values) > 16 {
+			return fmt.Errorf("%s count %d exceeds 16", name, len(values))
+		}
+		if err := validateUnique(values, name); err != nil {
+			return err
+		}
+	}
+	for _, tactic := range mitre.Tactics {
+		if !mitreTacticPattern.MatchString(tactic) {
+			return fmt.Errorf("invalid mitre tactic %q; use an ID such as TA0005", tactic)
+		}
+	}
+	for _, technique := range mitre.Techniques {
+		if !mitreTechniquePattern.MatchString(technique) {
+			return fmt.Errorf("invalid mitre technique %q; use an ID such as T1055 or T1055.008", technique)
+		}
+	}
+	for _, reference := range compliance {
+		if strings.TrimSpace(reference) == "" || len(reference) > 64 {
+			return fmt.Errorf("invalid compliance reference %q", reference)
+		}
+	}
+	return nil
+}
+
+func validateEventNames(events []string) error {
+	if len(events) == 0 {
+		return fmt.Errorf("events must not be empty")
+	}
+	for _, event := range events {
+		if !slices.Contains(supportedDetectionEvents, event) {
+			return fmt.Errorf("unsupported event %q", event)
 		}
 	}
 	return nil

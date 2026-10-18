@@ -38,16 +38,20 @@ type Alert struct {
 }
 
 type Engine struct {
-	mu         sync.Mutex
-	rules      []compiledRule
-	exceptions []policy.DetectionException
-	suppressed map[string]uint64
-	groups     map[groupKey]*groupState
-	groupKeys  []groupKey
-	groupNext  int
-	maxGroups  int
-	samples    int
-	maxSamples int
+	mu                sync.Mutex
+	rules             []compiledRule
+	sequences         []compiledSequence
+	sequenceStates    map[groupKey]*sequenceState
+	sequenceAlerts    map[groupKey]time.Time
+	maxSequenceStates int
+	exceptions        []policy.DetectionException
+	suppressed        map[string]uint64
+	groups            map[groupKey]*groupState
+	groupKeys         []groupKey
+	groupNext         int
+	maxGroups         int
+	samples           int
+	maxSamples        int
 }
 
 type groupKey [sha256.Size]byte
@@ -83,11 +87,14 @@ func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{
-		rules:      compiled.rules,
-		suppressed: make(map[string]uint64),
-		groups:     make(map[groupKey]*groupState),
-		maxGroups:  policy.MaxDetectionGroups,
-		maxSamples: policy.MaxDetectionSamples,
+		rules:             compiled.rules,
+		sequenceStates:    make(map[groupKey]*sequenceState),
+		sequenceAlerts:    make(map[groupKey]time.Time),
+		maxSequenceStates: policy.MaxSequenceStates,
+		suppressed:        make(map[string]uint64),
+		groups:            make(map[groupKey]*groupState),
+		maxGroups:         policy.MaxDetectionGroups,
+		maxSamples:        policy.MaxDetectionSamples,
 	}, nil
 }
 
@@ -95,6 +102,7 @@ func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
 // without failing.
 type CompiledRules struct {
 	rules      []compiledRule
+	sequences  []compiledSequence
 	exceptions []policy.DetectionException
 }
 
@@ -108,9 +116,20 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	known := make(map[string]struct{}, len(custom))
+	sequences, err := compileSequences(bundle.DetectionSequences)
+	if err != nil {
+		return CompiledRules{}, err
+	}
+	known := make(map[string]struct{}, len(custom)+len(sequences))
 	for _, rule := range append(builtinRules(policy.BuiltinProfiles), custom...) {
 		known[rule.ID] = struct{}{}
+	}
+	for _, sequence := range bundle.DetectionSequences {
+		known[sequence.ID] = struct{}{}
+	}
+	activeSequences := make(map[string]*compiledSequence, len(sequences))
+	for index := range sequences {
+		activeSequences[sequences[index].sequence.ID] = &sequences[index]
 	}
 	active := make(map[string]*compiledRule, len(rules))
 	for index := range rules {
@@ -125,6 +144,13 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 			if _, ok := known[id]; !ok {
 				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
 			}
+			if sequence, ok := activeSequences[id]; ok {
+				if err := policy.ValidateExceptionFor(sequence.sequence.FinalStepRule(), exception); err != nil {
+					return CompiledRules{}, err
+				}
+				sequence.exceptions = append(sequence.exceptions, compiledException{exception: exception, cidrs: cidrs})
+				continue
+			}
 			rule, ok := active[id]
 			if !ok {
 				continue
@@ -135,7 +161,7 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 			rule.exceptions = append(rule.exceptions, compiledException{exception: exception, cidrs: cidrs})
 		}
 	}
-	return CompiledRules{rules: rules, exceptions: slices.Clone(exceptions)}, nil
+	return CompiledRules{rules: rules, sequences: sequences, exceptions: slices.Clone(exceptions)}, nil
 }
 
 func (e *Engine) Replace(custom []policy.DetectionRule, disabled []string) error {
@@ -157,6 +183,9 @@ func (e *Engine) Install(compiled CompiledRules) {
 		suppressed[exception.ID] = e.suppressed[exception.ID]
 	}
 	e.rules = compiled.rules
+	e.sequences = compiled.sequences
+	e.sequenceStates = make(map[groupKey]*sequenceState)
+	e.sequenceAlerts = make(map[groupKey]time.Time)
 	e.exceptions = compiled.exceptions
 	e.suppressed = suppressed
 	e.groups = make(map[groupKey]*groupState)
@@ -244,17 +273,11 @@ func (e *Engine) Evaluate(event Event) []Alert {
 		state.lastAlert = event.Timestamp
 		alerts = append(alerts, newAlert(rule, event, count))
 	}
-	return alerts
+	return append(alerts, e.evaluateSequences(event, &matchContext)...)
 }
 
 func (r *compiledRule) suppressingException(at time.Time, context *eventMatchContext) (string, bool) {
-	for index := range r.exceptions {
-		exception := &r.exceptions[index]
-		if exception.exception.Active(at) && matches(exception.exception.Match, exception.cidrs, context) {
-			return exception.exception.ID, true
-		}
-	}
-	return "", false
+	return suppressingException(r.exceptions, at, context)
 }
 
 // ExceptionStatus returns every installed exception, sorted by ID.
@@ -305,10 +328,11 @@ func newAlert(rule *compiledRule, event Event, count int) Alert {
 	}
 }
 
+// RuleCount returns the active detection rules and sequences.
 func (e *Engine) RuleCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.rules)
+	return len(e.rules) + len(e.sequences)
 }
 
 func (e *Engine) StateCount() int {
