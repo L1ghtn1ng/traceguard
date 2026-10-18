@@ -422,8 +422,8 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 	freezer := &CgroupFreezer{
 		Root: root, self: func() (string, error) { return self, nil },
 		scan: func(context.Context, string) ([]cgroupinfo.Entry, error) { return entries, nil },
-		id: func(path string) (uint64, error) {
-			if id, ok := ids[path]; ok {
+		idOf: func(directory *os.File) (uint64, error) {
+			if id, ok := ids[directory.Name()]; ok {
 				return id, nil
 			}
 			return 0, fs.ErrNotExist
@@ -537,7 +537,7 @@ func TestRecoverLeavesAnUnreadableStateFile(t *testing.T) {
 func TestThawWaitsForAMissingHierarchy(t *testing.T) {
 	t.Parallel()
 
-	freezer := &CgroupFreezer{Root: filepath.Join(t.TempDir(), "unmounted"), id: func(string) (uint64, error) { return 0, fs.ErrNotExist }}
+	freezer := &CgroupFreezer{Root: filepath.Join(t.TempDir(), "unmounted"), idOf: openCgroupID}
 	if err := freezer.Thaw(5, "/kubepods.slice/pod-a"); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("Thaw without a hierarchy = %v, want an error so the record is kept", err)
 	}
@@ -639,12 +639,30 @@ func TestFreezeRefusesAReplacedCgroup(t *testing.T) {
 			return []cgroupinfo.Entry{{ID: 1, Path: "/", Level: 0}, {ID: 5, Path: "/kubepods.slice/pod-a", Level: 2}}, nil
 		},
 		// The path now belongs to a new cgroup with another ID.
-		id: func(string) (uint64, error) { return 50, nil },
+		idOf: func(*os.File) (uint64, error) { return 50, nil },
 	}
 	if _, _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "no longer exists") {
 		t.Fatalf("Freeze of a replaced cgroup = %v, want a refusal", err)
 	}
 	if state, _ := os.ReadFile(filepath.Join(root, "kubepods.slice", "pod-a", "cgroup.freeze")); string(state) != "0" { //nolint:gosec // test path
 		t.Fatalf("the replacement was frozen: cgroup.freeze = %q", state)
+	}
+}
+
+func TestOpenCgroupIDMatchesThePathID(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir()
+	want, err := cgroupinfo.ID(path)
+	if err != nil {
+		t.Skipf("file handles unsupported here: %v", err)
+	}
+	directory, err := os.Open(path) //nolint:gosec // test path from t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = directory.Close() }()
+	if got, err := openCgroupID(directory); err != nil || got != want {
+		t.Fatalf("openCgroupID = %d, %v; want %d", got, err, want)
 	}
 }

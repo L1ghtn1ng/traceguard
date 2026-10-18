@@ -2,6 +2,7 @@ package response
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
+	"golang.org/x/sys/unix"
 )
 
 // CgroupFreezer freezes cgroup v2 groups through cgroup.freeze. It refuses
@@ -24,7 +26,8 @@ type CgroupFreezer struct {
 	// follows the daemon if it is moved.
 	self func() (string, error)
 	scan func(context.Context, string) ([]cgroupinfo.Entry, error)
-	id   func(string) (uint64, error)
+	// idOf reads the cgroup ID of an open cgroup directory.
+	idOf func(*os.File) (uint64, error)
 }
 
 // NewCgroupFreezer returns a freezer over root for a daemon whose cgroup
@@ -33,8 +36,39 @@ func NewCgroupFreezer(root, procCgroup string) *CgroupFreezer {
 	root = filepath.Clean(root)
 	return &CgroupFreezer{
 		Root: root, self: func() (string, error) { return LocateSelf(root, procCgroup, os.Getpid()) },
-		scan: cgroupinfo.ScanContext, id: cgroupinfo.ID,
+		scan: cgroupinfo.ScanContext, idOf: openCgroupID,
 	}
+}
+
+// openCgroupID reads the cgroup ID of an open cgroup directory from its file
+// handle, as cgroupinfo.ID does for a path.
+func openCgroupID(directory *os.File) (uint64, error) {
+	handle, _, err := unix.NameToHandleAt(int(directory.Fd()), "", unix.AT_EMPTY_PATH)
+	if err != nil {
+		return 0, err
+	}
+	bytes := handle.Bytes()
+	if len(bytes) < 8 {
+		return 0, fmt.Errorf("cgroup file handle has %d bytes, want at least 8", len(bytes))
+	}
+	return binary.NativeEndian.Uint64(bytes[:8]), nil
+}
+
+// openCgroup opens the cgroup directory at path if it still has the given
+// ID. Reading and writing through the open directory binds them to that
+// cgroup: if it is removed, its files are gone, and a new cgroup at the same
+// path is never reached.
+func (f *CgroupFreezer) openCgroup(path string, id uint64) (*os.File, bool, error) {
+	directory, err := os.OpenFile(filepath.Join(f.Root, path), os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0) //nolint:gosec // cgroupfs path from a validated scan
+	if err != nil {
+		return nil, false, err
+	}
+	current, err := f.idOf(directory)
+	if err != nil || current != id {
+		_ = directory.Close()
+		return nil, false, err
+	}
+	return directory, true, nil
 }
 
 // LocateSelf returns the daemon's cgroup path in the hierarchy at root,
@@ -109,13 +143,14 @@ func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	directory := filepath.Join(f.Root, path)
 	// The cgroup may have been removed and its path reused since the scan;
 	// freeze only the cgroup the alert named.
-	if current, err := f.id(directory); err != nil || current != id {
+	directory, same, err := f.openCgroup(path, id)
+	if err != nil || !same {
 		return "", false, &RefusedError{Reason: fmt.Sprintf("cgroup %d no longer exists", id)}
 	}
-	if state, err := os.ReadFile(filepath.Join(directory, "cgroup.freeze")); err == nil && strings.TrimSpace(string(state)) == "1" { //nolint:gosec // cgroupfs path from a validated scan
+	defer func() { _ = directory.Close() }()
+	if state, err := readFreeze(directory); err == nil && state == "1" {
 		return path, false, nil
 	}
 	if err := writeFreeze(directory, "1"); err != nil {
@@ -142,8 +177,7 @@ func freezeRefusal(target cgroupinfo.Entry, self string) string {
 // cgroup that no longer exists, or whose path now names a different cgroup,
 // was thawed when it was removed.
 func (f *CgroupFreezer) Thaw(id uint64, path string) error {
-	directory := filepath.Join(f.Root, path)
-	current, err := f.id(directory)
+	directory, same, err := f.openCgroup(path, id)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Only a mounted hierarchy proves the cgroup is gone; without one
 		// the thaw must be retried.
@@ -155,20 +189,39 @@ func (f *CgroupFreezer) Thaw(id uint64, path string) error {
 	if err != nil {
 		return fmt.Errorf("thaw cgroup %s: %w", path, err)
 	}
-	if current != id {
+	if !same {
 		return nil
 	}
+	defer func() { _ = directory.Close() }()
 	if err := writeFreeze(directory, "0"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("thaw cgroup %s: %w", path, err)
 	}
 	return nil
 }
 
-func writeFreeze(directory, value string) error {
-	file, err := os.OpenFile(filepath.Join(directory, "cgroup.freeze"), os.O_WRONLY, 0) //nolint:gosec // cgroupfs path from a validated scan
+// readFreeze reads cgroup.freeze in an open cgroup directory.
+func readFreeze(directory *os.File) (string, error) {
+	fd, err := unix.Openat(int(directory.Fd()), "cgroup.freeze", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	file := os.NewFile(uintptr(fd), "cgroup.freeze")
+	defer func() { _ = file.Close() }()
+	buffer := make([]byte, 8)
+	n, err := file.Read(buffer)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(buffer[:n])), nil
+}
+
+// writeFreeze writes cgroup.freeze in an open cgroup directory.
+func writeFreeze(directory *os.File, value string) error {
+	fd, err := unix.Openat(int(directory.Fd()), "cgroup.freeze", unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
+	file := os.NewFile(uintptr(fd), "cgroup.freeze")
 	if _, err := file.WriteString(value); err != nil {
 		_ = file.Close()
 		return err
