@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -94,8 +95,12 @@ func Run(cfg Config, alerts io.Writer) (Summary, error) {
 		for _, alert := range alerts {
 			summary.Alerts[alert.RuleID]++
 			summary.Severity[alert.RuleID] = alert.Severity
+			// Match the envelope a live alert is recorded with, rather than
+			// the archived source record's.
 			record := alert.RecordFields(event.Name)
 			record["timestamp"] = alert.Timestamp.Format(time.RFC3339Nano)
+			record["level"] = "info"
+			record["message"] = "detection-alert"
 			if err := encoder.Encode(record); err != nil {
 				return summary, fmt.Errorf("write alert: %w", err)
 			}
@@ -151,6 +156,9 @@ func decodeEvent(line []byte) (detection.Event, bool, error) {
 	var fields map[string]any
 	if err := decoder.Decode(&fields); err != nil {
 		return detection.Event{}, false, err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return detection.Event{}, false, errors.New("record has trailing content")
 	}
 	name, _ := fields["event"].(string)
 	switch name {

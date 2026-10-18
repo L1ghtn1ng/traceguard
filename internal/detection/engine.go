@@ -133,7 +133,14 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	known := KnownRuleIDs(bundle)
+	// definitions holds every rule an exception may name, enabled or not, so
+	// an exception is validated against its rule even while that rule is
+	// disabled or its profile is off, and cannot fail later when the rule is
+	// enabled.
+	definitions := make(map[string]policy.DetectionRule, len(custom))
+	for _, rule := range append(builtinRules(policy.BuiltinProfiles), custom...) {
+		definitions[rule.ID] = rule
+	}
 	activeSequences := make(map[string]*compiledSequence, len(sequences))
 	for index := range sequences {
 		activeSequences[sequences[index].sequence.ID] = &sequences[index]
@@ -148,9 +155,6 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 			return CompiledRules{}, fmt.Errorf("compile detection exception %q: %w", exception.ID, err)
 		}
 		for _, id := range exception.Rules {
-			if _, ok := known[id]; !ok {
-				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
-			}
 			if sequence, ok := activeSequences[id]; ok {
 				if err := policy.ValidateExceptionFor(sequence.sequence.FinalStepRule(), exception); err != nil {
 					return CompiledRules{}, err
@@ -158,12 +162,16 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 				sequence.exceptions = append(sequence.exceptions, compiledException{exception: exception, cidrs: cidrs})
 				continue
 			}
+			definition, ok := definitions[id]
+			if !ok {
+				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
+			}
+			if err := policy.ValidateExceptionFor(definition, exception); err != nil {
+				return CompiledRules{}, err
+			}
 			rule, ok := active[id]
 			if !ok {
 				continue
-			}
-			if err := policy.ValidateExceptionFor(rule.rule, exception); err != nil {
-				return CompiledRules{}, err
 			}
 			rule.exceptions = append(rule.exceptions, compiledException{exception: exception, cidrs: cidrs})
 		}

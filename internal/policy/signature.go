@@ -65,7 +65,10 @@ func signatureURL(policyURL string) (string, error) {
 	if err != nil {
 		return "", errors.New("policy url is not valid")
 	}
+	// Extend the escaped form too, so separators encoded as %2F stay encoded.
 	parsed.Path += SignatureSuffix
-	parsed.RawPath = ""
+	if parsed.RawPath != "" {
+		parsed.RawPath += SignatureSuffix
+	}
 	return parsed.String(), nil
 }

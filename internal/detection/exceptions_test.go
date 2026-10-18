@@ -216,3 +216,41 @@ func TestExecSelectorsMatchCommandLineAndSource(t *testing.T) {
 		t.Fatalf("other command alerts = %d, want 0", got)
 	}
 }
+
+func TestCompileValidatesExceptionsForDisabledRules(t *testing.T) {
+	t.Parallel()
+
+	// DNS events carry no event-time process identity, so this exception
+	// could never be valid for the rule, enabled or not.
+	enabled := false
+	dnsRule := policy.DetectionRule{
+		ID: "dns-watch", Enabled: &enabled, Severity: "notice", Events: []string{"dns"}, Message: "dns",
+	}
+	byUID := policy.DetectionException{
+		ID: "dns-root", Rules: []string{"dns-watch"}, Reason: "root lookups",
+		Match: policy.DetectionMatch{UIDs: []uint32{0}},
+	}
+	if _, err := Compile(policy.Bundle{DetectionRules: []policy.DetectionRule{dnsRule}, DetectionExceptions: []policy.DetectionException{byUID}}); err == nil || !strings.Contains(err.Error(), "event-time process identity") {
+		t.Fatalf("exception for a disabled custom rule error = %v", err)
+	}
+	if _, err := Compile(policy.Bundle{DisabledRuleIDs: []string{"baseline.cloud-metadata-access"}, DetectionExceptions: []policy.DetectionException{{
+		ID: "dns-domains", Rules: []string{"baseline.cloud-metadata-access"}, Reason: "x",
+		Match: policy.DetectionMatch{UnixPathGlobs: []string{"/run/x.sock"}},
+	}}}); err == nil || !strings.Contains(err.Error(), "unix_path_globs") {
+		t.Fatalf("exception for a disabled baseline rule error = %v", err)
+	}
+}
+
+func TestCompileValidatesExceptionsForRulesInDisabledProfiles(t *testing.T) {
+	t.Parallel()
+
+	// runtime.ptrace-attach is in the runtime profile, which is off here,
+	// and unix_path_globs are only valid for unix decision events.
+	_, err := Compile(policy.Bundle{DetectionExceptions: []policy.DetectionException{{
+		ID: "bad", Rules: []string{"runtime.ptrace-attach"}, Reason: "x",
+		Match: policy.DetectionMatch{UnixPathGlobs: []string{"/run/x.sock"}},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "unix_path_globs") {
+		t.Fatalf("exception for a rule in a disabled profile error = %v", err)
+	}
+}
