@@ -105,6 +105,11 @@ type traceguardDNSRecvmsgCompatEndpoint6Key struct {
 	Pad       uint8
 }
 
+type traceguardDNSRecvmsgCompatExecArgvScratch struct {
+	_   structs.HostLayout
+	Buf [512]int8
+}
+
 type traceguardDNSRecvmsgCompatListenerInfoKey struct {
 	_        structs.HostLayout
 	Port     uint16
@@ -236,6 +241,7 @@ const (
 	traceguardDNSRecvmsgCompatMapEndpoint6Rules           = "endpoint6_rules"
 	traceguardDNSRecvmsgCompatMapEvents                   = "events"
 	traceguardDNSRecvmsgCompatMapExecAllowPaths           = "exec_allow_paths"
+	traceguardDNSRecvmsgCompatMapExecArgvScratch          = "exec_argv_scratch"
 	traceguardDNSRecvmsgCompatMapExecBlockPaths           = "exec_block_paths"
 	traceguardDNSRecvmsgCompatMapFileAllowPaths           = "file_allow_paths"
 	traceguardDNSRecvmsgCompatMapFileBlockPaths           = "file_block_paths"
@@ -413,6 +419,7 @@ type traceguardDNSRecvmsgCompatMapSpecs struct {
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
 	ExecAllowPaths          *ebpf.MapSpec `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.MapSpec `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.MapSpec `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.MapSpec `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.MapSpec `ebpf:"file_block_paths"`
@@ -482,6 +489,7 @@ type traceguardDNSRecvmsgCompatMaps struct {
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
 	ExecAllowPaths          *ebpf.Map `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.Map `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.Map `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.Map `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.Map `ebpf:"file_block_paths"`
@@ -526,6 +534,7 @@ func (m *traceguardDNSRecvmsgCompatMaps) Close() error {
 		m.Endpoint6Rules,
 		m.Events,
 		m.ExecAllowPaths,
+		m.ExecArgvScratch,
 		m.ExecBlockPaths,
 		m.FileAllowPaths,
 		m.FileBlockPaths,

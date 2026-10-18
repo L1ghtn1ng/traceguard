@@ -636,7 +636,7 @@ excluded.
 | --- | --- |
 | `dns` | Observed outbound plaintext DNS query, including DNS dry-run decisions. |
 | `blocked` | DNS query denied in block mode. |
-| `exec` | Process execution. |
+| `exec` | Process execution, with the requested path, command line, and executable source. |
 | `resolver` | Observed DoH or DoT resolver connection. |
 | `resolver_blocked` | DoH or DoT resolver connection denied in block mode. |
 | `connection` | Inbound or outbound connection telemetry. |
@@ -677,6 +677,8 @@ The last nine are [security events](#security-events).
 | `ports` | Peer ports. For inbound connections this is the remote source port, not the listening port. |
 | `local_ports` | Local ports, such as the listening port of an inbound connection or the requested port of a bind decision; valid only with `connection`, `egress_blocked`, `egress_would_block`, `bind_blocked`, `bind_would_block`, and `tcp_sockops`. |
 | `executable_globs` | Kernel-resolved executable path globs; valid only with `exec_blocked` and `exec_would_block`. |
+| `command_globs` | Globs over the redacted command line joined with spaces, where `*` also matches `/`; valid only with `exec`. See [exec command lines](#exec-command-lines). |
+| `exec_sources` | `path`, or `fd` for an executable named by file descriptor; valid only with `exec`. |
 | `file_path_globs` | Kernel-resolved file path globs; valid only with `file_blocked` and `file_would_block`. |
 | `unix_path_globs` | AF_UNIX socket paths; valid only with `unix_blocked` and `unix_would_block`. |
 | `file_access` | `read`, `write`, or `unknown`. |
@@ -744,9 +746,10 @@ Process-identity availability is validated when policy is loaded:
 
 For `connection`, a UID selector or `group_by` value of `cgroup`, `executable`,
 `program`, or `uid` must restrict the effective rule to `directions: [outbound]`
-or `protocols: [udp]`. `command_globs`, cgroup-path, service, container,
-Kubernetes, and LSM-label detection selectors are rejected until those values
-can be captured as event-time snapshots.
+or `protocols: [udp]`. Cgroup-path, service, container, Kubernetes, and
+LSM-label detection selectors are rejected until those values can be captured
+as event-time snapshots. `command_globs` match the exec event's own command
+line, captured in the kernel at syscall entry, never the `/proc` command line.
 
 Syscall audit events expose `requested_path` with
 `path_source=syscall-requested`. It may be relative, use a symlink, or name an
@@ -754,6 +757,43 @@ Syscall audit events expose `requested_path` with
 `file_path_globs`, or `group_by: [path]`. LSM enforcement events expose the
 resolved canonical path as `path` or `exe` and are the supported source for
 path-based detections.
+
+### Exec command lines
+
+`exec` events carry what the process asked to run, read in the kernel at
+`execve` or `execveat` entry:
+
+| Field | Meaning |
+| --- | --- |
+| `requested_path` | The path argument, as given. |
+| `exec_syscall` | `execve` or `execveat`. |
+| `command_line` | Up to 32 arguments and 255 bytes, redacted like `current_cmdline`. |
+| `command_line_truncated` | Present and `true` when arguments or bytes were dropped. |
+| `exec_source` | `path`, or `fd` when the executable was named by descriptor. |
+| `exec_fd` | The descriptor, for `exec_source=fd`. |
+
+`exec_source=fd` covers `execveat` with `AT_EMPTY_PATH` and an empty path, and
+paths under `/proc/<pid>/fd/`, `/proc/self/fd/`, and `/dev/fd/`, which is how
+`fexecve` runs an executable that may exist only in memory, such as a memfd.
+
+`command_globs` match the redacted command line, so a rule cannot be used to
+detect a secret's value. A glob that depends on arguments past the captured
+limit cannot match a truncated command line. Like other syscall-entry values,
+the arguments can change between capture and the kernel reading them, so treat
+the command line as what was requested.
+
+```yaml
+version: 1
+detections:
+  - id: shell-download-pipe
+    severity: warning
+    events: [exec]
+    match:
+      command_globs:
+        - "* -c *curl *|*sh*"
+        - "* -c *wget *|*sh*"
+    message: a shell command piped a download into a shell
+```
 
 ### Security events
 

@@ -226,6 +226,7 @@ type DetectionMatch struct {
 	LSMSources          []string `yaml:"lsm_sources,omitempty"`
 	LSMLabels           []string `yaml:"lsm_labels,omitempty"`
 	Operations          []string `yaml:"operations,omitempty"`
+	ExecSources         []string `yaml:"exec_sources,omitempty"`
 }
 
 // DetectionException suppresses alerts from the listed rules for events that
@@ -603,6 +604,7 @@ func (m DetectionMatch) validate() error {
 		"lsm sources":           len(m.LSMSources),
 		"lsm labels":            len(m.LSMLabels),
 		"operations":            len(m.Operations),
+		"exec sources":          len(m.ExecSources),
 	} {
 		if count > MaxRuleListValues {
 			return fmt.Errorf("%s count %d exceeds %d", name, count, MaxRuleListValues)
@@ -647,8 +649,10 @@ func (m DetectionMatch) validate() error {
 			return fmt.Errorf("unsupported file access %q", access)
 		}
 	}
-	if len(m.CommandGlobs) > 0 {
-		return fmt.Errorf("command_globs are unavailable because command lines are not captured at event time")
+	for _, source := range m.ExecSources {
+		if source != "path" && source != "fd" {
+			return fmt.Errorf("unsupported exec source %q", source)
+		}
 	}
 	for _, field := range []struct {
 		name  string
@@ -682,7 +686,7 @@ func (m DetectionMatch) Empty() bool {
 		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
 		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
 		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
-		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations) == 0
+		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations)+len(m.ExecSources) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {
@@ -735,6 +739,16 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 		for _, event := range events {
 			if !slices.Contains(localPortDetectionEvents, event) {
 				return fmt.Errorf("local_ports require events that carry a local port; %q is unsupported", event)
+			}
+		}
+	}
+	for name, count := range map[string]int{"command_globs": len(match.CommandGlobs), "exec_sources": len(match.ExecSources)} {
+		if count == 0 {
+			continue
+		}
+		for _, event := range events {
+			if event != "exec" {
+				return fmt.Errorf("%s require exec events, whose command line and executable source are captured at syscall entry; %q is unsupported", name, event)
 			}
 		}
 	}

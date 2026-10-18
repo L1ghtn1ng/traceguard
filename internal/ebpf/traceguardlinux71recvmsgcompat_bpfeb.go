@@ -105,6 +105,11 @@ type traceguardLinux71RecvmsgCompatEndpoint6Key struct {
 	Pad       uint8
 }
 
+type traceguardLinux71RecvmsgCompatExecArgvScratch struct {
+	_   structs.HostLayout
+	Buf [512]int8
+}
+
 type traceguardLinux71RecvmsgCompatListenerInfoKey struct {
 	_        structs.HostLayout
 	Port     uint16
@@ -236,6 +241,7 @@ const (
 	traceguardLinux71RecvmsgCompatMapEndpoint6Rules           = "endpoint6_rules"
 	traceguardLinux71RecvmsgCompatMapEvents                   = "events"
 	traceguardLinux71RecvmsgCompatMapExecAllowPaths           = "exec_allow_paths"
+	traceguardLinux71RecvmsgCompatMapExecArgvScratch          = "exec_argv_scratch"
 	traceguardLinux71RecvmsgCompatMapExecBlockPaths           = "exec_block_paths"
 	traceguardLinux71RecvmsgCompatMapFileAllowPaths           = "file_allow_paths"
 	traceguardLinux71RecvmsgCompatMapFileBlockPaths           = "file_block_paths"
@@ -413,6 +419,7 @@ type traceguardLinux71RecvmsgCompatMapSpecs struct {
 	Endpoint6Rules          *ebpf.MapSpec `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.MapSpec `ebpf:"events"`
 	ExecAllowPaths          *ebpf.MapSpec `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.MapSpec `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.MapSpec `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.MapSpec `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.MapSpec `ebpf:"file_block_paths"`
@@ -482,6 +489,7 @@ type traceguardLinux71RecvmsgCompatMaps struct {
 	Endpoint6Rules          *ebpf.Map `ebpf:"endpoint6_rules"`
 	Events                  *ebpf.Map `ebpf:"events"`
 	ExecAllowPaths          *ebpf.Map `ebpf:"exec_allow_paths"`
+	ExecArgvScratch         *ebpf.Map `ebpf:"exec_argv_scratch"`
 	ExecBlockPaths          *ebpf.Map `ebpf:"exec_block_paths"`
 	FileAllowPaths          *ebpf.Map `ebpf:"file_allow_paths"`
 	FileBlockPaths          *ebpf.Map `ebpf:"file_block_paths"`
@@ -526,6 +534,7 @@ func (m *traceguardLinux71RecvmsgCompatMaps) Close() error {
 		m.Endpoint6Rules,
 		m.Events,
 		m.ExecAllowPaths,
+		m.ExecArgvScratch,
 		m.ExecBlockPaths,
 		m.FileAllowPaths,
 		m.FileBlockPaths,

@@ -5,6 +5,8 @@ package ebpf
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
@@ -71,6 +73,66 @@ func TestMemfdCreateTracepointEmitsSecurityEventForIntegration(t *testing.T) {
 		}
 		if event.Filename != "traceguard-integration" || event.FileFlags != unix.MFD_CLOEXEC || event.UIDSource != "kernel" {
 			t.Fatalf("memfd event = %+v", event)
+		}
+		return
+	}
+}
+
+func TestExecTracepointCapturesCommandLineForIntegration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	retainIntegrationProgram(spec, "trace_execve")
+	var objects struct {
+		TraceExecve *ebpf.Program `ebpf:"trace_execve"`
+		Events      *ebpf.Map     `ebpf:"events"`
+	}
+	if err := spec.LoadAndAssign(&objects, newCollectionOptions()); err != nil {
+		fatalVerifierError(t, "LoadAndAssign", err)
+	}
+	defer objects.TraceExecve.Close()
+	defer objects.Events.Close()
+	tracepoint, err := link.Tracepoint("syscalls", "sys_enter_execve", objects.TraceExecve, nil)
+	if err != nil {
+		t.Fatalf("attach tracepoint: %v", err)
+	}
+	defer tracepoint.Close()
+	reader, err := ringbuf.NewReader(objects.Events)
+	if err != nil {
+		t.Fatalf("NewReader returned error: %v", err)
+	}
+	defer reader.Close()
+
+	marker := "traceguard-argv-" + strconv.Itoa(os.Getpid())
+	if err := exec.Command("/bin/true", marker, "second").Run(); err != nil {
+		t.Fatalf("run /bin/true: %v", err)
+	}
+
+	reader.SetDeadline(time.Now().Add(2 * time.Second))
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatal("no exec event with the marker read before the deadline")
+			}
+			t.Fatalf("Read returned error: %v", err)
+		}
+		event, err := decodeEvent(record.RawSample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != EventExec || len(event.Args) < 2 || event.Args[1] != marker {
+			continue
+		}
+		if event.Filename != "/bin/true" || len(event.Args) != 3 || event.Args[2] != "second" || event.ArgsTruncated {
+			t.Fatalf("exec event = path %q args %q truncated %t", event.Filename, event.Args, event.ArgsTruncated)
 		}
 		return
 	}

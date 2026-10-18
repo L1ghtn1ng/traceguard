@@ -98,3 +98,38 @@ func ebpfFieldTags(value any) ([]string, error) {
 	}
 	return tags, nil
 }
+
+func TestDecodeExecEventCommandLine(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{Kind: EventExec, RuleID: 1, FileMode: 7, FileFlags: 0x1000 | execArgvTruncated, Port: 3}
+	copy(raw.Domain[:], "bash\x00-c\x00\x00")
+	var encoded bytes.Buffer
+	if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(event.Args, []string{"bash", "-c", ""}) || !event.ArgsTruncated {
+		t.Fatalf("args = %q truncated %t", event.Args, event.ArgsTruncated)
+	}
+	if event.Operation != 1 || event.FileMode != 7 || event.FileFlags != 0x1000 || event.Port != 0 {
+		t.Fatalf("exec metadata = op %d fd %d flags %#x port %d", event.Operation, event.FileMode, event.FileFlags, event.Port)
+	}
+}
+
+func TestSplitArgsHandlesCutFinalArgument(t *testing.T) {
+	t.Parallel()
+
+	if got := splitArgs([]byte("one\x00tw"), 2); !reflect.DeepEqual(got, []string{"one", "tw"}) {
+		t.Fatalf("splitArgs = %q", got)
+	}
+	if got := splitArgs([]byte("one\x00two\x00"), 1); !reflect.DeepEqual(got, []string{"one"}) {
+		t.Fatalf("splitArgs with count 1 = %q", got)
+	}
+	if got := splitArgs(make([]byte, 8), 0); len(got) != 0 {
+		t.Fatalf("splitArgs with count 0 = %q", got)
+	}
+}

@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 )
 
@@ -157,4 +159,58 @@ func resolveDescriptor(procRoot string, pid, fd uint32) (string, bool) {
 		return "", false
 	}
 	return target, true
+}
+
+const (
+	execSyscallExecveat = 1
+	atEmptyPath         = 0x1000
+)
+
+// appendExecFields adds the exec syscall, the redacted command line, and how
+// the executable was named.
+func appendExecFields(fields map[string]any, event ebpf.Event) {
+	fields["requested_path"] = event.Filename
+	fields["path_source"] = "syscall-requested"
+	fields["exec_syscall"] = "execve"
+	if event.Operation == execSyscallExecveat {
+		fields["exec_syscall"] = "execveat"
+	}
+	fields["command_line"] = config.RedactCommandLine(event.Args)
+	if event.ArgsTruncated {
+		fields["command_line_truncated"] = true
+	}
+	if fd, ok := execDescriptor(event); ok {
+		fields["exec_source"] = "fd"
+		fields["exec_fd"] = fd
+	} else {
+		fields["exec_source"] = "path"
+	}
+}
+
+// execDescriptor reports the file descriptor an exec ran when it named the
+// executable by descriptor rather than by path: execveat with AT_EMPTY_PATH,
+// or a /proc/<pid>/fd or /dev/fd path as fexecve uses. Such executables, a
+// memfd for example, may have no file on disk to inspect.
+func execDescriptor(event ebpf.Event) (int32, bool) {
+	if event.Operation == execSyscallExecveat && event.FileFlags&atEmptyPath != 0 && event.Filename == "" {
+		return int32(event.FileMode), true //nolint:gosec // dirfd is a signed descriptor carried in the unsigned field
+	}
+	path := event.Filename
+	switch {
+	case strings.HasPrefix(path, "/dev/fd/"):
+		path = strings.TrimPrefix(path, "/dev/fd/")
+	case strings.HasPrefix(path, "/proc/"):
+		process, rest, ok := strings.Cut(strings.TrimPrefix(path, "/proc/"), "/fd/")
+		if !ok || (process != "self" && process != "thread-self" && strings.Trim(process, "0123456789") != "") || process == "" {
+			return 0, false
+		}
+		path = rest
+	default:
+		return 0, false
+	}
+	fd, err := strconv.ParseInt(path, 10, 32)
+	if err != nil || fd < 0 {
+		return 0, false
+	}
+	return int32(fd), true
 }

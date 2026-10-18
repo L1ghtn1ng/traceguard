@@ -299,6 +299,7 @@ type monitorObjects struct {
 	BlockSuffixes           *ebpf.Map `ebpf:"block_suffixes"`
 	Blocklist               *ebpf.Map `ebpf:"blocklist"`
 	DnsScratch              *ebpf.Map `ebpf:"dns_scratch"`
+	ExecArgvScratch         *ebpf.Map `ebpf:"exec_argv_scratch"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
 	ListenerInfo            *ebpf.Map `ebpf:"listener_info"`
 	ConnectionDedupe        *ebpf.Map `ebpf:"connection_dedupe"`
@@ -359,6 +360,7 @@ func (o *monitorObjects) Close() error {
 		o.BlockSuffixes,
 		o.Blocklist,
 		o.DnsScratch,
+		o.ExecArgvScratch,
 		o.SocketInfo,
 		o.ListenerInfo,
 		o.ConnectionDedupe,

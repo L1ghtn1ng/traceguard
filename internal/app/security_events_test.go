@@ -115,3 +115,44 @@ func TestOperationNameReportsUnknownCodes(t *testing.T) {
 		t.Fatalf("operationName = %q", got)
 	}
 }
+
+func TestAppendExecFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		event ebpf.Event
+		want  map[string]any
+	}{
+		{"path", ebpf.Event{Filename: "/usr/bin/curl", Args: []string{"curl", "--password", "hunter2"}}, map[string]any{
+			"exec_syscall": "execve", "exec_source": "path", "command_line": []string{"curl", "--password", "[REDACTED]"},
+		}},
+		{"memfd execveat", ebpf.Event{Operation: 1, FileFlags: 0x1000, FileMode: 5, Args: []string{"x"}, ArgsTruncated: true}, map[string]any{
+			"exec_syscall": "execveat", "exec_source": "fd", "exec_fd": int32(5), "command_line": []string{"x"}, "command_line_truncated": true,
+		}},
+		{"proc self fd", ebpf.Event{Filename: "/proc/self/fd/9"}, map[string]any{
+			"exec_syscall": "execve", "exec_source": "fd", "exec_fd": int32(9), "command_line": []string{},
+		}},
+		{"dev fd", ebpf.Event{Filename: "/dev/fd/3"}, map[string]any{
+			"exec_syscall": "execve", "exec_source": "fd", "exec_fd": int32(3), "command_line": []string{},
+		}},
+		{"proc path that is not a descriptor", ebpf.Event{Filename: "/proc/self/exe"}, map[string]any{
+			"exec_syscall": "execve", "exec_source": "path", "command_line": []string{},
+		}},
+		{"execveat with path", ebpf.Event{Operation: 1, FileFlags: 0x1000, Filename: "./tool"}, map[string]any{
+			"exec_syscall": "execveat", "exec_source": "path", "command_line": []string{},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fields := map[string]any{}
+			appendExecFields(fields, test.event)
+			test.want["requested_path"] = test.event.Filename
+			test.want["path_source"] = "syscall-requested"
+			if !reflect.DeepEqual(fields, test.want) {
+				t.Fatalf("fields = %#v, want %#v", fields, test.want)
+			}
+		})
+	}
+}

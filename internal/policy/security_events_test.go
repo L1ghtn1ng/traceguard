@@ -27,3 +27,27 @@ func TestOperationsSelectorValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestExecSelectorValidation(t *testing.T) {
+	t.Parallel()
+
+	rule := func(events, match string) string {
+		return "version: 1\ndetections:\n  - id: probe\n    severity: warning\n    message: probe\n    events: " + events +
+			"\n    match: " + match + "\n"
+	}
+	if _, err := Parse([]byte(rule("[exec]", `{command_globs: ["* -c *curl*"], exec_sources: [fd]}`))); err != nil {
+		t.Fatalf("valid exec selectors rejected: %v", err)
+	}
+	for name, test := range map[string]struct {
+		events, match, want string
+	}{
+		"command glob on decision event": {"[exec_blocked]", `{command_globs: ["*"]}`, "command_globs require exec events"},
+		"exec source on file event":      {"[file_access]", `{exec_sources: [fd]}`, "exec_sources require exec events"},
+		"unknown exec source":            {"[exec]", `{exec_sources: [memory]}`, `unsupported exec source "memory"`},
+		"malformed command glob":         {"[exec]", `{command_globs: ["["]}`, "invalid glob"},
+	} {
+		if _, err := Parse([]byte(rule(test.events, test.match))); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: error = %v, want %q", name, err, test.want)
+		}
+	}
+}

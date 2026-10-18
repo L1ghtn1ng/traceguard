@@ -405,6 +405,11 @@
           "description": "Requested AF_UNIX socket paths: exact absolute or @abstract names, or /** subtrees; valid only with unix_blocked and unix_would_block."
         },
         "file_access": {"type": "array", "items": {"enum": ["read", "write", "unknown"]}},
+        "command_globs": {
+          "$ref": "#/$defs/string_list",
+          "description": "Globs over the redacted exec command line joined with spaces; valid only with exec events."
+        },
+        "exec_sources": {"type": "array", "items": {"enum": ["path", "fd"]}, "description": "Valid only with exec events."},
         "operations": {
           "type": "array",
           "maxItems": 256,

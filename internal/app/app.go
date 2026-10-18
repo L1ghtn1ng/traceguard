@@ -418,8 +418,7 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			metrics.IncPolicyDecision(string(blocklist.DecisionBlock))
 			recorder.InfoAt(event.Timestamp, "blocked-"+event.Transport, fields)
 		case ebpf.EventExec:
-			fields["requested_path"] = event.Filename
-			fields["path_source"] = "syscall-requested"
+			appendExecFields(fields, event)
 			recorder.InfoAt(event.Timestamp, "exec", fields)
 		case ebpf.EventConnection:
 			fields["direction"] = event.Direction

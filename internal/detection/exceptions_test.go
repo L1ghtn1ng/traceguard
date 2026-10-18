@@ -182,3 +182,37 @@ func TestOperationsSelectorMatchesEventOperation(t *testing.T) {
 		t.Fatalf("traceme raised %d alerts, want 0", len(alerts))
 	}
 }
+
+func TestExecSelectorsMatchCommandLineAndSource(t *testing.T) {
+	t.Parallel()
+
+	compiled, err := Compile([]policy.DetectionRule{{
+		ID: "fd-curl", Severity: "warning", Events: []string{"exec"}, Message: "fd curl",
+		Match: policy.DetectionMatch{CommandGlobs: []string{"curl *http://*"}, ExecSources: []string{"fd"}},
+	}}, []string{"baseline.cloud-metadata-access", "baseline.direct-email-egress", "baseline.inbound-ssh-bruteforce", "baseline.policy-denial-burst"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Install(compiled)
+	exec := func(args any, source string) int {
+		return len(engine.Evaluate(Event{Timestamp: time.Unix(1, 0), Name: "exec", Fields: map[string]any{
+			"command_line": args, "exec_source": source,
+		}}))
+	}
+	if got := exec([]string{"curl", "-s", "http://evil.example/x"}, "fd"); got != 1 {
+		t.Fatalf("live command line alerts = %d, want 1", got)
+	}
+	if got := exec([]any{"curl", "-s", "http://evil.example/x"}, "fd"); got != 1 {
+		t.Fatalf("replayed command line alerts = %d, want 1", got)
+	}
+	if got := exec([]string{"curl", "-s", "http://evil.example/x"}, "path"); got != 0 {
+		t.Fatalf("path exec alerts = %d, want 0", got)
+	}
+	if got := exec([]string{"wget", "http://evil.example/x"}, "fd"); got != 0 {
+		t.Fatalf("other command alerts = %d, want 0", got)
+	}
+}

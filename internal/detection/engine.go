@@ -407,7 +407,7 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchUint16Field(match.Ports, fields, "peer_port", "port") &&
 		matchUint16Field(match.LocalPorts, fields, "local_port") &&
 		matchCanonicalPathGlobs(match.ExecutableGlobs, stringField(fields, "exe"), boolField(fields, "path_truncated")) &&
-		len(match.CommandGlobs) == 0 &&
+		matchGlobs(match.CommandGlobs, commandLineField(fields)) &&
 		matchCanonicalPathGlobs(match.FilePathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchLiteralPathGlobs(match.UnixPathGlobs, stringField(fields, "path"), boolField(fields, "path_truncated")) &&
 		matchStrings(match.FileAccess, stringField(fields, "file_access")) &&
@@ -422,7 +422,30 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchStrings(match.KubernetesApps, stringField(fields, "k8s_app")) &&
 		matchStrings(match.LSMSources, stringField(fields, "lsm_source")) &&
 		matchStrings(match.LSMLabels, stringField(fields, "lsm_label")) &&
-		matchStrings(match.Operations, stringField(fields, "operation"))
+		matchStrings(match.Operations, stringField(fields, "operation")) &&
+		matchStrings(match.ExecSources, stringField(fields, "exec_source"))
+}
+
+// commandLineField joins the redacted command_line arguments with spaces. It
+// accepts the []string a live event carries and the []any an archived record
+// decodes to.
+func commandLineField(fields map[string]any) string {
+	switch args := fields["command_line"].(type) {
+	case []string:
+		return strings.Join(args, " ")
+	case []any:
+		parts := make([]string, 0, len(args))
+		for _, arg := range args {
+			text, ok := arg.(string)
+			if !ok {
+				return ""
+			}
+			parts = append(parts, text)
+		}
+		return strings.Join(parts, " ")
+	default:
+		return ""
+	}
 }
 
 func matchStrings(values []string, candidate string) bool {

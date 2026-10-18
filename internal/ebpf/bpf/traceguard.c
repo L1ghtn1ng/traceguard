@@ -78,6 +78,17 @@
 #define TRACEGUARD_PTRACE_POKEUSER 6
 #define TRACEGUARD_PTRACE_ATTACH 16
 #define TRACEGUARD_PTRACE_SEIZE 0x4206
+
+/* Exec events carry the command line in domain as NUL-terminated arguments,
+ * the captured argument count in port, the execveat dirfd in file_mode, and
+ * the execveat flags in file_flags. rule_id names the syscall.
+ */
+#define EXEC_SYSCALL_EXECVE 0
+#define EXEC_SYSCALL_EXECVEAT 1
+#define EXEC_ARGV_MAX 32
+#define EXEC_ARGV_BYTES (MAX_DOMAIN_LEN + 1)
+#define EXEC_ARGV_TRUNCATED (1U << 31)
+#define TRACEGUARD_AT_FDCWD (-100)
 #define POLICY_DECISION_NONE 0
 #define POLICY_DECISION_ALLOW 1
 #define POLICY_DECISION_BLOCK 2
@@ -603,6 +614,20 @@ struct {
 	__type(key, __u32);
 	__type(value, struct dns_parse_result);
 } dns_scratch SEC(".maps");
+
+/* Twice the copied size, so each argument read may use all the remaining
+ * space without the verifier having to relate offset and length.
+ */
+struct exec_argv_scratch {
+	char buf[2 * EXEC_ARGV_BYTES];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct exec_argv_scratch);
+} exec_argv_scratch SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -3826,7 +3851,55 @@ int lsm_file_open(unsigned long long *ctx)
 	return verdict;
 }
 
-static __always_inline int emit_exec_event(const char *filename)
+static __always_inline void copy_exec_argv(struct event *event, const char *const *argv)
+{
+	struct exec_argv_scratch *scratch;
+	__u32 zero = 0;
+	__u32 offset = 0;
+	__u16 argc = 0;
+
+	if (!argv) {
+		return;
+	}
+	scratch = bpf_map_lookup_elem(&exec_argv_scratch, &zero);
+	if (!scratch) {
+		return;
+	}
+	for (__u32 index = 0; index < EXEC_ARGV_MAX; index++) {
+		const char *arg = 0;
+		long copied;
+
+		if (bpf_probe_read_user(&arg, sizeof(arg), &argv[index]) != 0 || !arg) {
+			break;
+		}
+		if (offset >= EXEC_ARGV_BYTES) {
+			event->file_flags |= EXEC_ARGV_TRUNCATED;
+			break;
+		}
+		copied = bpf_probe_read_user_str(&scratch->buf[offset & (EXEC_ARGV_BYTES - 1)], EXEC_ARGV_BYTES, arg);
+		if (copied <= 0) {
+			break;
+		}
+		offset += (__u32)copied;
+		argc++;
+		if (index == EXEC_ARGV_MAX - 1) {
+			if (bpf_probe_read_user(&arg, sizeof(arg), &argv[index + 1]) == 0 && arg) {
+				event->file_flags |= EXEC_ARGV_TRUNCATED;
+			}
+		}
+	}
+	if (offset >= EXEC_ARGV_BYTES) {
+		/* The last argument reached the end of the copied bytes, so it may
+		 * have been cut.
+		 */
+		event->file_flags |= EXEC_ARGV_TRUNCATED;
+	}
+	__builtin_memcpy(event->domain, scratch->buf, sizeof(event->domain));
+	event->domain[sizeof(event->domain) - 1] = 0;
+	event->port = argc;
+}
+
+static __always_inline int emit_exec_event(__u32 syscall, const char *filename, const char *const *argv, __u64 dirfd, __u64 flags)
 {
 	struct event *event = reserve_event(EVENT_EXEC);
 
@@ -3836,9 +3909,13 @@ static __always_inline int emit_exec_event(const char *filename)
 
 	__builtin_memset(event, 0, sizeof(*event));
 	init_event(event, EVENT_EXEC, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = syscall;
+	event->file_mode = (__u32)dirfd;
+	event->file_flags = (__u32)flags & ~EXEC_ARGV_TRUNCATED;
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
+	copy_exec_argv(event, argv);
 	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
@@ -4069,13 +4146,15 @@ int trace_capset(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_execve")
 int trace_execve(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_exec_event((const char *)ctx->args[0]);
+	return emit_exec_event(EXEC_SYSCALL_EXECVE, (const char *)ctx->args[0], (const char *const *)ctx->args[1],
+		(__u64)(__s64)TRACEGUARD_AT_FDCWD, 0);
 }
 
 SEC("tracepoint/syscalls/sys_enter_execveat")
 int trace_execveat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_exec_event((const char *)ctx->args[1]);
+	return emit_exec_event(EXEC_SYSCALL_EXECVEAT, (const char *)ctx->args[1], (const char *const *)ctx->args[2],
+		ctx->args[0], ctx->args[4]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_open")

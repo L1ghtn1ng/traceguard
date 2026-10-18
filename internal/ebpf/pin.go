@@ -310,7 +310,7 @@ func sanitizePinName(name string) string {
 func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*ebpf.Map {
 	return map[string]*ebpf.Map{
 		"allowlist": o.Allowlist, "allow_suffixes": o.AllowSuffixes, "block_suffixes": o.BlockSuffixes,
-		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "socket_info": o.SocketInfo,
+		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "exec_argv_scratch": o.ExecArgvScratch, "socket_info": o.SocketInfo,
 		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
 		"endpoint4_allow_rules": o.Endpoint4AllowRules, "endpoint4_cidr_allow_rules": o.Endpoint4CidrAllowRules,
 		"endpoint4_cidr_rules": o.Endpoint4CidrRules, "endpoint4_rules": o.Endpoint4Rules,

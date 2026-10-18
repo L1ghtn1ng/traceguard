@@ -19,6 +19,7 @@ const (
 	maxDNSWireNameBytes = 255
 	filenameSize        = 248
 	mountSourceSize     = 192
+	execArgvTruncated   = uint32(1 << 31)
 	pathTruncatedFlag   = uint32(1 << 31)
 	timestampOffsetTTL  = time.Second
 )
@@ -134,6 +135,10 @@ type Event struct {
 	Operation   uint32
 	MountSource string
 	MountFSType string
+	// Args is the exec command line read at syscall entry, and
+	// ArgsTruncated reports that arguments or bytes beyond it were dropped.
+	Args          []string
+	ArgsTruncated bool
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -180,6 +185,14 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		KernelFeatureSet: kernelFeatureSetName(raw.FeatureSet),
 		UIDSource:        uidSourceName(raw.UIDSource),
 	}
+	if raw.Kind == EventExec {
+		event.Operation = raw.RuleID
+		event.Args = splitArgs(raw.Domain[:], int(raw.Port))
+		event.ArgsTruncated = raw.FileFlags&execArgvTruncated != 0
+		event.FileFlags &^= execArgvTruncated
+		event.Port = 0
+		return event, nil
+	}
 	if IsSecurityEvent(raw.Kind) {
 		event.Operation = raw.RuleID
 		if raw.Kind == EventMount {
@@ -198,6 +211,22 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		}
 	}
 	return event, nil
+}
+
+// splitArgs returns the first count NUL-terminated arguments in buffer. A final
+// argument without a terminator was cut at the end of the buffer.
+func splitArgs(buffer []byte, count int) []string {
+	args := make([]string, 0, count)
+	for len(args) < count && len(buffer) > 0 {
+		end := bytes.IndexByte(buffer, 0)
+		if end < 0 {
+			args = append(args, string(buffer))
+			break
+		}
+		args = append(args, string(buffer[:end]))
+		buffer = buffer[end+1:]
+	}
+	return args
 }
 
 // IsSecurityEvent reports whether kind is one of the observe-only security
