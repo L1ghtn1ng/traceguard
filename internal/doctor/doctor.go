@@ -18,6 +18,7 @@ import (
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 var defaultChecks = environmentChecks{
@@ -261,6 +262,19 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "kernel-bpf-object", emptyDetail(features.SelectedObject, "none"))
 	check(true, "kernel-enhanced-telemetry", enhancedTelemetryDetail(features))
 	if effective, ok := effectivePolicy(remotePolicy, localPolicy, check); ok {
+		if feeds := effective.ThreatIntel.Feeds; len(feeds) > 0 {
+			if loaded, err := threatintel.Load(feeds); err != nil {
+				check(false, "threat-intel-feeds", err.Error())
+			} else if _, err := threatintel.Enforce(effective, loaded); err != nil {
+				check(false, "threat-intel-feeds", err.Error())
+			} else {
+				indicators := 0
+				for _, count := range threatintel.NewMatcher(loaded).Indicators() {
+					indicators += count
+				}
+				check(true, "threat-intel-feeds", fmt.Sprintf("feeds=%d indicators=%d", len(loaded), indicators))
+			}
+		}
 		execBlocks := policyBlockRuleCount(effective.Exec.Rules, func(rule policyconfig.PathRule) string { return rule.Action })
 		fileBlocks := policyBlockRuleCount(effective.File.Rules, func(rule policyconfig.FileRule) string { return rule.Action })
 		lsmScopeOK := execBlocks+fileBlocks == 0 || filepath.Clean(cfg.CgroupPath) == "/sys/fs/cgroup"

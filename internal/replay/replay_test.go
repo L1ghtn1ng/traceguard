@@ -130,3 +130,19 @@ func TestConvertNumberKeepsIntegersExact(t *testing.T) {
 		}
 	}
 }
+
+func TestRunMatchesThreatIntelFeeds(t *testing.T) {
+	t.Parallel()
+
+	feed := writeFile(t, "addresses.txt", "169.254.169.254\n")
+	policyPath := writeFile(t, "policy.yaml", "version: 1\nthreat_intel:\n  feeds:\n    - {id: imds, path: "+feed+", type: addresses}\n")
+	summary, err := Run(Config{ArchivePath: writeFile(t, "events.jsonl", archive), PolicyPath: policyPath}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	// Both archived connections match; they come from different cgroups, so
+	// the feed's cooldown does not merge them.
+	if got := summary.Alerts["threat_intel.imds"]; got != 2 {
+		t.Fatalf("threat intel alerts = %d, want 2", got)
+	}
+}

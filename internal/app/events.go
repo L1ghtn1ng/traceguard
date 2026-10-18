@@ -14,6 +14,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 type processMetadataCache interface {
@@ -310,6 +311,16 @@ func emitDetectionAlerts(detector *detection.Engine, recorder *eventsink.Recorde
 		Fields:    fields,
 	})
 	metrics.SetDetectionStateGroups(detector.StateCount())
+	recordAlerts(recorder, metrics, eventName, alerts)
+}
+
+// emitThreatIntelAlerts records alerts for events whose domain or peer
+// address is in a loaded feed.
+func emitThreatIntelAlerts(matcher *threatintel.Matcher, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
+	recordAlerts(recorder, metrics, eventName, matcher.Evaluate(detection.Event{Timestamp: timestamp, Name: eventName, Fields: fields}))
+}
+
+func recordAlerts(recorder *eventsink.Recorder, metrics *telemetry.Registry, eventName string, alerts []detection.Alert) {
 	for _, alert := range alerts {
 		metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
 		recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))

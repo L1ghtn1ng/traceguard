@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
@@ -21,6 +22,7 @@ import (
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 const (
@@ -148,10 +150,11 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	workers.Go(func() { integrity.Run(ctx, newIntegrityEmitter(recorder, metrics, detector)) })
 	integrityStats := &integrityStatsWatcher{watcher: integrity, metrics: metrics, recorder: recorder}
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, integrityStats.collect) })
-	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector, integrity)
+	intel := &atomic.Pointer[threatintel.Matcher]{}
+	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector, integrity, intel)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
-	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity)
+	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel)
 
 	var yamlManager *policyconfig.Manager
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
@@ -244,6 +247,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 	if yamlManager != nil {
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
+		feeds := &feedWatcher{source: policyController.Source, apply: policyController.ApplyBundle, metrics: metrics, recorder: recorder}
+		feeds.collect(time.Now())
+		workers.Go(func() { runEvery(ctx, threatIntelPollInterval, feeds.collect) })
 	}
 
 	exceptions := newExceptionWatcher(detector, metrics, recorder)
@@ -270,7 +276,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 // newEventHandler enriches, records, and evaluates detections for each
 // kernel event read from the ring buffer.
-func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine, integrity *fim.Watcher) func(ebpf.Event) {
+func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher]) func(ebpf.Event) {
 	selfPID := uint32(os.Getpid()) //nolint:gosec // PIDs fit in 32 bits
 	return func(event ebpf.Event) {
 		// File integrity hashing opens every watched file; auditing the
@@ -533,5 +539,6 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}
 		emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
+		emitThreatIntelAlerts(intel.Load(), recorder, metrics, event.Timestamp, eventName, fields)
 	}
 }

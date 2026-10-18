@@ -39,6 +39,29 @@
       "maxItems": 64,
       "items": {"$ref": "#/$defs/detection_sequence"}
     },
+    "threat_intel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "feeds": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "path", "type"],
+            "properties": {
+              "id": {"$ref": "#/$defs/rule_id"},
+              "path": {"type": "string", "pattern": "^/"},
+              "type": {"enum": ["domains", "addresses"]},
+              "severity": {"enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]},
+              "block": {"type": "boolean"},
+              "cooldown": {"$ref": "#/$defs/duration"}
+            }
+          }
+        }
+      }
+    },
     "file_integrity": {
       "type": "object",
       "additionalProperties": false,

@@ -20,6 +20,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/safefile"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 // maxLineBytes bounds one archive record; the recorder bounds records well
@@ -48,7 +49,7 @@ type Summary struct {
 
 // Run writes each alert to alerts as one JSON line and returns the summary.
 func Run(cfg Config, alerts io.Writer) (Summary, error) {
-	engine, err := newEngine(cfg.PolicyPath)
+	engine, matcher, err := newEngine(cfg.PolicyPath)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -89,7 +90,8 @@ func Run(cfg Config, alerts io.Writer) (Summary, error) {
 		}
 		summary.Evaluated++
 		last = event.Timestamp
-		for _, alert := range engine.Evaluate(event) {
+		alerts := append(engine.Evaluate(event), matcher.Evaluate(event)...)
+		for _, alert := range alerts {
 			summary.Alerts[alert.RuleID]++
 			summary.Severity[alert.RuleID] = alert.Severity
 			record := alert.RecordFields(event.Name)
@@ -106,32 +108,38 @@ func Run(cfg Config, alerts io.Writer) (Summary, error) {
 	return summary, nil
 }
 
-func newEngine(policyPath string) (*detection.Engine, error) {
+// newEngine builds the detection engine and threat intelligence matcher a
+// policy describes; without a policy only the baseline runs.
+func newEngine(policyPath string) (*detection.Engine, *threatintel.Matcher, error) {
 	engine, err := detection.New(nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if policyPath == "" {
-		return engine, nil
+		return engine, nil, nil
 	}
 	payload, err := safefile.ReadFile(policyPath, policy.MaxDocumentBytes)
 	if err != nil {
-		return nil, fmt.Errorf("read policy %q: %w", policyPath, err)
+		return nil, nil, fmt.Errorf("read policy %q: %w", policyPath, err)
 	}
 	document, err := policy.Parse(payload)
 	if err != nil {
-		return nil, fmt.Errorf("parse policy %q: %w", policyPath, err)
+		return nil, nil, fmt.Errorf("parse policy %q: %w", policyPath, err)
 	}
 	bundle, err := policy.Merge(policy.Document{Version: policy.Version}, document)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	compiled, err := detection.Compile(bundle)
 	if err != nil {
-		return nil, fmt.Errorf("compile detection policy: %w", err)
+		return nil, nil, fmt.Errorf("compile detection policy: %w", err)
 	}
 	engine.Install(compiled)
-	return engine, nil
+	feeds, err := threatintel.Load(bundle.ThreatIntel.Feeds)
+	if err != nil {
+		return nil, nil, err
+	}
+	return engine, threatintel.NewMatcher(feeds), nil
 }
 
 // decodeEvent turns one archive record into a detection event. Records that

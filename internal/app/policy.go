@@ -6,7 +6,9 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
@@ -18,6 +20,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
 
 type policyController struct {
@@ -28,25 +31,57 @@ type policyController struct {
 	metrics       *telemetry.Registry
 	detector      *detection.Engine
 	integrity     *fim.Watcher
+	intel         *atomic.Pointer[threatintel.Matcher]
 	mu            sync.Mutex
+	source        policyconfig.Bundle
 	bundle        policyconfig.Bundle
+	feedDigest    string
 	cgroups       []cgroupinfo.Entry
 	blockResolved []blocklist.ResolvedEndpoint
 	allowResolved []blocklist.ResolvedEndpoint
 	digest        string
 }
 
-func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine, integrity *fim.Watcher) *policyController {
-	return &policyController{ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics, detector: detector, integrity: integrity}
+func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher]) *policyController {
+	return &policyController{ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics, detector: detector, integrity: integrity, intel: intel}
 }
 
-func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
+// expandThreatIntel loads a policy's feeds and adds blocking feeds to its
+// kernel rules, returning the effective bundle and a digest of every feed.
+func expandThreatIntel(source policyconfig.Bundle) (policyconfig.Bundle, []threatintel.Feed, string, error) {
+	feeds, err := threatintel.Load(source.ThreatIntel.Feeds)
+	if err != nil {
+		return policyconfig.Bundle{}, nil, "", err
+	}
+	bundle, err := threatintel.Enforce(source, feeds)
+	if err != nil {
+		return policyconfig.Bundle{}, nil, "", err
+	}
+	digests := make([]string, 0, len(feeds))
+	for _, feed := range feeds {
+		digests = append(digests, feed.Config.ID+"="+feed.Digest)
+	}
+	return bundle, feeds, strings.Join(digests, ","), nil
+}
+
+// Source returns the policy as it was last applied, before feed expansion.
+func (p *policyController) Source() policyconfig.Bundle {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := validateBundleForMode(p.cfg, bundle); err != nil {
+	return p.source
+}
+
+func (p *policyController) ApplyBundle(source policyconfig.Bundle) error {
+	bundle, feeds, feedDigest, err := expandThreatIntel(source)
+	if err != nil {
 		return err
 	}
-	bundleChanged := !reflect.DeepEqual(bundle, p.bundle)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := validateEffectiveBundle(p.cfg, bundle); err != nil {
+		return err
+	}
+	bundleChanged := !reflect.DeepEqual(bundle, p.bundle) || feedDigest != p.feedDigest
 	refreshEndpoints := policyHasResolverEndpoints(p.bundle) || policyHasResolverEndpoints(bundle)
 	if !bundleChanged && !refreshEndpoints {
 		return nil
@@ -54,7 +89,6 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 	cgroups := p.cgroups
 	var detections detection.CompiledRules
 	if bundleChanged {
-		var err error
 		cgroups, err = p.scanCgroups(bundle)
 		if err != nil {
 			return err
@@ -74,19 +108,33 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 	}
 	if bundleChanged {
 		p.integrity.Configure(bundle.FileIntegrity)
+		matcher := threatintel.NewMatcher(feeds)
+		p.intel.Store(matcher)
+		p.metrics.SetThreatIntelIndicators(matcher.Indicators())
 		p.detector.Install(detections)
 		p.metrics.SetDetectionRules(p.detector.RuleCount())
 		p.recorder.InfoIfChanged("detection policy loaded", map[string]any{
 			"rules": p.detector.RuleCount(),
 		})
 	}
+	p.source = source
 	p.bundle = bundle
+	p.feedDigest = feedDigest
 	return nil
 }
 
-// validateBundleForMode runs every check that does not touch the kernel. The
-// YAML manager uses it before committing a fetched remote document.
-func validateBundleForMode(cfg config.Config, bundle policyconfig.Bundle) error {
+// validateBundleForMode runs every check that does not touch the kernel,
+// including loading threat intelligence feeds. The YAML manager uses it
+// before committing a fetched remote document.
+func validateBundleForMode(cfg config.Config, source policyconfig.Bundle) error {
+	bundle, _, _, err := expandThreatIntel(source)
+	if err != nil {
+		return err
+	}
+	return validateEffectiveBundle(cfg, bundle)
+}
+
+func validateEffectiveBundle(cfg config.Config, bundle policyconfig.Bundle) error {
 	if err := bundle.Validate(); err != nil {
 		return fmt.Errorf("validate effective policy: %w", err)
 	}

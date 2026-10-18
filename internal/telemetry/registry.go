@@ -199,6 +199,16 @@ func (r *Registry) SetFileIntegrityStats(files int, truncated bool, dropped uint
 	r.counters["traceguard_file_integrity_dropped_checks_total"] = boundedMetricUint64(dropped)
 }
 
+// SetThreatIntelIndicators publishes each loaded feed's indicator count,
+// replacing feeds that were removed.
+func (r *Registry) SetThreatIntelIndicators(counts map[string]int) {
+	gauges := make(map[string]int64, len(counts))
+	for feed, count := range counts {
+		gauges[metricKey1("traceguard_threat_intel_indicators", "feed", feed)] = int64(count)
+	}
+	r.replaceGauges("traceguard_threat_intel_indicators", gauges)
+}
+
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
 	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
 }

@@ -23,6 +23,7 @@ editor.
 - [Sockopt policy](#sockopt-policy)
 - [Detection rules](#detection-rules)
 - [File integrity monitoring](#file-integrity-monitoring)
+- [Threat intelligence feeds](#threat-intelligence-feeds)
 - [Local and remote policy configuration](#local-and-remote-policy-configuration)
 - [Operational controls](#operational-controls)
 - [Validation rules and limits](#validation-rules-and-limits)
@@ -84,6 +85,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | `detection_exceptions` | Scoped, expiring suppressions for named detection rules. |
 | `detection_sequences` | Correlation rules that alert when ordered steps match for one process or cgroup within a window. |
 | `file_integrity` | Files whose content and attributes are baselined and compared after changes. |
+| `threat_intel` | Local indicator files that DNS and connection events are matched against. |
 
 A minimal document is:
 
@@ -1172,6 +1174,61 @@ observed; the rescan covers them. TraceGuard's own file activity is excluded
 from file audit and file change events, because hashing would otherwise audit
 itself.
 
+## Threat intelligence feeds
+
+`threat_intel` names local files of indicators. TraceGuard never downloads
+feeds: fetch and verify them with your own tooling, for example a timer that
+downloads, checks a signature, and atomically replaces the file.
+
+```yaml
+version: 1
+threat_intel:
+  feeds:
+    - id: phishing
+      path: /var/lib/traceguard/feeds/phishing-domains.txt
+      type: domains
+    - id: c2
+      path: /var/lib/traceguard/feeds/c2-addresses.txt
+      type: addresses
+      severity: critical
+      block: true
+      cooldown: 1h
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `id` | — | Feed ID; alerts carry `detection_rule_id: threat_intel.<id>`. |
+| `path` | — | Clean absolute path to the feed file. |
+| `type` | — | `domains`, one hostname per line, or `addresses`, one IP address or CIDR prefix per line. |
+| `severity` | `warning` | Alert severity. |
+| `block` | `false` | Also enforce the feed in the kernel. See below. |
+| `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup. |
+
+Blank lines and text after `#` are ignored. A feed may hold up to 1,000,000
+indicators in up to 64 MiB, and a policy up to 32 feeds. A missing or invalid
+feed rejects the policy, so the previous policy stays active.
+
+A domain indicator matches the domain and its subdomains on `dns` and
+`blocked` events. An address indicator matches the peer address of
+`connection`, `resolver`, `resolver_blocked`, `egress_blocked`, and
+`egress_would_block` events, using the longest matching prefix. Alerts are
+ordinary `detection_alert` records with `threat_intel_feed` and
+`threat_intel_indicator`, also evaluated by `-replay`.
+`traceguard_threat_intel_indicators{feed}` reports each feed's size, and
+`-doctor` loads every feed and reports `threat-intel-feeds`.
+
+With `block: true`, domain indicators are added as DNS suffix block rules and
+address indicators as egress block rules named `threat_intel.<id>.<n>`, 256
+prefixes each. They follow the same enforcement mode as written policy:
+`-dry-run` reports would-block decisions and only `-block` denies. Blocking
+feeds count toward the DNS and egress rule limits, so a policy whose blocking
+feeds do not fit is rejected; keep large feeds alert-only.
+
+Feed files are checked for a changed size or modification time every minute
+and on `SIGHUP`. A change re-applies policy with the new contents, and the
+policy digest changes with it; a failed reload keeps the previous policy and
+is retried on the next check.
+
 ## Local and remote policy configuration
 
 ### Local policy
@@ -1460,6 +1517,7 @@ Important limits:
 | Detection exception reason | 512 bytes |
 | Detection sequences | 64, with 2 to 8 steps each |
 | In-progress sequence keys | 16,384 |
+| Threat intelligence feeds | 32, each up to 1,000,000 indicators and 64 MiB |
 | File integrity paths and excludes | 256 |
 | File integrity baseline | 100,000 entries |
 | Values in one rule list | 256 |
