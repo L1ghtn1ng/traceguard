@@ -11,10 +11,13 @@ All notable changes to TraceGuard are documented in this file.
 - Added the `unix_path_globs` detection selector for `unix_blocked` and `unix_would_block` socket paths, including `@` abstract names.
 - Added the `peer` threshold group field as a clearer name for the peer address of inbound connections.
 - Added the `baseline.inbound-ssh-bruteforce` detection: 20 inbound TCP connection attempts to port 22 from one address within a minute.
+- Added per-kind kernel counters for events lost because the event ring buffer was full, exported as `traceguard_ringbuf_dropped_total{kind}`, plus `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` occupancy gauges. New drops are also recorded as an `eBPF ring buffer full; events dropped` error event. Previously a full ring buffer discarded events without any signal.
 
 ### Changed
 
 - Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
+- The ring buffer reader now starts before the initial YAML policy is loaded and applied, so events from the already-attached programs are consumed while a remote policy fetch is in progress instead of accumulating until the buffer fills. Events in that window are evaluated against the baseline detections.
+- Bumped the eBPF pin layout to version 6 for the new drop-counter map. With `-pin-ebpf`, the first start after upgrading discards the previous pins and attaches fresh programs.
 
 ### Security
 

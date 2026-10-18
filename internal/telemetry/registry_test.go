@@ -58,6 +58,7 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.SetHookHealthy("lsm-exec", true)
 	registry.SetKernelFeatures(map[string]bool{"enhanced_telemetry": true, "btf": false, "bpf_lsm": true})
 	registry.IncEBPFReadError()
+	registry.SetRingBufferStats(16777216, 4096, map[string]uint64{"dns": 3, "exec": 0})
 
 	rendered := registry.Render()
 	checks := []string{
@@ -67,6 +68,11 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`# TYPE traceguard_policy_domains gauge`,
 		`traceguard_ebpf_attached_programs 14`,
 		`traceguard_ebpf_read_errors_total 1`,
+		`# TYPE traceguard_ringbuf_dropped_total counter`,
+		`traceguard_ringbuf_dropped_total{kind="dns"} 3`,
+		`traceguard_ringbuf_dropped_total{kind="exec"} 0`,
+		`traceguard_ringbuf_size_bytes 16777216`,
+		`traceguard_ringbuf_unread_bytes 4096`,
 		`traceguard_kernel_feature_enabled{feature="bpf_lsm"} 1`,
 		`traceguard_kernel_feature_enabled{feature="btf"} 0`,
 		`traceguard_kernel_feature_enabled{feature="enhanced_telemetry"} 1`,

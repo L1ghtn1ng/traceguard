@@ -243,6 +243,7 @@ const (
 	traceguardDNSRecvmsgCompatMapLsmPathBuf              = "lsm_path_buf"
 	traceguardDNSRecvmsgCompatMapPolicyReaders           = "policy_readers"
 	traceguardDNSRecvmsgCompatMapPolicySelector          = "policy_selector"
+	traceguardDNSRecvmsgCompatMapRingbufDrops            = "ringbuf_drops"
 	traceguardDNSRecvmsgCompatMapRuleNames               = "rule_names"
 	traceguardDNSRecvmsgCompatMapSettings                = "settings"
 	traceguardDNSRecvmsgCompatMapSocketInfo              = "socket_info"
@@ -382,6 +383,7 @@ type traceguardDNSRecvmsgCompatMapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
@@ -449,6 +451,7 @@ type traceguardDNSRecvmsgCompatMaps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
@@ -492,6 +495,7 @@ func (m *traceguardDNSRecvmsgCompatMaps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,

@@ -243,6 +243,7 @@ const (
 	traceguardLinux71DNSCompatMapLsmPathBuf              = "lsm_path_buf"
 	traceguardLinux71DNSCompatMapPolicyReaders           = "policy_readers"
 	traceguardLinux71DNSCompatMapPolicySelector          = "policy_selector"
+	traceguardLinux71DNSCompatMapRingbufDrops            = "ringbuf_drops"
 	traceguardLinux71DNSCompatMapRuleNames               = "rule_names"
 	traceguardLinux71DNSCompatMapSettings                = "settings"
 	traceguardLinux71DNSCompatMapSocketInfo              = "socket_info"
@@ -382,6 +383,7 @@ type traceguardLinux71DNSCompatMapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
@@ -449,6 +451,7 @@ type traceguardLinux71DNSCompatMaps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
@@ -492,6 +495,7 @@ func (m *traceguardLinux71DNSCompatMaps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,

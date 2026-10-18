@@ -244,6 +244,18 @@ func (r *Registry) SetKernelFeatures(features map[string]bool) {
 	r.replaceGauges("traceguard_kernel_feature_enabled", gauges)
 }
 
+// SetRingBufferStats publishes ring buffer occupancy and the kernel's
+// cumulative per-kind counts of events dropped because the buffer was full.
+func (r *Registry) SetRingBufferStats(sizeBytes, unreadBytes int, drops map[string]uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_ringbuf_size_bytes"] = int64(sizeBytes)
+	r.gauges["traceguard_ringbuf_unread_bytes"] = int64(unreadBytes)
+	for kind, dropped := range drops {
+		r.counters[metricKey1("traceguard_ringbuf_dropped_total", "kind", kind)] = boundedMetricUint64(dropped)
+	}
+}
+
 func (r *Registry) IncEBPFReadError() {
 	r.incCounter("traceguard_ebpf_read_errors_total")
 }

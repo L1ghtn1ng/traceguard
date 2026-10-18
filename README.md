@@ -128,6 +128,8 @@ Notes:
 - the detection engine is alert-only, caps state at 16,384 threshold groups and 65,536 retained timestamps, and enables three baseline rules by default
 - bpffs pinning is disabled by default and requires real `bpf_link` attachments; unpinned startup rejects an existing TraceGuard pin root until `traceguard -unpin` removes it, and host-wide LSM links remain lifecycle-bound
 - eBPF runtime statistics are disabled by default because kernel runtime accounting has a system-wide performance cost
+- events that cannot be queued because the 16 MiB event ring buffer is full are counted in the kernel per event kind and exported as `traceguard_ringbuf_dropped_total{kind}`, with `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` for occupancy; any new drops are also recorded as an `eBPF ring buffer full; events dropped` error event with `dropped_events` and `dropped_<kind>` counts, checked every five seconds. Enforcement decisions are unaffected by drops; only their telemetry is lost
+- the ring buffer reader starts before the initial YAML policy is loaded, so a slow remote policy fetch at startup does not leave attached programs filling an unread buffer
 
 ## Build
 

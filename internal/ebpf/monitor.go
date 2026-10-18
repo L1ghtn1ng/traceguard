@@ -222,9 +222,13 @@ type PolicyConfig struct {
 }
 
 type Monitor struct {
-	objects          monitorObjects
-	links            []io.Closer
-	reader           *ringbuf.Reader
+	objects monitorObjects
+	links   []io.Closer
+	reader  *ringbuf.Reader
+	// readerMu orders occupancy reads against closing the reader, whose
+	// shared ring mapping is released on close.
+	readerMu         sync.Mutex
+	readerClosed     bool
 	features         KernelFeatures
 	optional         optionalPrograms
 	optionalLinks    []io.Closer
@@ -319,6 +323,7 @@ type monitorObjects struct {
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	DaemonIdentity          *ebpf.Map `ebpf:"daemon_identity"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
+	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 }
 
@@ -377,6 +382,7 @@ func (o *monitorObjects) Close() error {
 		o.PolicyReaders,
 		o.DaemonIdentity,
 		o.RuleNames,
+		o.RingbufDrops,
 		o.Events,
 		o.Settings,
 	} {
@@ -663,7 +669,7 @@ func readProcessStartTime(path string) (uint64, error) {
 func (m *Monitor) Close() error {
 	var errs []error
 	if m.reader != nil {
-		errs = append(errs, m.reader.Close())
+		errs = append(errs, m.closeReader())
 	}
 	for _, lnk := range m.links {
 		if lnk != nil {
@@ -756,7 +762,7 @@ func (m *Monitor) ProgramStats() (map[string]ebpf.ProgramStats, error) {
 func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeMetrics) error {
 	finished := make(chan struct{})
 	defer close(finished)
-	go closeReaderOnCancel(ctx, m.reader, finished)
+	go closeReaderOnCancel(ctx, readerCloser(m.closeReader), finished)
 
 	for {
 		record, err := m.reader.Read()
@@ -778,6 +784,20 @@ func (m *Monitor) Run(ctx context.Context, handler func(Event), metrics RuntimeM
 		}
 		handler(event)
 	}
+}
+
+type readerCloser func() error
+
+func (c readerCloser) Close() error { return c() }
+
+func (m *Monitor) closeReader() error {
+	m.readerMu.Lock()
+	defer m.readerMu.Unlock()
+	if m.readerClosed {
+		return nil
+	}
+	m.readerClosed = true
+	return m.reader.Close()
 }
 
 func closeReaderOnCancel(ctx context.Context, reader io.Closer, finished <-chan struct{}) {

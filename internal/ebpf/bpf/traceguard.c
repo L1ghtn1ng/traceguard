@@ -39,6 +39,7 @@
 #define EVENT_SOCKOPT_BLOCKED 18
 #define EVENT_SOCKOPT_WOULD_BLOCK 19
 #define EVENT_SOCKOPS 20
+#define EVENT_KIND_MAX EVENT_SOCKOPS
 #define POLICY_DECISION_NONE 0
 #define POLICY_DECISION_ALLOW 1
 #define POLICY_DECISION_BLOCK 2
@@ -463,6 +464,28 @@ struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 24);
 } events SEC(".maps");
+
+/* Indexed by event kind; counts events lost because the ring buffer was full. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, EVENT_KIND_MAX + 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} ringbuf_drops SEC(".maps");
+
+static __always_inline struct event *reserve_event(__u32 kind)
+{
+	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	__u64 *drops;
+
+	if (!event) {
+		drops = bpf_map_lookup_elem(&ringbuf_drops, &kind);
+		if (drops) {
+			__sync_fetch_and_add(drops, 1);
+		}
+	}
+	return event;
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -960,7 +983,7 @@ struct path_decision_context {
 static __always_inline void emit_path_decision(__u32 kind, __u32 source,
 	const struct path_decision_context *decision)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 	__u64 copy_len = (__u64)decision->path_len + 1;
 
 	if (!event) {
@@ -1308,7 +1331,7 @@ static __always_inline int emit_connection_event_identity(const struct connectio
 		return 1;
 	}
 
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(EVENT_CONNECTION);
 	if (!event) {
 		return 1;
 	}
@@ -1341,7 +1364,7 @@ static __always_inline int emit_connection_event_current(const struct connection
 		return 1;
 	}
 
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(EVENT_CONNECTION);
 	if (!event) {
 		return 1;
 	}
@@ -1527,7 +1550,7 @@ static __always_inline __u32 lookup_egress6(__u8 allow, const struct egress_look
 static __always_inline int emit_egress_decision(struct bpf_sock_addr *ctx, const struct connection_event_params *params, const struct settings *cfg, __u32 rule_id, const struct egress_lookup *lookup)
 {
 	__u32 kind = cfg->egress_enforce ? EVENT_EGRESS_BLOCKED : EVENT_EGRESS_WOULD_BLOCK;
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 
 	if (!event) {
 		return cfg->egress_enforce ? 0 : 1;
@@ -1737,7 +1760,7 @@ static __always_inline __u32 lookup_bind6(__u8 allow, const struct egress_lookup
 static __always_inline int emit_bind_decision(struct bpf_sock_addr *ctx, const struct settings *cfg,
 	const struct egress_lookup *lookup, __u32 rule_id, __u16 socket_meta)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(cfg->bind_enforce ? EVENT_BIND_BLOCKED : EVENT_BIND_WOULD_BLOCK);
 	__u8 family = (__u8)(socket_meta >> 8);
 	__u8 hook = (__u8)socket_meta;
 	__u8 deny = cfg->bind_enforce;
@@ -2089,7 +2112,7 @@ int trace_setsockopt(struct bpf_sockopt *ctx)
 		release_policy_guard(&guard);
 		return 1;
 	}
-	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	event = reserve_event(cfg->sockopt_enforce ? EVENT_SOCKOPT_BLOCKED : EVENT_SOCKOPT_WOULD_BLOCK);
 	if (event) {
 		__builtin_memset(event, 0, sizeof(*event));
 		init_event(event, cfg->sockopt_enforce ? EVENT_SOCKOPT_BLOCKED : EVENT_SOCKOPT_WOULD_BLOCK,
@@ -2133,7 +2156,7 @@ static __always_inline int should_emit_sockops_retrans(struct bpf_sock_ops *ctx)
 
 static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(EVENT_SOCKOPS);
 	__u8 family;
 
 	if (!event) {
@@ -2375,7 +2398,7 @@ struct dns_emit_context {
 
 static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct dns_emit_context *ctx, __u32 addr)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(ctx->kind);
 	__u8 protocol = ctx->transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
 	(void)skb;
 
@@ -2398,7 +2421,7 @@ static __always_inline int emit_dns4_event(struct __sk_buff *skb, const struct d
 
 static __always_inline int emit_dns6_event(struct __sk_buff *skb, const struct dns_emit_context *ctx, const __u8 addr[16])
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(ctx->kind);
 	__u8 protocol = ctx->transport == TRANSPORT_TCP ? SOCKET_PROTOCOL_TCP : SOCKET_PROTOCOL_UDP;
 	(void)skb;
 
@@ -2643,7 +2666,7 @@ static __always_inline int parse_tcp_dns_payload(struct __sk_buff *skb, __u32 pa
 
 static __always_inline int emit_resolver_event(struct bpf_sock_addr *ctx, __u32 kind, __u8 transport, __u8 family, __u16 port, const void *addr, __u32 addr_len, __u8 hook, __u32 decision)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(kind);
 	(void)ctx;
 	(void)addr_len;
 
@@ -3755,7 +3778,7 @@ int lsm_file_open(unsigned long long *ctx)
 
 static __always_inline int emit_exec_event(const char *filename)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(EVENT_EXEC);
 
 	if (!event) {
 		return 0;
@@ -3772,7 +3795,7 @@ static __always_inline int emit_exec_event(const char *filename)
 
 static __always_inline int emit_file_access_event(const char *filename, __u64 flags, __u64 mode)
 {
-	struct event *event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	struct event *event = reserve_event(EVENT_FILE_ACCESS);
 
 	if (!event) {
 		return 0;
