@@ -479,7 +479,9 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			if !cfg.FileAudit {
 				return
 			}
-			recorder.InfoAt(event.Timestamp, eventName, fields)
+			// Like opens, repeats of the same request are suppressed, so
+			// temporary-file churn does not record every syscall.
+			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
 		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 			fields["direction"] = event.Direction
 			fields["peer_address"] = event.Address

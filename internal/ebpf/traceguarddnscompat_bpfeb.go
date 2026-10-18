@@ -280,6 +280,8 @@ const (
 	traceguardDNSCompatProgTraceInitModule         = "trace_init_module"
 	traceguardDNSCompatProgTraceIoUringSetup       = "trace_io_uring_setup"
 	traceguardDNSCompatProgTraceLchown             = "trace_lchown"
+	traceguardDNSCompatProgTraceLink               = "trace_link"
+	traceguardDNSCompatProgTraceLinkat             = "trace_linkat"
 	traceguardDNSCompatProgTraceMemfdCreate        = "trace_memfd_create"
 	traceguardDNSCompatProgTraceMount              = "trace_mount"
 	traceguardDNSCompatProgTraceOpen               = "trace_open"
@@ -309,6 +311,8 @@ const (
 	traceguardDNSCompatProgTraceSetsockopt         = "trace_setsockopt"
 	traceguardDNSCompatProgTraceSetuid             = "trace_setuid"
 	traceguardDNSCompatProgTraceSockops            = "trace_sockops"
+	traceguardDNSCompatProgTraceSymlink            = "trace_symlink"
+	traceguardDNSCompatProgTraceSymlinkat          = "trace_symlinkat"
 	traceguardDNSCompatProgTraceTruncate           = "trace_truncate"
 	traceguardDNSCompatProgTraceUnlink             = "trace_unlink"
 	traceguardDNSCompatProgTraceUnlinkat           = "trace_unlinkat"
@@ -381,6 +385,8 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
 	TraceIoUringSetup      *ebpf.ProgramSpec `ebpf:"trace_io_uring_setup"`
 	TraceLchown            *ebpf.ProgramSpec `ebpf:"trace_lchown"`
+	TraceLink              *ebpf.ProgramSpec `ebpf:"trace_link"`
+	TraceLinkat            *ebpf.ProgramSpec `ebpf:"trace_linkat"`
 	TraceMemfdCreate       *ebpf.ProgramSpec `ebpf:"trace_memfd_create"`
 	TraceMount             *ebpf.ProgramSpec `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.ProgramSpec `ebpf:"trace_open"`
@@ -410,6 +416,8 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
 	TraceSetuid            *ebpf.ProgramSpec `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
+	TraceSymlink           *ebpf.ProgramSpec `ebpf:"trace_symlink"`
+	TraceSymlinkat         *ebpf.ProgramSpec `ebpf:"trace_symlinkat"`
 	TraceTruncate          *ebpf.ProgramSpec `ebpf:"trace_truncate"`
 	TraceUnlink            *ebpf.ProgramSpec `ebpf:"trace_unlink"`
 	TraceUnlinkat          *ebpf.ProgramSpec `ebpf:"trace_unlinkat"`
@@ -613,6 +621,8 @@ type traceguardDNSCompatPrograms struct {
 	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
 	TraceIoUringSetup      *ebpf.Program `ebpf:"trace_io_uring_setup"`
 	TraceLchown            *ebpf.Program `ebpf:"trace_lchown"`
+	TraceLink              *ebpf.Program `ebpf:"trace_link"`
+	TraceLinkat            *ebpf.Program `ebpf:"trace_linkat"`
 	TraceMemfdCreate       *ebpf.Program `ebpf:"trace_memfd_create"`
 	TraceMount             *ebpf.Program `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
@@ -642,6 +652,8 @@ type traceguardDNSCompatPrograms struct {
 	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
 	TraceSetuid            *ebpf.Program `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
+	TraceSymlink           *ebpf.Program `ebpf:"trace_symlink"`
+	TraceSymlinkat         *ebpf.Program `ebpf:"trace_symlinkat"`
 	TraceTruncate          *ebpf.Program `ebpf:"trace_truncate"`
 	TraceUnlink            *ebpf.Program `ebpf:"trace_unlink"`
 	TraceUnlinkat          *ebpf.Program `ebpf:"trace_unlinkat"`
@@ -673,6 +685,8 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceInitModule,
 		p.TraceIoUringSetup,
 		p.TraceLchown,
+		p.TraceLink,
+		p.TraceLinkat,
 		p.TraceMemfdCreate,
 		p.TraceMount,
 		p.TraceOpen,
@@ -702,6 +716,8 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceSetsockopt,
 		p.TraceSetuid,
 		p.TraceSockops,
+		p.TraceSymlink,
+		p.TraceSymlinkat,
 		p.TraceTruncate,
 		p.TraceUnlink,
 		p.TraceUnlinkat,

@@ -74,13 +74,16 @@
 /* File change events carry the operation in rule_id, the path in filename,
  * the dirfd in file_mode, AT_* flags in file_flags, and the operation's value
  * in socket_cookie: the mode for chmod, uid | gid << 32 for chown, the length
- * for truncate, and the new dirfd for rename, whose new path is in domain.
+ * for truncate, and the new dirfd for rename, link, and symlink, whose new
+ * path is in domain. For symlink, filename is the link's target.
  */
 #define FILE_CHANGE_UNLINK 0
 #define FILE_CHANGE_RENAME 1
 #define FILE_CHANGE_CHMOD 2
 #define FILE_CHANGE_CHOWN 3
 #define FILE_CHANGE_TRUNCATE 4
+#define FILE_CHANGE_LINK 5
+#define FILE_CHANGE_SYMLINK 6
 #define TRACEGUARD_AT_REMOVEDIR 0x200
 #define TRACEGUARD_AT_SYMLINK_NOFOLLOW 0x100
 #define MOUNT_SOURCE_LEN 192
@@ -4189,7 +4192,19 @@ static __always_inline int emit_file_change(__u32 operation, __u64 dirfd, const 
 	return 0;
 }
 
-static __always_inline int emit_file_rename(__u64 old_dirfd, const char *old_path, __u64 new_dirfd, const char *new_path, __u64 flags)
+/* file_pair is an operation on two paths: rename, link, or symlink. BPF
+ * calls take at most five arguments, so they travel in a struct.
+ */
+struct file_pair {
+	__u32 operation;
+	__u32 flags;
+	__u64 old_dirfd;
+	__u64 new_dirfd;
+	const char *old_path;
+	const char *new_path;
+};
+
+static __always_inline int emit_file_pair(const struct file_pair *pair)
 {
 	struct event *event = reserve_event(EVENT_FILE_CHANGE);
 
@@ -4198,12 +4213,12 @@ static __always_inline int emit_file_rename(__u64 old_dirfd, const char *old_pat
 	}
 	__builtin_memset(event, 0, sizeof(*event));
 	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
-	event->rule_id = FILE_CHANGE_RENAME;
-	event->file_mode = (__u32)old_dirfd;
-	event->file_flags = (__u32)flags;
-	event->socket_cookie = (__u32)new_dirfd;
-	bpf_probe_read_user_str(event->filename, sizeof(event->filename), old_path);
-	bpf_probe_read_user_str(event->domain, sizeof(event->domain), new_path);
+	event->rule_id = pair->operation;
+	event->file_mode = (__u32)pair->old_dirfd;
+	event->file_flags = pair->flags;
+	event->socket_cookie = (__u32)pair->new_dirfd;
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), pair->old_path);
+	bpf_probe_read_user_str(event->domain, sizeof(event->domain), pair->new_path);
 	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
@@ -4231,19 +4246,106 @@ int trace_rmdir(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_rename")
 int trace_rename(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_rename(AT_FDCWD_ARG, (const char *)ctx->args[0], AT_FDCWD_ARG, (const char *)ctx->args[1], 0);
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
 }
 
 SEC("tracepoint/syscalls/sys_enter_renameat")
 int trace_renameat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_rename(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], (const char *)ctx->args[3], 0);
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = 0,
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
 }
 
 SEC("tracepoint/syscalls/sys_enter_renameat2")
 int trace_renameat2(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_rename(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], (const char *)ctx->args[3], ctx->args[4]);
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_RENAME,
+		.flags = (__u32)ctx->args[4],
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_link")
+int trace_link(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_LINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_linkat")
+int trace_linkat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_LINK,
+		.flags = (__u32)ctx->args[4],
+		.old_dirfd = ctx->args[0],
+		.new_dirfd = ctx->args[2],
+		.old_path = (const char *)ctx->args[1],
+		.new_path = (const char *)ctx->args[3],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_symlink")
+int trace_symlink(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_SYMLINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = AT_FDCWD_ARG,
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[1],
+	};
+
+	return emit_file_pair(&pair);
+}
+
+SEC("tracepoint/syscalls/sys_enter_symlinkat")
+int trace_symlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+	struct file_pair pair = {
+		.operation = FILE_CHANGE_SYMLINK,
+		.flags = 0,
+		.old_dirfd = AT_FDCWD_ARG,
+		.new_dirfd = ctx->args[1],
+		.old_path = (const char *)ctx->args[0],
+		.new_path = (const char *)ctx->args[2],
+	};
+
+	return emit_file_pair(&pair);
 }
 
 SEC("tracepoint/syscalls/sys_enter_chmod")

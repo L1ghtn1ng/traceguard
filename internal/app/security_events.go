@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -171,7 +172,7 @@ func appendExecFields(fields map[string]any, event ebpf.Event) {
 	if event.ArgsTruncated {
 		fields["command_line_truncated"] = true
 	}
-	if fd, ok := execDescriptor(event); ok {
+	if fd, ok := execDescriptor("/proc", event); ok {
 		fields["exec_source"] = "fd"
 		fields["exec_fd"] = fd
 	} else {
@@ -181,26 +182,53 @@ func appendExecFields(fields map[string]any, event ebpf.Event) {
 
 // execDescriptor reports the file descriptor an exec ran when it named the
 // executable by descriptor rather than by path: execveat with AT_EMPTY_PATH,
-// or a /proc/<pid>/fd or /dev/fd path as fexecve uses. Such executables, a
-// memfd for example, may have no file on disk to inspect.
-func execDescriptor(event ebpf.Event) (int32, bool) {
+// or a path into /dev/fd or a /proc fd directory, as fexecve uses. Such
+// executables, a memfd for example, may have no file on disk to inspect. The
+// path is cleaned first, and a relative one is resolved through procRoot, so
+// spellings like //proc/self/fd/3 or "3" run from /proc/self/fd are found.
+func execDescriptor(procRoot string, event ebpf.Event) (int32, bool) {
 	if event.Operation == execSyscallExecveat && event.FileFlags&atEmptyPath != 0 && event.Filename == "" {
 		return int32(event.FileMode), true //nolint:gosec // dirfd is a signed descriptor carried in the unsigned field
 	}
 	path := event.Filename
-	switch {
-	case strings.HasPrefix(path, "/dev/fd/"):
-		path = strings.TrimPrefix(path, "/dev/fd/")
-	case strings.HasPrefix(path, "/proc/"):
-		process, rest, ok := strings.Cut(strings.TrimPrefix(path, "/proc/"), "/fd/")
-		if !ok || (process != "self" && process != "thread-self" && strings.Trim(process, "0123456789") != "") || process == "" {
-			return 0, false
-		}
-		path = rest
-	default:
+	if path == "" {
 		return 0, false
 	}
-	fd, err := strconv.ParseInt(path, 10, 32)
+	if !filepath.IsAbs(path) {
+		resolved, ok := resolveRequestedPath(procRoot, event.PID, event.FileMode, path)
+		if !ok {
+			return 0, false
+		}
+		path = resolved
+	}
+	path = filepath.Clean(path)
+	if rest, ok := strings.CutPrefix(path, "/dev/fd/"); ok {
+		return parseDescriptor(rest)
+	}
+	rest, ok := strings.CutPrefix(path, "/proc/")
+	if !ok {
+		return 0, false
+	}
+	// <process>/fd/<n> or <process>/task/<tid>/fd/<n>
+	parts := strings.Split(rest, "/")
+	process := func(name string) bool {
+		return name == "self" || name == "thread-self" || isDecimal(name)
+	}
+	switch {
+	case len(parts) == 3 && parts[1] == "fd" && process(parts[0]):
+		return parseDescriptor(parts[2])
+	case len(parts) == 5 && parts[1] == "task" && isDecimal(parts[2]) && parts[3] == "fd" && process(parts[0]):
+		return parseDescriptor(parts[4])
+	}
+	return 0, false
+}
+
+func isDecimal(text string) bool {
+	return text != "" && strings.Trim(text, "0123456789") == ""
+}
+
+func parseDescriptor(text string) (int32, bool) {
+	fd, err := strconv.ParseInt(text, 10, 32)
 	if err != nil || fd < 0 {
 		return 0, false
 	}

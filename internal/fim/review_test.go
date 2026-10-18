@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,15 +30,88 @@ func TestUnknownPathsAreNotReportedDeleted(t *testing.T) {
 	}
 }
 
-func TestFailedHashKeepsBaselineDigest(t *testing.T) {
+func TestUnreadableHashedFileIsReportedOnceAndRecheckedLater(t *testing.T) {
 	t.Parallel()
 
 	modified := time.Unix(100, 0)
-	baseline := map[string]State{"/etc/shadow": {Type: "file", Size: 10, ModTime: modified, SHA256: "aa"}}
-	unreadable := scanResult{states: map[string]State{"/etc/shadow": {Type: "file", Size: 10, ModTime: modified, HashSkipped: "unreadable"}}}
-	changes, final := reconcile([]string{"/etc/shadow"}, baseline, unreadable, func(string) bool { return true })
-	if len(changes) != 0 || final["/etc/shadow"].SHA256 != "aa" {
-		t.Fatalf("failed hash: changes %+v digest %q, want no change and the digest kept", changes, final["/etc/shadow"].SHA256)
+	key := []string{"/etc/shadow"}
+	state := func(digest, skipped string) State {
+		return State{Type: "file", Size: 10, ModTime: modified, SHA256: digest, HashSkipped: skipped}
+	}
+	step := func(baseline map[string]State, current State) ([]Change, map[string]State) {
+		changes, final := reconcile(key, baseline, scanResult{states: map[string]State{key[0]: current}}, func(string) bool { return true })
+		return changes, map[string]State{key[0]: *final[key[0]]}
+	}
+
+	// Size and modification time can be preserved while content changes,
+	// so a hashed file that becomes unreadable cannot count as unchanged.
+	changes, baseline := step(map[string]State{key[0]: state("aa", "")}, state("", "unreadable"))
+	if len(changes) != 1 || changes[0].Kind != Modified || !slices.Contains(changes[0].Changed, "content") {
+		t.Fatalf("unreadable file: changes %+v, want one unverified content change", changes)
+	}
+	if changes, baseline = step(baseline, state("", "unreadable")); len(changes) != 0 {
+		t.Fatalf("still unreadable: changes %+v, want it reported only once", changes)
+	}
+	if changes, _ := step(baseline, state("aa", "")); len(changes) != 0 {
+		t.Fatalf("readable again, same digest: changes %+v, want none", changes)
+	}
+	if changes, _ := step(baseline, state("bb", "")); len(changes) != 1 || !slices.Contains(changes[0].Changed, "content") {
+		t.Fatalf("readable again, new digest: changes %+v, want a content change", changes)
+	}
+}
+
+func TestSymlinkedParentIsNotFollowed(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "elsewhere"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "elsewhere", "secret"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "elsewhere"), filepath.Join(root, "etc", "alias")); err != nil {
+		t.Fatal(err)
+	}
+	// The symlink itself may be recorded as a symlink, but nothing it
+	// points to is read.
+	for _, pattern := range []string{"/etc/alias/secret", "/etc/alias/**"} {
+		s := scanner{root: root, policy: policy.FileIntegrityPolicy{Paths: []string{pattern}}, maxSize: 1 << 20}
+		for path := range s.Baseline().states {
+			if strings.HasPrefix(path, "/etc/alias/") {
+				t.Errorf("%s: baseline read %s through the symlinked directory", pattern, path)
+			}
+		}
+	}
+}
+
+func TestExactExclusionKeepsTheDirectorysEntries(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc", "ssl", "private"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "ssl", "openssl.cnf"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "ssl", "private", "key"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := scanner{root: root, maxSize: 1 << 20, policy: policy.FileIntegrityPolicy{
+		Paths: []string{"/etc/**"}, Exclude: []string{"/etc/ssl", "/etc/ssl/private/**"},
+	}}
+	states := s.Baseline().states
+	if _, ok := states["/etc/ssl/openssl.cnf"]; !ok {
+		t.Fatalf("baseline %v, want files under an exactly excluded directory kept", states)
+	}
+	for _, excluded := range []string{"/etc/ssl", "/etc/ssl/private", "/etc/ssl/private/key"} {
+		if _, ok := states[excluded]; ok {
+			t.Errorf("baseline recorded excluded %s", excluded)
+		}
 	}
 }
 
@@ -130,5 +204,41 @@ func TestUnreadableDirectoryIsUnknown(t *testing.T) {
 	result := scanner{root: root, policy: watchPolicy("/etc/**"), maxSize: 1 << 20}.Baseline()
 	if result.known("/etc/private/key") {
 		t.Fatalf("entries of an unreadable directory are known: %+v", result)
+	}
+}
+
+func TestUnattributedCheckBecomesAmbiguousWithoutPanicking(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "etc/hosts", "127.0.0.1 localhost\n")
+	watcher, output := newTestWatcher(t, root, watchPolicy("/etc/hosts"))
+	writeFile(t, root, "etc/hosts", "10.0.0.1 bank.example\n")
+	watcher.Notify("/etc/hosts", nil)
+	watcher.Notify("/etc/hosts", Actor{"actor_pid": uint32(2)})
+	watcher.checkDue(time.Now().Add(settleDelay), output.emit)
+	changes, actors := output.snapshot()
+	if len(changes) != 1 || actors[0]["actor_ambiguous"] != true {
+		t.Fatalf("changes %+v actors %v, want one ambiguous change", changes, actors)
+	}
+}
+
+func TestCheckDuringPolicyChangeWaitsForRebuild(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "etc/hosts", "127.0.0.1 localhost\n")
+	watcher, output := newTestWatcher(t, root, watchPolicy("/etc/hosts"))
+	writeFile(t, root, "etc/hosts", "10.0.0.1 bank.example\n")
+	watcher.Notify("/etc/hosts", Actor{"actor_pid": uint32(1)})
+	watcher.mu.Lock()
+	watcher.rebuild = true
+	watcher.mu.Unlock()
+	watcher.checkDue(time.Now().Add(settleDelay), output.emit)
+	watcher.mu.Lock()
+	_, requeued := watcher.pending["/etc/hosts"]
+	watcher.mu.Unlock()
+	if changes, _ := output.snapshot(); len(changes) != 0 || !requeued {
+		t.Fatalf("changes %+v requeued %t, want the check held for the rebuild", changes, requeued)
 	}
 }

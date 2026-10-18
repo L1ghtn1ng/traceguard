@@ -236,3 +236,26 @@ func waitUntil(t *testing.T, condition func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestLinkAndSymlinkChangesReportTheCreatedPath(t *testing.T) {
+	t.Parallel()
+
+	for operation, code := range map[string]uint32{"link": 5, "symlink": 6} {
+		event := ebpf.Event{Kind: ebpf.EventFileChange, Operation: code, Filename: "/tmp/payload", NewPath: "/etc/cron.d/job", FileMode: atFDCWD, Value: atFDCWD}
+		fields := map[string]any{}
+		appendFileChangeFields(fields, event)
+		if fields["operation"] != operation || fields["new_path"] != "/etc/cron.d/job" || fields["requested_path"] != "/tmp/payload" {
+			t.Errorf("%s fields = %v", operation, fields)
+		}
+	}
+
+	root := t.TempDir()
+	watcher := fim.NewWatcher(root)
+	// /tmp is watched too, to show the existing path is not what is checked.
+	watcher.Configure(policyconfig.FileIntegrityPolicy{Paths: []string{"/etc/cron.d/**", "/tmp/**"}})
+	notifyIntegrity(watcher, t.TempDir(), ebpf.Event{Kind: ebpf.EventFileChange, Operation: 6, PID: 1,
+		Filename: "/tmp/payload", NewPath: "/etc/cron.d/job", FileMode: atFDCWD, Value: atFDCWD}, map[string]any{})
+	if pending := watcher.PendingPaths(); !slices.Equal(pending, []string{"/etc/cron.d/job"}) {
+		t.Fatalf("queued %v, want only the created symlink", pending)
+	}
+}

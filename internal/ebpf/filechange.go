@@ -6,8 +6,9 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// fileChangePrograms observe path-based unlink, rename, chmod, chown, and
-// truncate requests. They attach with file auditing and never deny anything.
+// fileChangePrograms observe path-based unlink, rename, link, symlink, chmod,
+// chown, and truncate requests. They feed file integrity monitoring whether
+// or not file auditing is on, and never deny anything.
 type fileChangePrograms struct {
 	TraceUnlink    *ebpf.Program `ebpf:"trace_unlink"`
 	TraceUnlinkat  *ebpf.Program `ebpf:"trace_unlinkat"`
@@ -15,6 +16,10 @@ type fileChangePrograms struct {
 	TraceRename    *ebpf.Program `ebpf:"trace_rename"`
 	TraceRenameat  *ebpf.Program `ebpf:"trace_renameat"`
 	TraceRenameat2 *ebpf.Program `ebpf:"trace_renameat2"`
+	TraceLink      *ebpf.Program `ebpf:"trace_link"`
+	TraceLinkat    *ebpf.Program `ebpf:"trace_linkat"`
+	TraceSymlink   *ebpf.Program `ebpf:"trace_symlink"`
+	TraceSymlinkat *ebpf.Program `ebpf:"trace_symlinkat"`
 	TraceChmod     *ebpf.Program `ebpf:"trace_chmod"`
 	TraceFchmodat  *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceFchmodat2 *ebpf.Program `ebpf:"trace_fchmodat2"`
@@ -32,6 +37,10 @@ func (p *fileChangePrograms) fileChangeTracepoints() []securityTracepoint {
 		{"trace_rename", "sys_enter_rename", p.TraceRename},
 		{"trace_renameat", "sys_enter_renameat", p.TraceRenameat},
 		{"trace_renameat2", "sys_enter_renameat2", p.TraceRenameat2},
+		{"trace_link", "sys_enter_link", p.TraceLink},
+		{"trace_linkat", "sys_enter_linkat", p.TraceLinkat},
+		{"trace_symlink", "sys_enter_symlink", p.TraceSymlink},
+		{"trace_symlinkat", "sys_enter_symlinkat", p.TraceSymlinkat},
 		{"trace_chmod", "sys_enter_chmod", p.TraceChmod},
 		{"trace_fchmodat", "sys_enter_fchmodat", p.TraceFchmodat},
 		{"trace_fchmodat2", "sys_enter_fchmodat2", p.TraceFchmodat2},

@@ -21,6 +21,7 @@ func TestOperationsSelectorValidation(t *testing.T) {
 		"event without operation":  {"[mount]", "[attach]", "require security events"},
 		"operation of other event": {"[ptrace]", "[write]", `operation "write" is not carried`},
 		"unknown operation":        {"[privilege_change]", "[setfsuid]", `operation "setfsuid"`},
+		"event that cannot match":  {"[ptrace, process_vm]", "[attach]", `event "process_vm" carries none`},
 	} {
 		if _, err := Parse([]byte(rule(test.events, test.operations))); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: error = %v, want %q", name, err, test.want)
