@@ -388,10 +388,15 @@ sudo ./traceguard \
 | `detection_alert` | Detection Finding (2004), with ATT&CK techniques and tactics in `attacks` |
 | Heartbeats and daemon status | Base Event (0) |
 
-Fields that map to an OCSF attribute move there: the acting process and user
-to `actor` (for `file_integrity`, the triggering `actor_*` process), endpoints
-to `src_endpoint` and `dst_endpoint`, paths and digests to `file`, and the
-alert's `alert_id` to `finding_info.uid`. Events use the `security_control`
+Fields that map to an OCSF attribute move there: the acting process's
+event-time PID, program, and user to `actor` (from the socket cache's
+`cached_*` identity when that attributed the event, and for `file_integrity`
+the triggering `actor_*` process), endpoints to `src_endpoint` and
+`dst_endpoint`, paths and digests to `file` (a deletion's previous ones), and
+the alert's `alert_id` to `finding_info.uid`. `current_exe` is read from
+`/proc` later and may name another binary, so it stays unmapped. A required
+`actor` or `dst_endpoint` that the record cannot fill, such as a rescan's actor
+or a socket option's peer, is present but empty. Events use the `security_control`
 profile: `action_id` is `2` (Denied) for blocked events and `1` (Allowed)
 otherwise, with `disposition_id` `2` (Blocked) or, for dry-run, `15`
 (Detected). Activities without an OCSF name, such as `memfd_create`, carry the
@@ -468,7 +473,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - local event archive disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` is set
 - durable HTTPS batch export disabled unless `TRACEGUARD_EVENT_EXPORT_URL` is set
 - HTTPS export sends batches of 50 events or every 5 seconds
-- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit
+- HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit per event schema. Batches are stored as encoded, so each `-event-schema` has its own spool files and a batch is resent only while its schema is configured
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`

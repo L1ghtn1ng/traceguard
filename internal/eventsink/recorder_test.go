@@ -1048,7 +1048,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 		t.Fatalf("symlink spool directory: %v", err)
 	}
 
-	_, err := newSpoolStore(link)
+	_, err := newSpoolStore(link, SchemaTraceGuard)
 	if err == nil || !strings.Contains(err.Error(), "must not traverse symlinks") {
 		t.Fatalf("newSpoolStore error = %v, want symlink traversal rejection", err)
 	}
@@ -1057,7 +1057,7 @@ func TestNewSpoolStoreRejectsSymlinkedDirectory(t *testing.T) {
 func TestSpoolStoreRejectsOversizedPayload(t *testing.T) {
 	t.Parallel()
 
-	store, err := newSpoolStore(t.TempDir())
+	store, err := newSpoolStore(t.TempDir(), SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestSpoolStoreRejectsByteCapacityExceeded(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	store, err := newSpoolStore(dir)
+	store, err := newSpoolStore(dir, SchemaTraceGuard)
 	if err != nil {
 		t.Fatalf("newSpoolStore returned error: %v", err)
 	}

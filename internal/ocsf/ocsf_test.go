@@ -302,3 +302,51 @@ func TestConvertClassifiesProducerDNSAndResolverRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertSummaryFindings(t *testing.T) {
+	t.Parallel()
+
+	bind := convert(t, "info", map[string]any{"event": "bind_blocked", "pid": uint32(1), "socket_protocol": "tcp", "local_address": "0.0.0.0", "local_port": uint16(22)})
+	if info := object(t, bind["connection_info"]); info["direction_id"] != 0 {
+		t.Errorf("bind connection_info = %v, want direction_id 0 (Unknown)", info)
+	}
+	if _, ok := bind["src_endpoint"]; !ok {
+		t.Errorf("bind lost its local endpoint: %v", bind)
+	}
+	if dst := object(t, bind["dst_endpoint"]); len(dst) != 0 {
+		t.Errorf("bind dst_endpoint = %v, want the required but unknown peer", dst)
+	}
+	if unix := convert(t, "info", map[string]any{"event": "unix_blocked", "pid": uint32(1), "path": "/run/docker.sock"}); object(t, unix["dst_endpoint"])["name"] != "/run/docker.sock" {
+		t.Errorf("unix dst_endpoint = %v, want the socket path", unix["dst_endpoint"])
+	}
+	if _, ok := convert(t, "info", map[string]any{"event": "sockopt_blocked", "pid": uint32(1)})["src_endpoint"]; ok {
+		t.Error("socket option event carries an empty src_endpoint")
+	}
+
+	cached := convert(t, "info", map[string]any{"event": "connection", "direction": "inbound", "cached_uid": uint32(33), "cached_program": "nginx"})
+	actor := object(t, cached["actor"])
+	if object(t, actor["user"])["uid"] != "33" || object(t, actor["process"])["name"] != "nginx" {
+		t.Errorf("socket-cache actor = %v", actor)
+	}
+
+	exec := convert(t, "info", map[string]any{"event": "exec", "pid": uint32(5), "program": "bash", "current_exe": "/usr/bin/curl"})
+	if _, ok := object(t, object(t, exec["actor"])["process"])["file"]; ok || object(t, exec["unmapped"])["current_exe"] != "/usr/bin/curl" {
+		t.Errorf("exec actor = %v unmapped = %v, want current_exe left unmapped", exec["actor"], exec["unmapped"])
+	}
+
+	deleted := convert(t, "info", map[string]any{"event": "file_integrity", "change": "deleted", "path": "/etc/passwd",
+		"previous_file_type": "file", "previous_sha256": "ab", "previous_size": int64(9)})
+	file := object(t, deleted["file"])
+	if file["size"] != int64(9) || objects(t, file["hashes"])[0]["value"] != "ab" {
+		t.Errorf("deleted file = %v, want its previous digest and size", file)
+	}
+	if actor, ok := deleted["actor"].(map[string]any); !ok || len(actor) != 0 {
+		t.Errorf("rescan actor = %v, want the required but unknown actor", deleted["actor"])
+	}
+
+	for _, operation := range []string{"link", "symlink"} {
+		if event := convert(t, "info", map[string]any{"event": "file_change", "operation": operation, "requested_path": "/tmp/x", "new_path": "/etc/cron.d/x"}); event["activity_id"] != 1 {
+			t.Errorf("%s activity = %v, want 1 (Create)", operation, event["activity_id"])
+		}
+	}
+}

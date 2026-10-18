@@ -125,3 +125,40 @@ func TestSyslogUDPFallbackKeepsOCSFClassification(t *testing.T) {
 		t.Fatalf("class_uid = %v, want a detection finding: %s", decoded["class_uid"], payload)
 	}
 }
+
+func TestSpoolReplaysOnlyTheConfiguredSchema(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	plain, err := newSpoolStore(dir, SchemaTraceGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = plain.Close() }()
+	if err := plain.Write([]json.RawMessage{json.RawMessage(`{"event":"dns"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	ocsf, err := newSpoolStore(dir, SchemaOCSF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ocsf.Close() }()
+	if err := ocsf.Write([]json.RawMessage{json.RawMessage(`{"class_uid":4003}`)}); err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		store *spoolStore
+		want  string
+	}{"traceguard": {plain, `"event"`}, "ocsf": {ocsf, `"class_uid"`}} {
+		var sent []string
+		if err := test.store.Replay(func(payload []byte) error {
+			sent = append(sent, string(payload))
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(sent) != 1 || !strings.Contains(sent[0], test.want) {
+			t.Errorf("%s replayed %v, want only its own batch", name, sent)
+		}
+	}
+}

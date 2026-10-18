@@ -95,6 +95,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		"kernel_btf":           kernelFeatures.BTFAvailable,
 		"kernel_bpf_lsm":       kernelFeatures.BPFLSMAvailable,
 		"lsm_program_type":     kernelFeatures.LSMProgramType,
+		"task_storage":         kernelFeatures.TaskStorage,
 		"lsm_exec_attached":    attachState.LSMExecAttached,
 		"lsm_file_attached":    attachState.LSMFileAttached,
 		"cgroup_bind4":         attachState.Bind4Attached,

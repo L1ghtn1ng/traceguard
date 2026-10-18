@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,9 +92,12 @@ func Run(cfg Config, alerts io.Writer) (Summary, error) {
 		}
 		summary.Evaluated++
 		last = event.Timestamp
-		for _, alert := range engine.Evaluate(event) {
+		for index, alert := range engine.Evaluate(event) {
 			summary.Alerts[alert.RuleID]++
 			summary.Severity[alert.RuleID] = alert.Severity
+			// Replaying the same archive gives the same IDs, so outputs can
+			// be diffed across policy changes.
+			alert.ID = replayAlertID(summary.Records, index, alert.RuleID)
 			// Match the envelope a live alert is recorded with, rather than
 			// the archived source record's.
 			record := alert.RecordFields(event.Name)
@@ -214,4 +219,11 @@ func WriteSummary(summary Summary, out io.Writer) error {
 		}
 	}
 	return writer.Flush()
+}
+
+// replayAlertID derives an alert ID from where the alert came from in the
+// archive, in the same form as a live alert's.
+func replayAlertID(record, index int, ruleID string) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "replay\x00%d\x00%d\x00%s", record, index, ruleID))
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])[:26]
 }

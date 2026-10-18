@@ -21,7 +21,7 @@ host supports.
 | DNS, connection, and resolver telemetry; DNS blocking | `cgroup_skb` and `cgroup/sock_addr` programs, the BPF ring buffer, `bpf_loop` | cgroup v2 |
 | Exec, file audit, file change, and security events | Syscall entry tracepoints | Tracepoint perf-event access: `CAP_PERFMON`, or a lowered `kernel.perf_event_paranoid` |
 | Egress, bind, and sockopt policy; cgroup ancestry selectors | `cgroup/sock_addr` and `cgroup/setsockopt` programs, `bpf_get_current_ancestor_cgroup_id`, `bpf_loop` | cgroup v2 |
-| AF_UNIX policy | `cgroup/connect_unix`, `sendmsg_unix`, and `recvmsg_unix` programs (Linux 6.7), the `bpf_cast_to_kern_ctx` and `bpf_rdonly_cast` kfuncs | — |
+| AF_UNIX policy | `cgroup/connect_unix` and `sendmsg_unix` programs (Linux 6.7), the `bpf_cast_to_kern_ctx` and `bpf_rdonly_cast` kfuncs; `recvmsg_unix` only adds audit events and is not needed for enforcement | — |
 | Exec and file enforcement | BPF LSM with sleepable programs, task storage, `bpf_d_path` | `CONFIG_BPF_LSM=y` and `bpf` in the `lsm=` list; host-wide, so `TRACEGUARD_CGROUP_PATH=/sys/fs/cgroup` |
 | TCP lifecycle telemetry | `sockops` programs | — |
 | Enhanced telemetry fields | The Linux 7.1 object, which adds event source and kernel feature-set fields | None; TraceGuard falls back to the standard object automatically |
