@@ -32,6 +32,7 @@ All notable changes to TraceGuard are documented in this file.
 
 ### Changed
 
+- `-doctor`'s `exec-enforce-ready` and `file-enforce-ready` checks now also require BPF task storage support, which the daemon needs to load those programs, and a new `task-storage-map` line reports it.
 - Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
 - File audit no longer reports TraceGuard's own file opens, which file integrity hashing would otherwise flood it with.
 - `file_access` and `file_created` records carry `requested_dirfd` when `openat` or `openat2` names a path relative to a directory descriptor.
