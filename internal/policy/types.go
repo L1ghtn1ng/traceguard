@@ -19,6 +19,8 @@ const (
 	MaxEgressRules                  = 1024
 	MaxEnforcementRules             = 1024
 	MaxDetectionRules               = 256
+	MaxDetectionExceptions          = 256
+	MaxExceptionReasonBytes         = 512
 	MaxDetectionGroups              = 16384
 	MaxThresholdWindow              = time.Hour
 	MaxThresholdCount               = 10000
@@ -46,18 +48,33 @@ func (d *Duration) UnmarshalText(text []byte) error {
 	return nil
 }
 
+// Timestamp is an RFC 3339 instant; the zero value means unset.
+type Timestamp struct {
+	time.Time
+}
+
+func (t *Timestamp) UnmarshalText(text []byte) error {
+	value, err := time.Parse(time.RFC3339, string(text))
+	if err != nil {
+		return fmt.Errorf("timestamp must be RFC 3339, for example 2026-12-31T00:00:00Z: %w", err)
+	}
+	t.Time = value.UTC()
+	return nil
+}
+
 type Document struct {
-	Version         int             `yaml:"version"`
-	BuiltinProfiles []string        `yaml:"builtin_profiles,omitempty"`
-	DisabledRuleIDs []string        `yaml:"disabled_rule_ids,omitempty"`
-	DNS             DNSPolicy       `yaml:"dns,omitempty"`
-	Egress          EgressPolicy    `yaml:"egress,omitempty"`
-	Exec            PathPolicy      `yaml:"exec,omitempty"`
-	File            FilePolicy      `yaml:"file,omitempty"`
-	Bind            BindPolicy      `yaml:"bind,omitempty"`
-	Unix            UnixPolicy      `yaml:"unix,omitempty"`
-	Sockopt         SockoptPolicy   `yaml:"sockopt,omitempty"`
-	DetectionRules  []DetectionRule `yaml:"detections,omitempty"`
+	Version             int                  `yaml:"version"`
+	BuiltinProfiles     []string             `yaml:"builtin_profiles,omitempty"`
+	DisabledRuleIDs     []string             `yaml:"disabled_rule_ids,omitempty"`
+	DNS                 DNSPolicy            `yaml:"dns,omitempty"`
+	Egress              EgressPolicy         `yaml:"egress,omitempty"`
+	Exec                PathPolicy           `yaml:"exec,omitempty"`
+	File                FilePolicy           `yaml:"file,omitempty"`
+	Bind                BindPolicy           `yaml:"bind,omitempty"`
+	Unix                UnixPolicy           `yaml:"unix,omitempty"`
+	Sockopt             SockoptPolicy        `yaml:"sockopt,omitempty"`
+	DetectionRules      []DetectionRule      `yaml:"detections,omitempty"`
+	DetectionExceptions []DetectionException `yaml:"detection_exceptions,omitempty"`
 }
 
 type DNSPolicy struct {
@@ -210,6 +227,22 @@ type DetectionMatch struct {
 	LSMLabels           []string `yaml:"lsm_labels,omitempty"`
 }
 
+// DetectionException suppresses alerts from the listed rules for events that
+// match, until it expires. Matching events also do not count toward the rules'
+// thresholds.
+type DetectionException struct {
+	ID      string         `yaml:"id"`
+	Rules   []string       `yaml:"rules"`
+	Reason  string         `yaml:"reason"`
+	Expires Timestamp      `yaml:"expires,omitempty"`
+	Match   DetectionMatch `yaml:"match"`
+}
+
+// Active reports whether the exception applies at the given time.
+func (e DetectionException) Active(at time.Time) bool {
+	return e.Expires.IsZero() || at.Before(e.Expires.Time)
+}
+
 type Threshold struct {
 	Count   int      `yaml:"count,omitempty"`
 	Within  Duration `yaml:"within,omitempty"`
@@ -217,16 +250,17 @@ type Threshold struct {
 }
 
 type Bundle struct {
-	DNS             blocklist.Rules
-	Egress          EgressPolicy
-	Exec            PathPolicy
-	File            FilePolicy
-	Bind            BindPolicy
-	Unix            UnixPolicy
-	Sockopt         SockoptPolicy
-	DetectionRules  []DetectionRule
-	BuiltinProfiles []string
-	DisabledRuleIDs []string
+	DNS                 blocklist.Rules
+	Egress              EgressPolicy
+	Exec                PathPolicy
+	File                FilePolicy
+	Bind                BindPolicy
+	Unix                UnixPolicy
+	Sockopt             SockoptPolicy
+	DetectionRules      []DetectionRule
+	DetectionExceptions []DetectionException
+	BuiltinProfiles     []string
+	DisabledRuleIDs     []string
 }
 
 func (d Document) Validate() error {
@@ -254,6 +288,9 @@ func (d Document) Validate() error {
 	}
 	if len(d.DetectionRules) > MaxDetectionRules {
 		return fmt.Errorf("detection rule count %d exceeds %d", len(d.DetectionRules), MaxDetectionRules)
+	}
+	if len(d.DetectionExceptions) > MaxDetectionExceptions {
+		return fmt.Errorf("detection exception count %d exceeds %d", len(d.DetectionExceptions), MaxDetectionExceptions)
 	}
 	if count := len(d.DNS.Block) + len(d.DNS.Allow); count > MaxDNSRules {
 		return fmt.Errorf("dns rule count %d exceeds %d", count, MaxDNSRules)
@@ -344,8 +381,55 @@ func (d Document) Validate() error {
 			return fmt.Errorf("detection rule %q: %w", rule.ID, err)
 		}
 	}
+	exceptionIDs := make(map[string]struct{}, len(d.DetectionExceptions))
+	for index, exception := range d.DetectionExceptions {
+		if err := validateRuleID(exception.ID); err != nil {
+			return fmt.Errorf("detection exception %d: %w", index, err)
+		}
+		if _, exists := exceptionIDs[exception.ID]; exists {
+			return fmt.Errorf("duplicate detection exception id %q", exception.ID)
+		}
+		exceptionIDs[exception.ID] = struct{}{}
+		if err := exception.validate(); err != nil {
+			return fmt.Errorf("detection exception %q: %w", exception.ID, err)
+		}
+	}
 	if _, err := parseDNS(d.DNS); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (e DetectionException) validate() error {
+	if len(e.Rules) == 0 {
+		return fmt.Errorf("rules must not be empty")
+	}
+	if len(e.Rules) > MaxRuleListValues {
+		return fmt.Errorf("rules count %d exceeds %d", len(e.Rules), MaxRuleListValues)
+	}
+	if err := validateIDs(e.Rules, "exception rule"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(e.Reason) == "" {
+		return fmt.Errorf("reason must not be empty")
+	}
+	if len(e.Reason) > MaxExceptionReasonBytes {
+		return fmt.Errorf("reason length %d exceeds %d bytes", len(e.Reason), MaxExceptionReasonBytes)
+	}
+	if e.Match.Empty() {
+		return fmt.Errorf("match must not be empty; disable the rule with disabled_rule_ids instead")
+	}
+	if err := e.Match.validate(); err != nil {
+		return fmt.Errorf("match: %w", err)
+	}
+	return nil
+}
+
+// ValidateExceptionFor checks that an exception's match only uses fields the
+// rule's events carry at event time.
+func ValidateExceptionFor(rule DetectionRule, exception DetectionException) error {
+	if err := validateDetectionEventFields(rule.Events, exception.Match, rule.Match, exception.Match); err != nil {
+		return fmt.Errorf("detection exception %q for rule %q: %w", exception.ID, rule.ID, err)
 	}
 	return nil
 }
@@ -585,6 +669,18 @@ func (m DetectionMatch) validate() error {
 		}
 	}
 	return nil
+}
+
+// Empty reports whether the match sets no conditions and so matches every event.
+func (m DetectionMatch) Empty() bool {
+	return len(m.Actions)+len(m.Directions)+len(m.Transports)+len(m.Protocols)+
+		len(m.UIDs)+len(m.Domains)+len(m.DomainSuffixes)+len(m.DestinationCIDRs)+
+		len(m.Ports)+len(m.LocalPorts)+len(m.ExecutableGlobs)+len(m.CommandGlobs)+
+		len(m.FilePathGlobs)+len(m.UnixPathGlobs)+
+		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
+		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
+		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
+		len(m.LSMSources)+len(m.LSMLabels) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {

@@ -80,6 +80,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | `unix` | AF_UNIX connect/sendmsg/recvmsg policy. |
 | `sockopt` | Selected `setsockopt` level/name policy. |
 | `detections` | Alert-only rules evaluated against enriched TraceGuard events. |
+| `detection_exceptions` | Scoped, expiring suppressions for named detection rules. |
 
 A minimal document is:
 
@@ -810,6 +811,69 @@ detections:
     tags: [baseline, policy]
 ```
 
+### Detection exceptions
+
+An exception suppresses named rules for matching events, with a recorded reason
+and an optional expiry. Prefer an exception to disabling a rule or widening its
+`exclude`: the rule keeps firing for everything else, the reason travels with the
+policy, and an expiry forces the decision to be revisited.
+
+```yaml
+version: 1
+detection_exceptions:
+  - id: guest-agent-imds
+    rules: [baseline.cloud-metadata-access]
+    reason: the root-owned guest agent polls instance metadata (CHG-1234)
+    expires: 2026-12-31T00:00:00Z
+    match:
+      uids: [0]
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | Yes | Exception ID, unique among exceptions, using the rule ID format. |
+| `rules` | Yes | Built-in or custom detection rule IDs the exception applies to. Naming a rule that is neither built in nor defined is an error; naming a disabled rule is allowed. |
+| `reason` | Yes | Why the exception exists, up to 512 bytes. |
+| `expires` | No | RFC 3339 instant after which the exception stops applying. Without it the exception never expires. |
+| `match` | Yes | Conditions using the same fields as a rule's `match`. It must not be empty, and it must only use fields that every event of each named rule carries at event time. |
+
+An event that a rule matches and an active exception also matches raises no
+alert and does not count toward that rule's threshold. Expiry is evaluated
+against the event's own timestamp.
+
+Exception IDs merge like rule IDs: a local overlay exception replaces a remote
+one with the same ID. Each exception reports through:
+
+- `traceguard_detection_suppressed_total{exception}`, its cumulative suppressed
+  events, kept across policy reloads while the exception remains defined;
+- `traceguard_detection_exceptions{state="active"|"expired"}`;
+- one `detection exception expired` record when it expires;
+- the heartbeat's `detection_exceptions` and `expired_detection_exceptions`
+  fields.
+
+### Testing rules with replay
+
+`-replay` evaluates detection rules over a JSONL event archive written by
+`-event-archive-path`, then exits. It is offline: it loads no eBPF programs and
+needs no privileges beyond reading the files.
+
+```bash
+traceguard -replay /var/log/traceguard/events.jsonl \
+  -policy-path /etc/traceguard/candidate-policy.yaml > alerts.jsonl
+```
+
+Each alert is written to standard output as one JSON line in the same shape as
+a live `detection_alert`. A summary goes to standard error: records read,
+evaluated, skipped, and malformed, then every rule that alerted with its alert
+count, noisiest first, and each exception's suppressed count and expiry state.
+
+`-policy-path` supplies detection rules, `disabled_rule_ids`, and exceptions;
+without it only the built-in baseline runs. Archives ending in `.gz` are read
+as gzip. Records that are not kernel events, such as alerts, heartbeats, and
+daemon status, are skipped. Replay evaluates the fields recorded in the
+archive, so a rule that matches on a field the archive truncated behaves as it
+did live.
+
 ### Detection alert output
 
 Alerts use `event=detection_alert`. They retain the source event fields and add:
@@ -890,6 +954,35 @@ sudo ./traceguard -dry-run \
 The client certificate and key must be configured together. All file paths must
 be absolute.
 
+### Signed remote policy
+
+TLS authenticates the policy server, not the policy author. Set
+`-policy-signing-key` or `TRACEGUARD_POLICY_SIGNING_KEY` to a PEM Ed25519
+public key and TraceGuard accepts a remote document only with a valid detached
+signature, so a compromised or misconfigured policy server cannot push policy
+it was not given.
+
+The signature is fetched from the policy URL with `.sig` appended to its path,
+keeping any query string, using the same credentials. It is the base64
+encoding of an Ed25519 signature over the exact document bytes:
+
+```bash
+openssl genpkey -algorithm ed25519 -out policy-signing.pem
+openssl pkey -in policy-signing.pem -pubout -out /etc/traceguard/policy.pub
+openssl pkeyutl -sign -rawin -inkey policy-signing.pem -in traceguard.yaml \
+  | base64 -w0 > traceguard.yaml.sig
+```
+
+Publish `traceguard.yaml` and `traceguard.yaml.sig` together, and keep the
+private key off the policy server. A missing, malformed, or non-verifying
+signature fails that fetch like any other refresh error: the last validated
+policy stays active. The signature is cached beside the policy cache as
+`policy.yaml.sig`, and a stale cache is used only if it still verifies.
+
+Signing applies to the remote base only. A local `-policy-path` overlay is
+trusted through its file ownership, and the signing key requires
+`-policy-url`.
+
 ### Configuration reference
 
 | CLI flag | Environment variable | Purpose |
@@ -910,6 +1003,11 @@ be absolute.
 | `-policy-ca-path` | `TRACEGUARD_POLICY_CA_PATH` | Optional additional CA bundle. |
 | `-policy-client-cert` | `TRACEGUARD_POLICY_CLIENT_CERT` | Optional mTLS client certificate. |
 | `-policy-client-key` | `TRACEGUARD_POLICY_CLIENT_KEY` | Optional mTLS client key. |
+| `-policy-signing-key` | `TRACEGUARD_POLICY_SIGNING_KEY` | Optional absolute path to a PEM Ed25519 public key. Remote documents must then carry a valid detached signature at `<policy-url>.sig`. Requires `-policy-url`. |
+| `-strict-hooks` | `TRACEGUARD_STRICT_HOOKS` | Refuse to start when any optional eBPF hook cannot be loaded or attached, instead of running with reduced coverage. |
+| `-heartbeat-interval` | `TRACEGUARD_HEARTBEAT_INTERVAL` | Interval between heartbeat events; defaults to `5m`, and `0` disables them. |
+| `-connection-dedupe-window` | `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` | Window for suppressing repeated connection and TCP retransmit events from the same flow; defaults to `1m`, at most `1h`, and `0` disables suppression. |
+| `-replay` | — | Evaluate detection rules over an absolute-path JSONL archive and exit. See [Testing rules with replay](#testing-rules-with-replay). |
 
 ### Refresh, cache, and health behavior
 
@@ -970,7 +1068,7 @@ process before its non-reusable daemon identity is published.
 
 `-pin-ebpf` pins maps, programs, and cgroup/tracepoint links beneath
 `/sys/fs/bpf/traceguard`. A small pinned map named `layout` records layout
-version 5, the 32-byte settings ABI, the 632-byte event ABI, and the selected
+version 6, the 32-byte settings ABI, the 632-byte event ABI, and the selected
 eBPF object. Missing metadata, unreadable pins, or an incompatible layout are
 discarded and loaded fresh. Compatible maps are adopted, missing maps are
 created, programs are replaced, and existing persistent links are updated,
@@ -1005,7 +1103,8 @@ removed.
 
 When the kernel accepts it, TraceGuard attaches an observe-only sockops program
 for TCP active/passive establishment, listen, retransmit, and close signals.
-Retransmit signals are deduplicated for 60 seconds. RTT and TCP-connect
+Retransmit signals, like connection events, are deduplicated for
+`-connection-dedupe-window`, one minute by default. RTT and TCP-connect
 callbacks are intentionally not enabled, and sockops never denies traffic.
 
 `-ebpf-stats` enables `BPF_STATS_RUN_TIME` and polls every loaded program at
@@ -1018,7 +1117,36 @@ Runtime readiness is exposed through `traceguard_hook_healthy` for `lsm-exec`,
 `lsm-file`, `bind`, `unix`, and `sockopt`. A missing optional hook remains
 healthy when no policy requests it; it becomes unhealthy, and policy apply is
 rejected, when the hook is required. Startup logs distinguish feature probes
-from the real per-hook attach state.
+from the real per-hook attach state. With `-strict-hooks`, any unavailable
+optional hook stops startup instead.
+
+### Heartbeat and policy digest
+
+Every applied policy has a SHA-256 digest of the effective merged policy, so
+hosts running the same rules report the same digest regardless of how the
+source documents are formatted or split between remote base and local overlay.
+It is exported as `traceguard_policy_info{sha256}` and included in the
+`policy loaded` record.
+
+A `heartbeat` event is recorded at startup and then every
+`-heartbeat-interval`, five minutes by default, through every configured sink.
+Its fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `policy_sha256` | Digest of the active policy. Compare across a fleet to find drift. |
+| `policy_mode` | `observe`, `dry_run`, or `block`. |
+| `uptime_seconds` | Time since the daemon started. |
+| `healthy` | The same verdict as `/health`. |
+| `unavailable_hooks` | Optional eBPF hooks that failed to load or attach. |
+| `ringbuf_dropped_events` | Events lost to a full ring buffer since startup. |
+| `ringbuf_unread_bytes` | Ring buffer bytes waiting to be read at the last sample. |
+| `detection_rules`, `detection_state_groups` | Active detection rules and threshold groups. |
+| `detection_exceptions`, `expired_detection_exceptions` | Installed exception count and the IDs that have expired. |
+
+A host whose heartbeats stop, whose digest differs from its peers, or whose
+`unavailable_hooks` is not empty needs attention, and a SIEM can alert on each
+without a central TraceGuard manager.
 
 ## Validation rules and limits
 
@@ -1045,6 +1173,8 @@ Important limits:
 | Sockopt match | At least one level and one optname |
 | Exec and file default | `allow` only |
 | Detection rules | 256 |
+| Detection exceptions | 256 |
+| Detection exception reason | 512 bytes |
 | Values in one rule list | 256 |
 | Detection tags | 16 |
 | Detection message | 4,096 bytes |

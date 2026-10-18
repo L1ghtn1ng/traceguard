@@ -95,7 +95,6 @@
 #define SOCKET_INFO_MAX_ENTRIES 16384
 #define LISTENER_INFO_MAX_ENTRIES 16384
 #define CONNECTION_DEDUPE_MAX_ENTRIES 32768
-#define CONNECTION_DEDUPE_WINDOW_NS 60000000000ULL
 #define EGRESS_IDENTITY_BYTES 17
 #define EGRESS_IDENTITY_GLOBAL 0
 #define EGRESS_IDENTITY_UID 1
@@ -464,6 +463,9 @@ struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 24);
 } events SEC(".maps");
+
+/* Set by userspace at load time; 0 disables connection event deduplication. */
+volatile const __u64 connection_dedupe_window_ns = 60000000000ULL;
 
 /* Indexed by event kind; counts events lost because the ring buffer was full. */
 struct {
@@ -1300,8 +1302,12 @@ static __always_inline int should_emit_connection_event(const struct connection_
 	struct connection_dedupe_key key = {0};
 	struct connection_dedupe_value value = {0};
 	struct connection_dedupe_value *existing;
+	__u64 window = connection_dedupe_window_ns;
 	__u64 now = bpf_ktime_get_ns();
 
+	if (!window) {
+		return 1;
+	}
 	key.pid = pid;
 	key.port = params->port;
 	key.local_port = params->local_port;
@@ -1312,7 +1318,7 @@ static __always_inline int should_emit_connection_event(const struct connection_
 	copy_socket_addr(key.local_addr, params->family, params->local_addr);
 
 	existing = bpf_map_lookup_elem(&connection_dedupe, &key);
-	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < CONNECTION_DEDUPE_WINDOW_NS) {
+	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < window) {
 		return 0;
 	}
 
@@ -2140,13 +2146,19 @@ static __always_inline int should_emit_sockops_retrans(struct bpf_sock_ops *ctx)
 	struct connection_dedupe_key key = {0};
 	struct connection_dedupe_value value = {0};
 	struct connection_dedupe_value *existing;
-	__u64 cookie = bpf_get_socket_cookie(ctx);
-	__u64 now = bpf_ktime_get_ns();
+	__u64 window = connection_dedupe_window_ns;
+	__u64 cookie;
+	__u64 now;
 
+	if (!window) {
+		return 1;
+	}
+	cookie = bpf_get_socket_cookie(ctx);
+	now = bpf_ktime_get_ns();
 	key.direction = (__u8)BPF_SOCK_OPS_RETRANS_CB;
 	__builtin_memcpy(key.addr, &cookie, sizeof(cookie));
 	existing = bpf_map_lookup_elem(&connection_dedupe, &key);
-	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < CONNECTION_DEDUPE_WINDOW_NS) {
+	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < window) {
 		return 0;
 	}
 	value.last_seen_ns = now;

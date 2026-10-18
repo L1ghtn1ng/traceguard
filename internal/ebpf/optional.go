@@ -36,9 +36,12 @@ func (o *optionalPrograms) Close() error {
 	return errors.Join(errs...)
 }
 
-func loadOptionalPrograms(selectedObject string, loadOptions *ebpf.CollectionOptions, objects monitorObjects, pinnedLsmPath *ebpf.Map) optionalPrograms {
+func loadOptionalPrograms(selectedObject string, loadOptions *ebpf.CollectionOptions, constants loadConstants, objects monitorObjects, pinnedLsmPath *ebpf.Map) optionalPrograms {
 	loaded := optionalPrograms{Failures: make(map[string]error)}
 	spec, err := loadSelectedMonitorSpec(selectedObject)
+	if err == nil {
+		err = constants.apply(spec)
+	}
 	if err != nil {
 		loaded.Failures["collection"] = err
 		return loaded

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	cebpf "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
@@ -75,7 +76,9 @@ func ProbeKernelFeatures() KernelFeatures {
 		return detected
 	}
 	loadOptions := newCollectionOptions()
-	objects, features, err := loadMonitorObjects(loadOptions)
+	// A non-zero window keeps the verifier checking the deduplication path,
+	// which a zero constant would let it prune as dead code.
+	objects, features, err := loadMonitorObjects(loadOptions, loadConstants{connectionDedupeWindow: time.Minute})
 	if err != nil {
 		features.EnhancedLoadFailure = err.Error()
 		return features

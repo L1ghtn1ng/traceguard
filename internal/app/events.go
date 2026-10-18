@@ -291,18 +291,7 @@ func emitDetectionAlerts(detector *detection.Engine, recorder *eventsink.Recorde
 	})
 	metrics.SetDetectionStateGroups(detector.StateCount())
 	for _, alert := range alerts {
-		alertFields := alert.Fields
-		alertFields["source_event"] = eventName
-		alertFields["event"] = "detection_alert"
-		alertFields["detection_rule_id"] = alert.RuleID
-		alertFields["severity"] = alert.Severity
-		alertFields["detection_message"] = alert.Message
-		alertFields["tags"] = alert.Tags
-		alertFields["threshold_count"] = alert.Count
-		if alert.Window > 0 {
-			alertFields["threshold_window"] = alert.Window.String()
-		}
 		metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
-		recorder.InfoAt(alert.Timestamp, "detection-alert", alertFields)
+		recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))
 	}
 }

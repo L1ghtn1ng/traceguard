@@ -27,6 +27,10 @@ const (
 	defaultKubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	defaultKubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	defaultKubePoll      = 2 * time.Minute
+
+	defaultHeartbeatInterval      = 5 * time.Minute
+	defaultConnectionDedupeWindow = time.Minute
+	maxConnectionDedupeWindow     = time.Hour
 )
 
 type Config struct {
@@ -70,8 +74,13 @@ type Config struct {
 	KubernetesCAPath             string
 	KubernetesNodeName           string
 	KubernetesPoll               time.Duration
+	StrictHooks                  bool
+	HeartbeatInterval            time.Duration
+	PolicySigningKey             string
+	ConnectionDedupeWindow       time.Duration
 	PrintVersion                 bool
 	Doctor                       bool
+	ReplayPath                   string
 }
 
 func Parse() (Config, error) {
@@ -123,6 +132,18 @@ func Parse() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	strictHooksDefault, err := envBool("TRACEGUARD_STRICT_HOOKS", false)
+	if err != nil {
+		return Config{}, err
+	}
+	heartbeatDefault, err := envDuration("TRACEGUARD_HEARTBEAT_INTERVAL", defaultHeartbeatInterval)
+	if err != nil {
+		return Config{}, err
+	}
+	connectionDedupeDefault, err := envDuration("TRACEGUARD_CONNECTION_DEDUPE_WINDOW", defaultConnectionDedupeWindow)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{}
 
@@ -167,8 +188,13 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.KubernetesCAPath, "kubernetes-ca-path", envString("TRACEGUARD_KUBERNETES_CA_PATH", defaultKubeCAPath), "path to the Kubernetes CA certificate bundle")
 	fs.StringVar(&cfg.KubernetesNodeName, "kubernetes-node-name", envString("TRACEGUARD_KUBERNETES_NODE_NAME", ""), "optional Kubernetes node name used to scope pod metadata listing")
 	fs.DurationVar(&cfg.KubernetesPoll, "kubernetes-poll-interval", kubernetesPollDefault, "how often to refresh Kubernetes pod metadata")
+	fs.BoolVar(&cfg.StrictHooks, "strict-hooks", strictHooksDefault, "refuse to start when an optional eBPF hook cannot be loaded or attached")
+	fs.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", heartbeatDefault, "interval between heartbeat events that report policy digest and self-health; 0 disables")
+	fs.StringVar(&cfg.PolicySigningKey, "policy-signing-key", envString("TRACEGUARD_POLICY_SIGNING_KEY", ""), "absolute path to a PEM Ed25519 public key; the remote policy must then carry a valid detached signature at <policy-url>.sig")
+	fs.DurationVar(&cfg.ConnectionDedupeWindow, "connection-dedupe-window", connectionDedupeDefault, "suppress repeated connection events for the same socket within this window; 0 disables")
 	fs.BoolVar(&cfg.PrintVersion, "v", false, "print program version and exit")
 	fs.BoolVar(&cfg.Doctor, "doctor", false, "run environment diagnostics and exit")
+	fs.StringVar(&cfg.ReplayPath, "replay", "", "evaluate detection rules over an absolute-path JSONL event archive, print alerts and a per-rule summary, and exit")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return Config{}, err
@@ -178,6 +204,15 @@ func Parse() (Config, error) {
 	}
 	normalizeKubernetesConfig(&cfg)
 	if cfg.PrintVersion || cfg.Doctor || cfg.Unpin {
+		return cfg, nil
+	}
+	if cfg.ReplayPath != "" {
+		if !filepath.IsAbs(cfg.ReplayPath) {
+			return Config{}, errors.New("replay must be an absolute path")
+		}
+		if cfg.PolicyPath != "" && !filepath.IsAbs(cfg.PolicyPath) {
+			return Config{}, errors.New("policy-path must be an absolute path")
+		}
 		return cfg, nil
 	}
 
@@ -283,6 +318,20 @@ func Parse() (Config, error) {
 	}
 	if cfg.ProcessCacheTTL <= 0 {
 		return Config{}, errors.New("process-cache-ttl must be positive")
+	}
+	if cfg.HeartbeatInterval < 0 {
+		return Config{}, errors.New("heartbeat-interval must not be negative")
+	}
+	if cfg.ConnectionDedupeWindow < 0 || cfg.ConnectionDedupeWindow > maxConnectionDedupeWindow {
+		return Config{}, fmt.Errorf("connection-dedupe-window must be between 0 and %s", maxConnectionDedupeWindow)
+	}
+	if cfg.PolicySigningKey != "" {
+		if !filepath.IsAbs(cfg.PolicySigningKey) {
+			return Config{}, errors.New("policy-signing-key must be an absolute path")
+		}
+		if cfg.PolicyURL == "" {
+			return Config{}, errors.New("policy-signing-key requires policy-url; local policy files are trusted by file ownership")
+		}
 	}
 	if cfg.KubernetesEnrich {
 		if cfg.KubernetesAPIURL == "" {

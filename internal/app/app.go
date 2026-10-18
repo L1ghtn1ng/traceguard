@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,9 +58,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 
 	monitor, err := ebpf.NewMonitor(cfg.CgroupPath, ebpf.Options{
-		FileAudit:   cfg.FileAudit,
-		PinEBPF:     cfg.PinEBPF,
-		EnableStats: cfg.EBPFStats,
+		FileAudit:              cfg.FileAudit,
+		PinEBPF:                cfg.PinEBPF,
+		EnableStats:            cfg.EBPFStats,
+		ConnectionDedupeWindow: cfg.ConnectionDedupeWindow,
 	})
 	if err != nil {
 		return err
@@ -105,8 +109,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		featureFields["enhanced_load_failure"] = kernelFeatures.EnhancedLoadFailure
 	}
 	recorder.Info("kernel features selected", featureFields)
-	for hook, hookErr := range monitor.OptionalFailures() {
-		recorder.Error("optional eBPF hook unavailable", hookErr, map[string]any{"hook": hook})
+	hookFailures := monitor.OptionalFailures()
+	unavailableHooks := slices.Sorted(maps.Keys(hookFailures))
+	for _, hook := range unavailableHooks {
+		recorder.Error("optional eBPF hook unavailable", hookFailures[hook], map[string]any{"hook": hook})
+	}
+	if cfg.StrictHooks && len(unavailableHooks) > 0 {
+		return fmt.Errorf("strict-hooks: optional eBPF hooks unavailable: %s", strings.Join(unavailableHooks, ", "))
 	}
 	if cfg.EBPFStats {
 		collectProgramStats(monitor, metrics, recorder)
@@ -129,8 +138,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	// The programs are already attached and producing events. Drain the ring
 	// buffer before loading policy, which can wait on a remote fetch, so a slow
 	// startup does not fill the buffer and drop events.
-	ringBufferBaseline := collectRingBufferStats(monitor, metrics, recorder, nil)
-	workers.Go(func() { runRingBufferStats(ctx, monitor, metrics, recorder, ringBufferBaseline) })
+	ringBuffer := newRingBufferWatcher(monitor, metrics, recorder)
+	ringBuffer.collect()
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, func(time.Time) { ringBuffer.collect() }) })
 	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
@@ -148,6 +158,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			CAPath:            cfg.PolicyCAPath,
 			ClientCertPath:    cfg.PolicyClientCert,
 			ClientKeyPath:     cfg.PolicyClientKey,
+			SigningKeyPath:    cfg.PolicySigningKey,
 			Validate: func(bundle policyconfig.Bundle) error {
 				return validateBundleForMode(cfg, bundle)
 			},
@@ -200,6 +211,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish emergency allow policy: %w", err)
 		}
+		if err := policyController.RecordApplied(policyconfig.Bundle{}); err != nil {
+			return err
+		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
 			metrics.SetHookHealthy(hook, true)
 		}
@@ -209,6 +223,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		// publish an empty policy when this run has no configured policy source.
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish empty policy: %w", err)
+		}
+		if err := policyController.RecordApplied(policyconfig.Bundle{}); err != nil {
+			return err
 		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
 			metrics.SetHookHealthy(hook, true)
@@ -222,8 +239,19 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
 	}
 
+	exceptions := newExceptionWatcher(detector, metrics, recorder)
+	exceptions.collect(time.Now())
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, exceptions.collect) })
+
 	started = true
 	monitor.KeepPins()
+	if cfg.HeartbeatInterval > 0 {
+		status := heartbeatStatus{
+			started: time.Now(), mode: policyMode(cfg), policyDigest: policyController.Digest,
+			unavailableHooks: unavailableHooks, ringBuffer: ringBuffer, detector: detector, healthy: metrics.Healthy,
+		}
+		workers.Go(func() { runHeartbeat(ctx, cfg.HeartbeatInterval, recorder, status) })
+	}
 
 	select {
 	case err := <-errCh:

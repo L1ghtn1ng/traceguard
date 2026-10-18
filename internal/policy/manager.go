@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -32,6 +33,9 @@ type Config struct {
 	CAPath            string
 	ClientCertPath    string
 	ClientKeyPath     string
+	// SigningKeyPath names a PEM Ed25519 public key. When set, every remote
+	// document and the remote cache must carry a valid detached signature.
+	SigningKeyPath string
 	// Validate, when set, checks the merged bundle before a fetched remote
 	// document replaces the cache, conditional-request state, or the last
 	// known good remote base.
@@ -58,8 +62,9 @@ type LoadMetadata struct {
 }
 
 type Manager struct {
-	cfg    Config
-	client *http.Client
+	cfg        Config
+	client     *http.Client
+	signingKey ed25519.PublicKey
 
 	mu         sync.Mutex
 	etag       string
@@ -93,6 +98,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg.ClientCertPath:    "policy client certificate path",
 		cfg.ClientKeyPath:     "policy client key path",
 		cfg.AuthorizationFile: "policy authorization file",
+		cfg.SigningKeyPath:    "policy signing key path",
 	} {
 		if strings.TrimSpace(path) != "" {
 			if err := validatePath(path, name); err != nil {
@@ -115,12 +121,24 @@ func NewManager(cfg Config) (*Manager, error) {
 			cfg.Authorization = authorization
 		}
 	}
+	var signingKey ed25519.PublicKey
+	if strings.TrimSpace(cfg.SigningKeyPath) != "" {
+		if strings.TrimSpace(cfg.URL) == "" {
+			return nil, errors.New("policy signing key requires a policy url")
+		}
+		key, err := loadSigningKey(cfg.SigningKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		signingKey = key
+	}
 	transport, err := newTransport(cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &Manager{
-		cfg: cfg,
+		cfg:        cfg,
+		signingKey: signingKey,
 		client: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     transport,
@@ -188,7 +206,7 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 		// Commit remote state only after the effective policy validated, so a
 		// rejected document is neither cached nor suppressed by a later 304.
 		if fetched != nil {
-			if err := safefile.WriteFileAtomic(m.cfg.CachePath, fetched.payload, 0o600); err != nil {
+			if err := m.writeCache(fetched); err != nil {
 				metadata.CachePersistError = err.Error()
 			}
 			m.etag = fetched.etag
@@ -201,9 +219,21 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 }
 
 type remoteResponse struct {
-	payload  []byte
-	etag     string
-	modified string
+	payload   []byte
+	signature []byte
+	etag      string
+	modified  string
+}
+
+func (m *Manager) writeCache(fetched *remoteResponse) error {
+	// Write the signature first: a crash between the writes leaves a cache
+	// that fails verification, never an older signature that still verifies.
+	if fetched.signature != nil {
+		if err := safefile.WriteFileAtomic(m.cfg.CachePath+SignatureSuffix, fetched.signature, 0o600); err != nil {
+			return err
+		}
+	}
+	return safefile.WriteFileAtomic(m.cfg.CachePath, fetched.payload, 0o600)
 }
 
 func (m *Manager) Watch(ctx context.Context, apply func(Bundle, LoadMetadata, error)) {
@@ -265,15 +295,62 @@ func (m *Manager) fetch(ctx context.Context) (document Document, response *remot
 	if int64(len(payload)) > MaxDocumentBytes {
 		return Document{}, nil, LoadSourceNone, fmt.Errorf("response exceeds %d bytes", MaxDocumentBytes)
 	}
+	var signature []byte
+	if m.signingKey != nil {
+		signature, err = m.fetchSignature(ctx)
+		if err != nil {
+			return Document{}, nil, LoadSourceNone, err
+		}
+		if err := verifySignature(m.signingKey, payload, signature); err != nil {
+			return Document{}, nil, LoadSourceNone, fmt.Errorf("verify remote policy: %w", err)
+		}
+	}
 	document, err = Parse(payload)
 	if err != nil {
 		return Document{}, nil, LoadSourceNone, fmt.Errorf("parse response: %w", err)
 	}
 	return document, &remoteResponse{
-		payload:  payload,
-		etag:     strings.TrimSpace(resp.Header.Get("ETag")),
-		modified: strings.TrimSpace(resp.Header.Get("Last-Modified")),
+		payload:   payload,
+		signature: signature,
+		etag:      strings.TrimSpace(resp.Header.Get("ETag")),
+		modified:  strings.TrimSpace(resp.Header.Get("Last-Modified")),
 	}, LoadSourceRemote, nil
+}
+
+// fetchSignature downloads the detached signature at <policy-url>.sig with
+// the same credentials as the policy, never conditionally, so it always
+// matches the payload just fetched.
+func (m *Manager) fetchSignature(ctx context.Context) (signature []byte, fetchErr error) {
+	target, err := signatureURL(m.cfg.URL)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build signature request: %w", err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	if authorization := strings.TrimSpace(m.cfg.Authorization); authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, safeRemoteRequestError(err)
+	}
+	defer func() {
+		fetchErr = errors.Join(fetchErr, resp.Body.Close())
+	}()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch policy signature: unexpected HTTP status %s", resp.Status)
+	}
+	signature, err = io.ReadAll(io.LimitReader(resp.Body, maxSignatureBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read policy signature: %w", err)
+	}
+	if len(signature) > maxSignatureBytes {
+		return nil, fmt.Errorf("policy signature exceeds %d bytes", maxSignatureBytes)
+	}
+	return signature, nil
 }
 
 func safeRemoteRequestError(err error) error {
@@ -287,6 +364,15 @@ func (m *Manager) readCache() (Document, error) {
 	payload, err := safefile.ReadFile(m.cfg.CachePath, MaxDocumentBytes)
 	if err != nil {
 		return Document{}, fmt.Errorf("read policy cache %q: %w", m.cfg.CachePath, err)
+	}
+	if m.signingKey != nil {
+		signature, err := safefile.ReadFile(m.cfg.CachePath+SignatureSuffix, maxSignatureBytes)
+		if err != nil {
+			return Document{}, fmt.Errorf("read policy cache signature: %w", err)
+		}
+		if err := verifySignature(m.signingKey, payload, signature); err != nil {
+			return Document{}, fmt.Errorf("verify policy cache %q: %w", m.cfg.CachePath, err)
+		}
 	}
 	document, err := Parse(payload)
 	if err != nil {

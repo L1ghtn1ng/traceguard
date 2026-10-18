@@ -12,15 +12,23 @@ All notable changes to TraceGuard are documented in this file.
 - Added the `peer` threshold group field as a clearer name for the peer address of inbound connections.
 - Added the `baseline.inbound-ssh-bruteforce` detection: 20 inbound TCP connection attempts to port 22 from one address within a minute.
 - Added per-kind kernel counters for events lost because the event ring buffer was full, exported as `traceguard_ringbuf_dropped_total{kind}`, plus `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` occupancy gauges. New drops are also recorded as an `eBPF ring buffer full; events dropped` error event. Previously a full ring buffer discarded events without any signal.
+- Added a SHA-256 digest of the effective merged policy, exported as `traceguard_policy_info{sha256}` and included in the `policy loaded` record, so hosts running different policy are easy to find.
+- Added a `heartbeat` event, recorded at startup and every `-heartbeat-interval` / `TRACEGUARD_HEARTBEAT_INTERVAL` (default `5m`, `0` disables), carrying the policy digest and mode, health, unavailable hooks, ring buffer loss, and detection and exception counts.
+- Added `-strict-hooks` / `TRACEGUARD_STRICT_HOOKS`, which refuses to start when any optional eBPF hook cannot be loaded or attached.
+- Added `detection_exceptions`: scoped suppressions for named detection rules with a required `reason` and an optional RFC 3339 `expires`. Suppressed events do not count toward thresholds. They are reported through `traceguard_detection_suppressed_total{exception}`, `traceguard_detection_exceptions{state}`, a one-time `detection exception expired` record, and the heartbeat.
+- Added `-replay`, which evaluates detection rules and exceptions from `-policy-path` over a JSONL or gzip event archive offline, writes alerts as JSON lines, and summarizes alert counts per rule, noisiest first.
+- Added `-connection-dedupe-window` / `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` (default `1m`, at most `1h`, `0` disables) for the previously fixed 60-second suppression of repeated connection and TCP retransmit events.
 
 ### Changed
 
 - Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
 - The ring buffer reader now starts before the initial YAML policy is loaded and applied, so events from the already-attached programs are consumed while a remote policy fetch is in progress instead of accumulating until the buffer fills. Events in that window are evaluated against the baseline detections.
 - Bumped the eBPF pin layout to version 6 for the new drop-counter map. With `-pin-ebpf`, the first start after upgrading discards the previous pins and attaches fresh programs.
+- Updated `docs/policy.md` to document pin layout version 6.
 
 ### Security
 
+- Added `-policy-signing-key` / `TRACEGUARD_POLICY_SIGNING_KEY`. With a PEM Ed25519 public key configured, a remote policy is accepted only with a valid detached base64 signature at `<policy-url>.sig`, and a stale cache only if its cached signature still verifies, so a compromised policy server cannot push unsigned policy.
 - Installed the packaged `/etc/traceguard/traceguard.env` as `0600 root:root`, and tightened an existing file to that mode on package install and upgrade, so authorization values stored there are not readable by other local users.
 - Closed a DNS policy bypass through IPv6 extension-header chains: a packet with six extension headers now reaches DNS policy, and in block mode a packet whose chain is too long to parse is dropped because it could hide DNS.
 - Broadened `current_cmdline` redaction of monitored processes to password-, token-, and key-style flags, `NAME=value` and `Header: value` arguments, query parameters, URL credentials, and the same forms inside `sh -c` strings, including quoted values and space-separated flags. Redaction is best effort, and `current_cmdline` should still be treated as sensitive.

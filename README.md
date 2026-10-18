@@ -28,6 +28,11 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - run a built-in environment doctor check before deployment
 - optionally pin eBPF maps, programs, and cgroup/tracepoint links across daemon restarts
 - optionally export per-program eBPF runtime statistics
+- count events lost to a full ring buffer per event kind and record each loss
+- report the effective policy's SHA-256 and a periodic heartbeat with self-health for fleet drift and stuck-agent detection
+- optionally require a detached Ed25519 signature on remote policy
+- suppress named detections with scoped, expiring exceptions that record a reason
+- replay detection rules over an archived event stream to measure noise before rollout
 
 Remote YAML policy is cached for validated startup fallback and refreshed every
 five minutes by default. After a remote policy has been activated, refresh
@@ -399,6 +404,10 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_KUBERNETES_CA_PATH`
 - `TRACEGUARD_KUBERNETES_NODE_NAME`
 - `TRACEGUARD_KUBERNETES_POLL_INTERVAL`
+- `TRACEGUARD_STRICT_HOOKS`
+- `TRACEGUARD_HEARTBEAT_INTERVAL`
+- `TRACEGUARD_POLICY_SIGNING_KEY`
+- `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -419,6 +428,9 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`
 - file audit enabled: `TRACEGUARD_FILE_AUDIT=true`
+- connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
+- strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
+- remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint
 
 Example output:

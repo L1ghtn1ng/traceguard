@@ -31,6 +31,7 @@ type policyController struct {
 	cgroups       []cgroupinfo.Entry
 	blockResolved []blocklist.ResolvedEndpoint
 	allowResolved []blocklist.ResolvedEndpoint
+	digest        string
 }
 
 func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine) *policyController {
@@ -58,7 +59,7 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 		}
 		// Compile detections before the kernel commit so a failure cannot
 		// leave the kernel and controller on different policies.
-		detections, err = detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs)
+		detections, err = detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs, bundle.DetectionExceptions)
 		if err != nil {
 			return fmt.Errorf("compile detection policy: %w", err)
 		}
@@ -92,7 +93,7 @@ func validateBundleForMode(cfg config.Config, bundle policyconfig.Bundle) error 
 	if err := validateRulesForMode(cfg, bundle.DNS); err != nil {
 		return err
 	}
-	if _, err := detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs); err != nil {
+	if _, err := detection.Compile(bundle.DetectionRules, bundle.DisabledRuleIDs, bundle.DetectionExceptions); err != nil {
 		return fmt.Errorf("compile detection policy: %w", err)
 	}
 	return nil
@@ -151,7 +152,37 @@ func (p *policyController) scanCgroups(bundle policyconfig.Bundle) ([]cgroupinfo
 	return relevant, nil
 }
 
+// Digest returns the SHA-256 of the policy that is active in the kernel and
+// detection engine, or "" before any policy has been applied.
+func (p *policyController) Digest() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.digest
+}
+
+// RecordApplied records a policy published outside ApplyBundle, such as the
+// empty policy used without a policy source or in emergency allow mode.
+func (p *policyController) RecordApplied(bundle policyconfig.Bundle) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	digest, err := bundle.Digest()
+	if err != nil {
+		return err
+	}
+	p.setDigestLocked(digest)
+	return nil
+}
+
+func (p *policyController) setDigestLocked(digest string) {
+	p.digest = digest
+	p.metrics.SetPolicyDigest(digest)
+}
+
 func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoints bool) error {
+	digest, err := bundle.Digest()
+	if err != nil {
+		return err
+	}
 	rules := bundle.DNS
 	if err := validateRulesForMode(p.cfg, rules); err != nil {
 		return err
@@ -159,7 +190,6 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 	blockResolved := p.blockResolved
 	allowResolved := p.allowResolved
 	if refreshEndpoints {
-		var err error
 		blockResolved, err = blocklist.ResolveEndpoints(p.ctx, rules.BlockEndpoints)
 		if err != nil {
 			return fmt.Errorf("resolve block endpoint rules: %w", err)
@@ -234,6 +264,7 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 	}
 	// Report hook health only for the policy that is now active.
 	p.updateHookHealth(execPolicy, filePolicy, bindPolicy, unixPolicy, sockoptPolicy)
+	p.setDigestLocked(digest)
 
 	p.blockResolved = blockResolved
 	p.allowResolved = allowResolved
@@ -253,6 +284,7 @@ func (p *policyController) applyLocked(bundle policyconfig.Bundle, refreshEndpoi
 	p.metrics.SetEgressRuleCounts(egressAllow, egressBlock)
 	p.metrics.SetPolicyLastLoaded()
 	p.recorder.InfoIfChanged("policy loaded", map[string]any{
+		"policy_sha256":        digest,
 		"block_all_domains":    rules.BlockAllDomains,
 		"block_all_resolvers":  rules.BlockAllResolvers,
 		"block_domains":        len(rules.BlockDomains),

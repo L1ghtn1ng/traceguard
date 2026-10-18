@@ -339,3 +339,15 @@ detections:
   # local overlay temporarily turns off a remote custom detection by ID.
   - id: experimental-disabled-rule
     enabled: false
+
+# Exceptions suppress named rules for matching events without disabling them.
+# Record why each exists and let it expire so it is revisited.
+detection_exceptions:
+  - id: root-guest-agent-imds
+    rules:
+      - baseline.cloud-metadata-access
+    reason: the root-owned cloud guest agent polls instance metadata
+    expires: 2027-06-30T00:00:00Z
+    match:
+      uids:
+        - 0

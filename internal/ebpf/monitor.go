@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -254,6 +255,9 @@ type Options struct {
 	PinEBPF     bool
 	PinPath     string
 	EnableStats bool
+	// ConnectionDedupeWindow suppresses repeated connection and TCP
+	// retransmit events for the same flow; zero disables suppression.
+	ConnectionDedupeWindow time.Duration
 }
 
 type AttachState struct {
@@ -422,13 +426,14 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return errors.Join(cause, statsCloser.Close())
 	}
 
+	constants := loadConstants{connectionDedupeWindow: opts.ConnectionDedupeWindow}
 	loadOptions := newCollectionOptions()
 	pinnedMaps, pinLayout, err := preparePinnedMaps(opts)
 	if err != nil {
 		return nil, closeStatsOnError(err)
 	}
 	loadOptions.MapReplacements = pinnedMaps
-	objects, features, err := loadMonitorObjects(loadOptions)
+	objects, features, err := loadMonitorObjects(loadOptions, constants)
 	if err != nil {
 		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps)))
 	}
@@ -440,7 +445,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		loadOptions = newCollectionOptions()
 		pinnedMaps = nil
 		pinLayout = nil
-		objects, features, err = loadMonitorObjects(loadOptions)
+		objects, features, err = loadMonitorObjects(loadOptions, constants)
 		if err != nil {
 			return nil, closeStatsOnError(err)
 		}
@@ -459,7 +464,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 	if err != nil {
 		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps), objects.Close()))
 	}
-	optional := loadOptionalPrograms(features.SelectedObject, loadOptions, objects, pinnedMaps["lsm_path_buf"])
+	optional := loadOptionalPrograms(features.SelectedObject, loadOptions, constants, objects, pinnedMaps["lsm_path_buf"])
 	if err := closePinnedMapHandles(pinnedMaps); err != nil {
 		return nil, closeStatsOnError(errors.Join(fmt.Errorf("close adopted eBPF map handles: %w", err), optional.Close(), objects.Close()))
 	}

@@ -28,6 +28,11 @@
       "type": "array",
       "maxItems": 256,
       "items": {"$ref": "#/$defs/detection"}
+    },
+    "detection_exceptions": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/detection_exception"}
     }
   },
   "$defs": {
@@ -353,6 +358,24 @@
           "maxItems": 16,
           "items": {"type": "string", "minLength": 1, "maxLength": 64}
         }
+      }
+    },
+    "detection_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "rules", "reason", "match"],
+      "properties": {
+        "id": {"$ref": "#/$defs/rule_id"},
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/rule_id"}
+        },
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "\\S"},
+        "expires": {"type": "string", "format": "date-time"},
+        "match": {"allOf": [{"$ref": "#/$defs/detection_match"}, {"minProperties": 1}]}
       }
     },
     "detection_match": {

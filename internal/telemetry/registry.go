@@ -58,6 +58,14 @@ func (r *Registry) SetPolicyMode(mode string) {
 	r.replaceGauges("traceguard_policy_mode", gauges)
 }
 
+// SetPolicyDigest publishes the SHA-256 of the active effective policy as an
+// info metric, replacing the previous digest.
+func (r *Registry) SetPolicyDigest(digest string) {
+	r.replaceGauges("traceguard_policy_info", map[string]int64{
+		metricKey1("traceguard_policy_info", "sha256", digest): 1,
+	})
+}
+
 func (r *Registry) SetPolicyRuleCounts(counts map[string]int) {
 	gauges := make(map[string]int64, len(counts))
 	for key, value := range counts {
@@ -153,6 +161,24 @@ func (r *Registry) SetDetectionRules(count int) {
 
 func (r *Registry) SetDetectionStateGroups(count int) {
 	r.setGauge("traceguard_detection_state_groups", int64(count))
+}
+
+// SetDetectionExceptions publishes how many detection exceptions are active
+// and expired, and each installed exception's cumulative suppression count.
+func (r *Registry) SetDetectionExceptions(active, expired int, suppressed map[string]uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges[metricKey1("traceguard_detection_exceptions", "state", "active")] = int64(active)
+	r.gauges[metricKey1("traceguard_detection_exceptions", "state", "expired")] = int64(expired)
+	const name = "traceguard_detection_suppressed_total"
+	for key := range r.counters {
+		if strings.HasPrefix(key, name+"{") {
+			delete(r.counters, key)
+		}
+	}
+	for id, count := range suppressed {
+		r.counters[metricKey1(name, "exception", id)] = boundedMetricUint64(count)
+	}
 }
 
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
