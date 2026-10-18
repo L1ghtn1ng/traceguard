@@ -528,6 +528,7 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	raw.PID = 123
 	raw.FileFlags = 0x40
 	raw.FileMode = 0o600
+	raw.SocketCookie = 7
 	copy(raw.Comm[:], "cat")
 	copy(raw.Filename[:], "/etc/passwd")
 
@@ -551,6 +552,9 @@ func TestDecodeFileAccessEvent(t *testing.T) {
 	}
 	if event.FileMode != 0o600 {
 		t.Fatalf("FileMode = %#o, want 0600", event.FileMode)
+	}
+	if event.Value != 7 || event.SocketCookie != 0 {
+		t.Fatalf("Value = %d SocketCookie = %d, want the dirfd in Value", event.Value, event.SocketCookie)
 	}
 }
 

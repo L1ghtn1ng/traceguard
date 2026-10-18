@@ -317,6 +317,7 @@ func passingChecks(t *testing.T, root string) environmentChecks {
 				BTFAvailable:       true,
 				BPFLSMAvailable:    true,
 				LSMProgramType:     true,
+				TaskStorage:        true,
 				EnhancedTelemetry:  true,
 				SelectedFeatureSet: "linux71",
 				SelectedObject:     "traceguardLinux71",
@@ -520,5 +521,30 @@ func TestRunChecksThreatIntelFeeds(t *testing.T) {
 				t.Fatalf("runWithChecks() error = %v, want ok %t and %q:\n%s", err, test.ok, test.want, out.String())
 			}
 		})
+	}
+}
+
+func TestDoctorEnforcementNeedsTaskStorage(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfg := readyConfig(root)
+	cfg.PolicyURL = "https://policy.test/v1"
+	cfg.Block = true
+	checks := passingChecks(t, root)
+	writeCachedRemotePolicy(t, &cfg, &checks, remoteHostWideExecPolicy)
+	baseFeatures := checks.detectKernelFeatures
+	checks.detectKernelFeatures = func() ebpfmonitor.KernelFeatures {
+		features := baseFeatures()
+		features.TaskStorage = false
+		return features
+	}
+	var out bytes.Buffer
+	if err := runWithChecks(cfg, &out, checks); err == nil {
+		t.Fatalf("runWithChecks() passed an exec block rule without task storage\n%s", out.String())
+	}
+	for _, want := range []string{"PASS task-storage-map: disabled", "FAIL exec-enforce-ready: disabled", "PASS file-enforce-ready"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
 	}
 }

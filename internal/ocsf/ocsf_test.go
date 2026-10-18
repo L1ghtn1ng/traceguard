@@ -274,3 +274,31 @@ func objects(t *testing.T, value any) []map[string]any {
 	}
 	return out
 }
+
+// TestConvertClassifiesProducerDNSAndResolverRecords uses the records the
+// daemon writes, whose message is a transport or would-block name while the
+// event field keeps the kernel event name.
+func TestConvertClassifiesProducerDNSAndResolverRecords(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		message     string
+		fields      map[string]any
+		class       int
+		action      int
+		disposition any
+	}{
+		{"dns", map[string]any{"event": "dns", "domain": "example.com"}, ClassDNSActivity, 1, nil},
+		{"would-block", map[string]any{"event": "dns", "domain": "example.com", "policy": "block", "mode": "dry-run"}, ClassDNSActivity, 1, 15},
+		{"blocked", map[string]any{"event": "blocked", "domain": "example.com", "policy": "block"}, ClassDNSActivity, 2, 2},
+		{"udp", map[string]any{"event": "resolver", "address": "9.9.9.9", "port": uint16(53)}, ClassNetworkActivity, 1, nil},
+		{"would-block-tcp", map[string]any{"event": "resolver", "address": "9.9.9.9", "port": uint16(53), "mode": "dry-run"}, ClassNetworkActivity, 1, 15},
+		{"blocked-udp", map[string]any{"event": "resolver_blocked", "address": "9.9.9.9", "port": uint16(53)}, ClassNetworkActivity, 2, 2},
+	} {
+		event := Convert(Record{Timestamp: "2026-10-18T10:00:00Z", Level: "info", Message: test.message, Hostname: "h", Fields: test.fields})
+		if event["class_uid"] != test.class || event["action_id"] != test.action || event["disposition_id"] != test.disposition {
+			t.Errorf("%s: class %v action %v disposition %v, want %d %d %v",
+				test.message, event["class_uid"], event["action_id"], event["disposition_id"], test.class, test.action, test.disposition)
+		}
+	}
+}

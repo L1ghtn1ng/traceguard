@@ -254,6 +254,7 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 	check(true, "kernel-btf", enabledDetail(features.BTFAvailable))
 	check(true, "kernel-bpf-lsm", enabledDetail(features.BPFLSMAvailable))
 	check(true, "lsm-program-type", enabledDetail(features.LSMProgramType))
+	check(true, "task-storage-map", enabledDetail(features.TaskStorage))
 	info("INFO", "lsm-exec-attached", "verified by the real optional attach at daemon startup")
 	info("INFO", "lsm-file-attached", "verified by the real optional attach at daemon startup")
 	info("INFO", "cgroup-bind", "bind4 and bind6 are verified independently at daemon startup")
@@ -280,8 +281,11 @@ func runWithChecks(cfg config.Config, w io.Writer, env environmentChecks) error 
 		lsmScopeOK := execBlocks+fileBlocks == 0 || filepath.Clean(cfg.CgroupPath) == "/sys/fs/cgroup"
 		check(lsmScopeOK, "lsm-scope", "exec/file MAC enforcement is host-wide and requires cgroup-path /sys/fs/cgroup")
 		if cfg.Block && !cfg.DryRun {
-			check(execBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "exec-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
-			check(fileBlocks == 0 || (features.BPFLSMAvailable && features.LSMProgramType), "file-enforce-ready", enabledDetail(features.BPFLSMAvailable && features.LSMProgramType))
+			// The daemon loads the exec and file LSM programs only with
+			// task storage support as well.
+			lsmReady := features.BPFLSMAvailable && features.LSMProgramType && features.TaskStorage
+			check(execBlocks == 0 || lsmReady, "exec-enforce-ready", enabledDetail(lsmReady))
+			check(fileBlocks == 0 || lsmReady, "file-enforce-ready", enabledDetail(lsmReady))
 		}
 		for _, rule := range effective.Exec.Rules {
 			if rule.Action == "block" && len(rule.Selectors.UIDs) == 0 && len(rule.Selectors.CgroupPaths) == 0 && len(rule.Selectors.CgroupPrefixes) == 0 {

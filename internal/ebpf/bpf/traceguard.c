@@ -4018,7 +4018,10 @@ static __always_inline int emit_exec_event(__u32 syscall, const char *filename, 
 	return 0;
 }
 
-static __always_inline int emit_file_access_event(const char *filename, __u64 flags, __u64 mode)
+/* File audit events carry the open's dirfd in socket_cookie, so a relative
+ * path can be resolved against the right directory.
+ */
+static __always_inline int emit_file_access_event(__u64 dirfd, const char *filename, __u64 flags, __u64 mode)
 {
 	struct event *event = reserve_event(EVENT_FILE_ACCESS);
 
@@ -4030,6 +4033,7 @@ static __always_inline int emit_file_access_event(const char *filename, __u64 fl
 	init_event(event, EVENT_FILE_ACCESS, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
 	event->file_flags = (__u32)flags;
 	event->file_mode = (__u32)mode;
+	event->socket_cookie = (__u32)dirfd;
 	if (filename) {
 		bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename);
 	}
@@ -4382,13 +4386,13 @@ int trace_execveat(struct trace_event_raw_sys_enter *ctx)
 SEC("tracepoint/syscalls/sys_enter_open")
 int trace_open(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[0], ctx->args[1], ctx->args[2]);
+	return emit_file_access_event((__u64)(__s64)TRACEGUARD_AT_FDCWD, (const char *)ctx->args[0], ctx->args[1], ctx->args[2]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[1], ctx->args[2], ctx->args[3]);
+	return emit_file_access_event(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], ctx->args[3]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_openat2")
@@ -4400,11 +4404,11 @@ int trace_openat2(struct trace_event_raw_sys_enter *ctx)
 	if (bpf_probe_read_user(&how, sizeof(how), (const void *)ctx->args[2]) == 0) {
 		flags = how.flags;
 	}
-	return emit_file_access_event((const char *)ctx->args[1], flags, how.mode);
+	return emit_file_access_event(ctx->args[0], (const char *)ctx->args[1], flags, how.mode);
 }
 
 SEC("tracepoint/syscalls/sys_enter_creat")
 int trace_creat(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_access_event((const char *)ctx->args[0], TRACEGUARD_CREAT_FLAGS, ctx->args[1]);
+	return emit_file_access_event((__u64)(__s64)TRACEGUARD_AT_FDCWD, (const char *)ctx->args[0], TRACEGUARD_CREAT_FLAGS, ctx->args[1]);
 }

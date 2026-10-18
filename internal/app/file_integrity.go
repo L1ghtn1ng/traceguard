@@ -134,9 +134,9 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 			dirfd = uint32(event.Value) //nolint:gosec // the low word is the dirfd
 		}
 		if event.Kind == ebpf.EventFileAccess {
-			// Open audit events carry the mode, not a dirfd, so relative
-			// paths resolve against the working directory.
-			dirfd = atFDCWD
+			// Open audit events carry the mode in FileMode and the dirfd
+			// in Value.
+			dirfd = uint32(event.Value) //nolint:gosec // the low word is the dirfd
 		}
 		path, ok := resolveRequestedPath(procRoot, event.PID, dirfd, requested)
 		if ok && watcher.Watched(path) {

@@ -1149,7 +1149,8 @@ Changes are then found two ways:
   write or create open when file auditing is on. One second later
   TraceGuard rechecks it and compares it with the baseline, so a burst of writes
   produces one report. Relative paths are resolved through the process's
-  `/proc` working directory or descriptor, which needs ptrace access to the
+  `/proc` working directory or the syscall's directory descriptor, including
+  the `openat` and `openat2` one, which needs ptrace access to the
   process; paths that cannot be resolved wait for the rescan. Events from
   processes in another mount namespace, such as a container's, are skipped,
   because their paths name that namespace's files; the rescan covers writes
