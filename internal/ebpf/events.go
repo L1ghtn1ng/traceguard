@@ -149,6 +149,11 @@ type Event struct {
 	// MountNamespace is the mount namespace inode number of a file audit or
 	// file change event's process, captured in the kernel; 0 when unknown.
 	MountNamespace uint32
+	// FileDevice and FileInode identify the file a descriptor-based change
+	// (fchmod, fchown) acted on, captured in the kernel; 0 when unknown.
+	// FileDevice is the kernel's encoding: major << 20 | minor.
+	FileDevice uint32
+	FileInode  uint64
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -220,6 +225,9 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		return event, nil
 	}
 	if raw.Kind == EventFileChange {
+		event.FileDevice = byteOrder.Uint32(raw.LocalAddr[:4])
+		event.FileInode = byteOrder.Uint64(raw.LocalAddr[8:])
+		event.LocalAddress = ""
 		event.Operation = raw.RuleID
 		event.NewPath = zeroTerminated(raw.Domain[:])
 		event.Value = raw.SocketCookie

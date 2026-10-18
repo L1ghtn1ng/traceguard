@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/config"
@@ -13,6 +15,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
+	"golang.org/x/sys/unix"
 )
 
 // File change operation codes mirror FILE_CHANGE_* in traceguard.c.
@@ -67,7 +70,9 @@ func resolveRequestedPath(procRoot string, pid, dirfd uint32, path string) (stri
 			return "", false
 		}
 		target, err := os.Readlink(fmt.Sprintf("%s/%d/fd/%d", procRoot, pid, dirfd))
-		if err != nil || !filepath.IsAbs(target) {
+		// An unlinked file's link ends in " (deleted)" and may name another
+		// file now; the event's file identity finds its other names.
+		if err != nil || !filepath.IsAbs(target) || strings.HasSuffix(target, " (deleted)") {
 			return "", false
 		}
 		return filepath.Clean(target), true
@@ -151,8 +156,19 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 	var watched []string
 	for _, requested := range requests {
 		path, ok := resolveRequestedPath(procRoot, event.PID, requested.dirfd, requested.path)
-		if ok && watcher.Watched(path) {
+		if ok && watcher.Watched(path) && !slices.Contains(watched, path) {
 			watched = append(watched, path)
+		}
+	}
+	// A descriptor-based change carries the file's identity from the
+	// kernel, which finds every watched name for it even if the descriptor
+	// was closed, reused, or its name removed before this ran.
+	if event.Kind == ebpf.EventFileChange && event.FileInode != 0 {
+		device := unix.Mkdev(event.FileDevice>>20, event.FileDevice&0xfffff)
+		for _, path := range watcher.PathsForFile(device, event.FileInode) {
+			if !slices.Contains(watched, path) {
+				watched = append(watched, path)
+			}
 		}
 	}
 	// The paths name files in the process's own mount namespace, such as a
