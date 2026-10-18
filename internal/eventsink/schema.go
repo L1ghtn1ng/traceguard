@@ -40,7 +40,17 @@ func marshalOCSFRecord(entry record) (json.RawMessage, error) {
 	if err != nil || len(encoded) <= maxSerializedRecordBytes {
 		return encoded, err
 	}
-	event["unmapped"] = map[string]any{"telemetry_truncated": true}
+	// Several TraceGuard events share an OCSF class and activity, so keep
+	// the names that tell them apart.
+	kept := map[string]any{"telemetry_truncated": true}
+	if unmapped, ok := event["unmapped"].(map[string]any); ok {
+		for _, name := range []string{"event", "source_event"} {
+			if text, ok := unmapped[name].(string); ok {
+				kept[name], _ = truncateUTF8(text, 128)
+			}
+		}
+	}
+	event["unmapped"] = kept
 	for _, bounds := range []struct{ text, items int }{{0, 0}, {512, 16}, {128, 4}} {
 		candidate := event
 		if bounds.text > 0 {

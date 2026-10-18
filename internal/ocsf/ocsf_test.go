@@ -350,3 +350,19 @@ func TestConvertSummaryFindings(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertLinkCreationNamesTheCreatedFile(t *testing.T) {
+	t.Parallel()
+
+	symlink := convert(t, "info", map[string]any{"event": "file_change", "operation": "symlink", "requested_path": "/etc/passwd", "new_path": "/tmp/link"})
+	if file := object(t, symlink["file"]); file["path"] != "/tmp/link" || file["type_id"] != 7 {
+		t.Fatalf("symlink file = %v, want the created symlink", file)
+	}
+	if _, ok := symlink["file_result"]; ok || object(t, symlink["unmapped"])["requested_path"] != "/etc/passwd" {
+		t.Fatalf("symlink = %v, want the target text kept unmapped", symlink)
+	}
+	link := convert(t, "info", map[string]any{"event": "file_change", "operation": "link", "requested_path": "/etc/shadow", "new_path": "/tmp/copy"})
+	if file := object(t, link["file"]); file["path"] != "/tmp/copy" || file["type_id"] != 1 {
+		t.Fatalf("link file = %v, want the created link", file)
+	}
+}

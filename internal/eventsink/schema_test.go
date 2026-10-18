@@ -187,3 +187,24 @@ func TestSpoolCountsBatchesOfAnotherSchema(t *testing.T) {
 		t.Fatalf("stranded for its own schema = %d, %v; want 0", count, err)
 	}
 }
+
+func TestOversizedOCSFRecordKeepsItsEventName(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]any{"event": "egress_blocked", "peer_address": "203.0.113.9"}
+	for index := range 40 {
+		fields[fmt.Sprintf("detail_%02d", index)] = strings.Repeat("d", 1000)
+	}
+	payload, err := marshalOCSFRecord(record{Timestamp: "2026-10-18T10:00:00Z", Level: "info", Message: "blocked-egress", Fields: fields})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	unmapped, _ := decoded["unmapped"].(map[string]any)
+	if unmapped["event"] != "egress_blocked" || unmapped["telemetry_truncated"] != true {
+		t.Fatalf("unmapped = %v, want the event name kept with the truncation marker", unmapped)
+	}
+}
