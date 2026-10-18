@@ -188,4 +188,11 @@ func TestSignatureURLAppendsSuffixToPathOnly(t *testing.T) {
 	if want := "https://policy.example/v1/traceguard.yaml.sig?tenant=a"; got != want {
 		t.Fatalf("signatureURL = %q, want %q", got, want)
 	}
+	escaped, err := signatureURL("https://policy.example/tenants/a%2Fb/policy.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://policy.example/tenants/a%2Fb/policy.yaml.sig"; escaped != want {
+		t.Fatalf("signatureURL with an escaped separator = %q, want %q", escaped, want)
+	}
 }

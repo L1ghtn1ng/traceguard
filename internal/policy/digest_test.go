@@ -63,3 +63,31 @@ func TestBundleDigestChangesWithPolicy(t *testing.T) {
 		t.Fatal("digest did not change when a DNS block rule was added")
 	}
 }
+
+func TestEmptyBundleDigestMatchesEmptyPolicyFile(t *testing.T) {
+	t.Parallel()
+
+	empty, err := EmptyBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Parse([]byte("version: 1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Merge(Document{Version: Version}, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, err := empty.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := loaded.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != right {
+		t.Fatalf("no-source digest %s differs from empty policy file digest %s", left, right)
+	}
+}

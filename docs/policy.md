@@ -1012,9 +1012,12 @@ count, noisiest first, and each exception's suppressed count and expiry state.
 `-policy-path` supplies detection rules, `disabled_rule_ids`, and exceptions;
 without it only the built-in baseline runs. Archives ending in `.gz` are read
 as gzip. Records that are not kernel events, such as alerts, heartbeats, and
-daemon status, are skipped. Replay evaluates the fields recorded in the
-archive, so a rule that matches on a field the archive truncated behaves as it
-did live.
+daemon status, are skipped. Replay sees fields only as the archive recorded
+them: strings over the 4 KiB telemetry limit are truncated and fields beyond a
+record's limits are dropped, so rules matching such values can count
+differently than they did live, where detection runs before those limits.
+Replayed alerts are recorded with the live alert envelope,
+`message=detection-alert` and `level=info`.
 
 ### Detection alert output
 
