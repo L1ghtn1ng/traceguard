@@ -71,12 +71,10 @@ func (w *ringBufferWatcher) collect() {
 	w.mu.Lock()
 	next := make(map[uint32]uint64, len(stats.Drops))
 	maps.Copy(next, w.baseline)
-	byName := make(map[string]uint64, len(stats.Drops))
 	fields := make(map[string]any)
 	var total uint64
 	for kind, dropped := range stats.Drops {
 		name := eventKindName(kind)
-		byName[name] = dropped
 		next[kind] = dropped
 		if baseline, seen := w.baseline[kind]; seen && dropped > baseline {
 			delta := dropped - baseline
@@ -90,6 +88,12 @@ func (w *ringBufferWatcher) collect() {
 	w.unread = stats.UnreadBytes
 	w.mu.Unlock()
 
+	// Report every kind's latest good reading, so a kind whose lookup failed
+	// this time keeps its series instead of vanishing.
+	byName := make(map[string]uint64, len(next))
+	for kind, dropped := range next {
+		byName[eventKindName(kind)] = dropped
+	}
 	w.metrics.SetRingBufferStats(stats.SizeBytes, stats.UnreadBytes, byName)
 	if total > 0 {
 		fields["dropped_events"] = total
