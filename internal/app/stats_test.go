@@ -356,3 +356,57 @@ func TestRingBufferWatcherWithoutThresholdNeverDegrades(t *testing.T) {
 		t.Fatal("a disabled threshold published a ring buffer health series")
 	}
 }
+
+func TestRingBufferWatcherKeepsHealthThroughFailedReads(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	metrics := telemetry.NewRegistry()
+	source := &fakeRingBufferStats{stats: ebpfmonitor.RingBufferStats{
+		Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 0, ebpfmonitor.EventExec: 0},
+	}}
+	watcher := newRingBufferWatcher(source, metrics, recorder, 10)
+	start := time.Unix(1_700_000_000, 0)
+	watcher.collectAt(start)
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 100, ebpfmonitor.EventExec: 0}
+	watcher.collectAt(start.Add(5 * time.Second))
+	if !watcher.isDegraded() {
+		t.Fatal("20 drops/s did not degrade health")
+	}
+
+	// A failed lookup must not read as an interval without drops.
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventExec: 0}
+	source.err = errors.New("lookup failed")
+	watcher.collectAt(start.Add(10 * time.Second))
+	if !watcher.isDegraded() || metrics.Healthy() {
+		t.Fatal("a failed read restored health")
+	}
+
+	// Drops seen by a partial read count toward the next complete one:
+	// 40 exec drops over the 10s since the last complete read is 4/s.
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventExec: 40}
+	watcher.collectAt(start.Add(12 * time.Second))
+	source.err = nil
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 100, ebpfmonitor.EventExec: 40}
+	watcher.collectAt(start.Add(15 * time.Second))
+	if watcher.isDegraded() || !metrics.Healthy() {
+		t.Fatal("a complete read at 4 drops/s did not restore health")
+	}
+
+	// And they can keep it degraded: 150 drops across a failed read and a
+	// complete one, over 10s, is 15/s.
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 250, ebpfmonitor.EventExec: 40}
+	watcher.collectAt(start.Add(20 * time.Second))
+	if !watcher.isDegraded() {
+		t.Fatal("15 drops/s did not degrade health")
+	}
+	source.err = errors.New("lookup failed")
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 350}
+	watcher.collectAt(start.Add(25 * time.Second))
+	source.err = nil
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 400, ebpfmonitor.EventExec: 40}
+	watcher.collectAt(start.Add(30 * time.Second))
+	if !watcher.isDegraded() {
+		t.Fatal("drops seen during a failed read were forgotten")
+	}
+}

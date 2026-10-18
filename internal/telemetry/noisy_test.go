@@ -115,3 +115,27 @@ func TestParseAlertSnapshotHandlesResetsAndEscapes(t *testing.T) {
 		t.Fatalf("escaped multi-severity rule = %+v", report.Rules[1])
 	}
 }
+
+func TestRestartedBetweenCatchesRestartsWithLongerUptime(t *testing.T) {
+	t.Parallel()
+
+	snapshot := func(uptime time.Duration) AlertSnapshot { return AlertSnapshot{Uptime: uptime} }
+	for _, test := range []struct {
+		first, second, elapsed, latency time.Duration
+		want                            bool
+	}{
+		// A restart early in a 10-minute window leaves the new daemon with
+		// more uptime than the first scrape saw, but less than expected.
+		{30 * time.Second, 9 * time.Minute, 10 * time.Minute, 0, true},
+		{30 * time.Second, 10 * time.Second, 10 * time.Minute, 0, true},
+		// Whole-second truncation and scrape latency are not restarts.
+		{30 * time.Second, 10*time.Minute + 29*time.Second, 10 * time.Minute, 0, false},
+		{30 * time.Second, 10*time.Minute + 25*time.Second, 10 * time.Minute, 4 * time.Second, false},
+		{30 * time.Second, 10*time.Minute + 31*time.Second, 10 * time.Minute, 0, false},
+	} {
+		if got := restartedBetween(snapshot(test.first), snapshot(test.second), test.elapsed, test.latency); got != test.want {
+			t.Errorf("restartedBetween(uptime %s then %s, elapsed %s, latency %s) = %t, want %t",
+				test.first, test.second, test.elapsed, test.latency, got, test.want)
+		}
+	}
+}

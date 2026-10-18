@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
@@ -133,7 +134,9 @@ func closePinnedMapHandles(maps map[string]*ebpf.Map) error {
 	return errors.Join(errs...)
 }
 
-func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPrograms) error {
+// pinLoadedObjects pins every loaded map and program. Existing map pins are
+// kept, as the maps were adopted from them, except those named in replace.
+func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPrograms, replace []string) error {
 	if !opts.PinEBPF {
 		return nil
 	}
@@ -155,6 +158,12 @@ func pinLoadedObjects(opts Options, objects monitorObjects, optional optionalPro
 			continue
 		}
 		if pinExists(path) {
+			if !slices.Contains(replace, name) {
+				continue
+			}
+			if err := replacePinnedMap(path, target); err != nil {
+				return fmt.Errorf("replace pinned map %s: %w", name, err)
+			}
 			continue
 		}
 		if err := target.Pin(path); err != nil {
@@ -216,22 +225,34 @@ func writePinMetadata(root, selectedObject string) error {
 }
 
 // discardResizedRingBuffer stops adopting a pinned events ring buffer whose
-// size differs from the requested one, and removes its pin so the new buffer
-// is pinned in its place. Programs still attached keep the old buffer until
+// size differs from the requested one, and returns the pins that
+// pinLoadedObjects must then replace. The old pin stays in place until the
+// new buffer has loaded. Programs still attached keep the old buffer until
 // their links are updated; events queued in it are lost.
-func discardResizedRingBuffer(opts Options, pinned map[string]*ebpf.Map, size uint32) error {
+func discardResizedRingBuffer(pinned map[string]*ebpf.Map, size uint32) ([]string, error) {
 	events, ok := pinned["events"]
 	if !ok || !ringBufferResized(events.MaxEntries(), size) {
-		return nil
+		return nil, nil
 	}
 	delete(pinned, "events")
-	path := filepath.Join(opts.pinPath(), "maps", "events")
-	removeErr := os.Remove(path)
-	if errors.Is(removeErr, os.ErrNotExist) {
-		removeErr = nil
+	if err := events.Close(); err != nil {
+		return nil, fmt.Errorf("release resized pinned ring buffer: %w", err)
 	}
-	if err := errors.Join(events.Close(), removeErr); err != nil {
-		return fmt.Errorf("replace resized pinned ring buffer: %w", err)
+	return []string{"events"}, nil
+}
+
+// replacePinnedMap pins target beside the existing pin and renames it over
+// that pin, so the path names the old map until the new one is pinned.
+func replacePinnedMap(path string, target interface{ Pin(string) error }) error {
+	staging := path + ".new"
+	if err := os.Remove(staging); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale staged pin %s: %w", staging, err)
+	}
+	if err := target.Pin(staging); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, path); err != nil {
+		return errors.Join(err, os.Remove(staging))
 	}
 	return nil
 }

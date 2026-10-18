@@ -20,6 +20,9 @@ const (
 	detectionSuppressedMetric = "traceguard_detection_suppressed_total"
 	uptimeMetric              = "traceguard_uptime_seconds"
 	maxMetricsResponseBytes   = 32 << 20
+	// uptimeSlack absorbs whole-second uptime truncation and the gap between
+	// a scrape returning and the daemon rendering it.
+	uptimeSlack = 2 * time.Second
 )
 
 // AlertSnapshot holds the detection counters from one metrics scrape.
@@ -74,6 +77,7 @@ func ReportNoisyRules(ctx context.Context, cfg NoisyRulesConfig, out io.Writer) 
 	if err != nil {
 		return err
 	}
+	firstAt := time.Now()
 	if cfg.Window <= 0 {
 		return WriteNoisyRules(out, RankNoisyRules(AlertSnapshot{}, first, first.Uptime, true))
 	}
@@ -84,15 +88,24 @@ func ReportNoisyRules(ctx context.Context, cfg NoisyRulesConfig, out io.Writer) 
 		return ctx.Err()
 	case <-timer.C:
 	}
+	secondStart := time.Now()
 	second, err := ScrapeAlerts(ctx, client, url)
 	if err != nil {
 		return err
 	}
-	if second.Uptime < first.Uptime {
+	secondAt := time.Now()
+	if restartedBetween(first, second, secondStart.Sub(firstAt), secondAt.Sub(secondStart)) {
 		// The daemon restarted between scrapes, so its counters did too.
 		return WriteNoisyRules(out, RankNoisyRules(AlertSnapshot{}, second, second.Uptime, true))
 	}
 	return WriteNoisyRules(out, RankNoisyRules(first, second, cfg.Window, false))
+}
+
+// restartedBetween reports whether the daemon restarted between two scrapes
+// elapsed apart: its uptime then grew by less than the wall time that passed,
+// allowing for truncation and the second scrape's own latency.
+func restartedBetween(first, second AlertSnapshot, elapsed, latency time.Duration) bool {
+	return second.Uptime+uptimeSlack+latency < first.Uptime+elapsed
 }
 
 func metricsURL(addr string) string {

@@ -1820,3 +1820,61 @@ func TestRecorderFirstSeenDNSKeysOnDomainAndWorkload(t *testing.T) {
 		t.Fatalf("log line count = %d, want 5", len(lines))
 	}
 }
+
+func TestRecorderFirstSeenDNSIgnoresTransportAndAttributionSource(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	kernel := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"uid_source": "kernel", "uid": uint32(1000), "program": "curl", "cgroup_id": uint64(7),
+	}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", kernel) {
+		t.Fatal("first query not recorded")
+	}
+	retry := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "tcp", "current_exe": "/usr/bin/curl",
+		"uid_source": "kernel", "uid": uint32(1000), "program": "curl", "cgroup_id": uint64(7),
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", retry) {
+		t.Fatal("a TCP retry of the same query was recorded again")
+	}
+	cached := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"identity_source": "socket-cache", "cached_uid": uint32(1000), "cached_program": "curl", "cached_cgroup_id": uint64(7),
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", cached) {
+		t.Fatal("the same query attributed from the socket cache was recorded again")
+	}
+	other := map[string]any{
+		"event": "dns", "domain": "example.com", "transport": "udp", "current_exe": "/usr/bin/curl",
+		"identity_source": "socket-cache", "cached_uid": uint32(1001), "cached_program": "curl", "cached_cgroup_id": uint64(7),
+	}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", other) {
+		t.Fatal("a query from another user was suppressed")
+	}
+}
+
+func TestRecorderFirstSeenModesAreBoundedApart(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	timestamp := time.Date(2026, time.April, 3, 12, 0, 0, 0, time.UTC)
+	query := map[string]any{"event": "dns", "domain": "example.com", "current_exe": "/usr/bin/curl"}
+	if !recorder.InfoFirstSeenDNSAt(timestamp, "dns", query) {
+		t.Fatal("first query not recorded")
+	}
+	// Fill the file audit set past its bound; the DNS context must survive.
+	for index := range maxDedupeStates + 10 {
+		recorder.InfoFirstSeenFileAuditAt(timestamp, "file_access", map[string]any{
+			"event": "file_access", "requested_path": fmt.Sprintf("/tmp/%d", index), "current_exe": "/usr/bin/cat",
+		})
+	}
+	if recorder.InfoFirstSeenDNSAt(timestamp, "dns", query) {
+		t.Fatal("file audit churn evicted a DNS context")
+	}
+	if got := len(recorder.firstSeenFileAudit); got != maxDedupeStates {
+		t.Fatalf("file audit contexts = %d, want the %d bound", got, maxDedupeStates)
+	}
+}

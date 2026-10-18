@@ -53,8 +53,9 @@ const ringBufferHealthComponent = "ringbuf"
 // or before a failed read, are exported but not reported as new loss.
 //
 // With a positive unhealthyDropRate, the watcher also marks health degraded
-// while drops between two collections exceed that many events per second,
-// and restores it after a collection at or below the rate.
+// while drops between two complete collections exceed that many events per
+// second, and restores it after one at or below the rate. A failed or partial
+// read leaves health alone; its drops count toward the next complete one.
 type ringBufferWatcher struct {
 	source            ringBufferStatsSource
 	metrics           *telemetry.Registry
@@ -66,6 +67,7 @@ type ringBufferWatcher struct {
 	dropped   uint64
 	unread    int
 	collected time.Time
+	pending   uint64
 	degraded  bool
 }
 
@@ -104,7 +106,7 @@ func (w *ringBufferWatcher) collectAt(now time.Time) {
 	w.baseline = next
 	w.dropped += total
 	w.unread = stats.UnreadBytes
-	rate, transition := w.updateHealthLocked(now, total)
+	rate, transition := w.updateHealthLocked(now, total, err == nil)
 	w.mu.Unlock()
 
 	// Report every kind's latest good reading, so a kind whose lookup failed
@@ -143,19 +145,28 @@ const (
 	healthRestored
 )
 
-// updateHealthLocked compares the drop rate since the previous collection
-// with the threshold. The first collection only starts the interval.
-func (w *ringBufferWatcher) updateHealthLocked(now time.Time, dropped uint64) (float64, healthTransition) {
+// updateHealthLocked compares the drop rate since the previous complete
+// collection with the threshold. The first complete collection only starts
+// the interval. An incomplete one, whose missing counters would read as no
+// drops, keeps the current verdict and carries its drops forward, so the next
+// complete collection measures the whole span.
+func (w *ringBufferWatcher) updateHealthLocked(now time.Time, dropped uint64, complete bool) (float64, healthTransition) {
 	if w.unhealthyDropRate <= 0 {
+		return 0, healthUnchanged
+	}
+	w.pending += dropped
+	if !complete {
 		return 0, healthUnchanged
 	}
 	previous := w.collected
 	w.collected = now
 	elapsed := now.Sub(previous).Seconds()
 	if previous.IsZero() || elapsed <= 0 {
+		w.pending = 0
 		return 0, healthUnchanged
 	}
-	rate := float64(dropped) / elapsed
+	rate := float64(w.pending) / elapsed
+	w.pending = 0
 	degraded := rate > w.unhealthyDropRate
 	if degraded == w.degraded {
 		return rate, healthUnchanged

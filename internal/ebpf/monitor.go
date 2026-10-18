@@ -451,12 +451,19 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		connectionDedupeWindow: opts.ConnectionDedupeWindow, connectionDedupeMinBytes: opts.ConnectionDedupeMinBytes,
 		ringBufferSize: opts.RingBufferSize,
 	}
+	// Reject an unusable size before touching pinned state.
+	if opts.RingBufferSize != 0 {
+		if err := validRingBufferSize(opts.RingBufferSize); err != nil {
+			return nil, closeStatsOnError(err)
+		}
+	}
 	loadOptions := newCollectionOptions()
 	pinnedMaps, pinLayout, err := preparePinnedMaps(opts)
 	if err != nil {
 		return nil, closeStatsOnError(err)
 	}
-	if err := discardResizedRingBuffer(opts, pinnedMaps, opts.RingBufferSize); err != nil {
+	replacedPins, err := discardResizedRingBuffer(pinnedMaps, opts.RingBufferSize)
+	if err != nil {
 		return nil, closeStatsOnError(errors.Join(err, closePinnedMapHandles(pinnedMaps)))
 	}
 	loadOptions.MapReplacements = pinnedMaps
@@ -505,7 +512,7 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return closeStatsOnError(cause)
 	}
 	loadOptions.MapReplacements = nil
-	if err := pinLoadedObjects(opts, objects, optional); err != nil {
+	if err := pinLoadedObjects(opts, objects, optional, replacedPins); err != nil {
 		return nil, failAfterPin(errors.Join(err, optional.Close(), objects.Close()))
 	}
 
