@@ -111,6 +111,11 @@ func parsePrefix(text string) (netip.Prefix, error) {
 		if err != nil {
 			return netip.Prefix{}, fmt.Errorf("invalid address prefix %q", text)
 		}
+		if prefix.Addr().Is4In6() && prefix.Bits() < 96 {
+			// It would reach beyond ::ffff:0:0/96, and unmapped it would
+			// cover every IPv4 address.
+			return netip.Prefix{}, fmt.Errorf("IPv4-mapped prefix %q is shorter than /96", text)
+		}
 		return netip.PrefixFrom(prefix.Addr().Unmap(), unmappedBits(prefix)).Masked(), nil
 	}
 	address, err := netip.ParseAddr(text)
@@ -121,10 +126,11 @@ func parsePrefix(text string) (netip.Prefix, error) {
 	return netip.PrefixFrom(address, address.BitLen()), nil
 }
 
-// unmappedBits converts an IPv4-mapped IPv6 prefix length to IPv4.
+// unmappedBits converts an IPv4-mapped IPv6 prefix length, at least /96, to
+// IPv4.
 func unmappedBits(prefix netip.Prefix) int {
 	if prefix.Addr().Is4In6() {
-		return max(prefix.Bits()-96, 0)
+		return prefix.Bits() - 96
 	}
 	return prefix.Bits()
 }

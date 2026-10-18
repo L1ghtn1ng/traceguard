@@ -1226,7 +1226,7 @@ threat_intel:
 | --- | --- | --- |
 | `id` | — | Feed ID, at most 46 characters; alerts carry `detection_rule_id: threat_intel.<id>`. |
 | `path` | — | Clean absolute path to the feed file. |
-| `type` | — | `domains`, one hostname per line, or `addresses`, one IP address or CIDR prefix per line. |
+| `type` | — | `domains`, one hostname per line, or `addresses`, one IP address or CIDR prefix per line. IPv4-mapped IPv6 entries are read as IPv4, and a mapped prefix shorter than `/96` is invalid. |
 | `severity` | `warning` | Alert severity. |
 | `block` | `false` | Also enforce the feed in the kernel. See below. |
 | `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup, by event-time or socket-cache cgroup ID. |

@@ -37,9 +37,9 @@ func TestParseFeedsNormalizesAndDeduplicates(t *testing.T) {
 	if !slices.Equal(domains.Domains, []string{"c2.example", "evil.example"}) || len(domains.Digest) != 64 {
 		t.Fatalf("domains = %v digest %q", domains.Domains, domains.Digest)
 	}
-	addresses := mustParse(t, addressFeed("ips", false), "203.0.113.7\n198.51.100.0/24\n198.51.100.9/24\n::ffff:192.0.2.1\n2001:db8::/32\n")
+	addresses := mustParse(t, addressFeed("ips", false), "203.0.113.7\n198.51.100.0/24\n198.51.100.9/24\n::ffff:192.0.2.1\n::ffff:192.0.3.0/120\n2001:db8::/32\n")
 	want := []netip.Prefix{
-		netip.MustParsePrefix("192.0.2.1/32"), netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("192.0.2.1/32"), netip.MustParsePrefix("192.0.3.0/24"), netip.MustParsePrefix("198.51.100.0/24"),
 		netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("203.0.113.7/32"),
 	}
 	if !slices.Equal(addresses.Prefixes, want) {
@@ -55,6 +55,10 @@ func TestParseRejectsInvalidIndicators(t *testing.T) {
 	}
 	if _, err := Parse(addressFeed("ips", false), []byte("300.1.1.1\n")); err == nil || !strings.Contains(err.Error(), "invalid address") {
 		t.Fatalf("invalid address error = %v", err)
+	}
+	// Unmapped, this would become 0.0.0.0/0 and match every IPv4 address.
+	if _, err := Parse(addressFeed("ips", true), []byte("::ffff:192.0.2.0/64\n")); err == nil || !strings.Contains(err.Error(), "shorter than /96") {
+		t.Fatalf("short mapped prefix error = %v", err)
 	}
 }
 
