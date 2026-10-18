@@ -8,8 +8,8 @@ Security fixes are applied to the latest patch release in the current stable ser
 
 | Version | Supported |
 | --- | --- |
-| `1.7.x` | Yes |
-| `< 1.7.0` | No |
+| `1.8.x` | Yes |
+| `< 1.8.0` | No |
 
 ## Reporting a Vulnerability
 
