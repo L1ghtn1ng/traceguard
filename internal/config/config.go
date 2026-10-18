@@ -16,6 +16,7 @@ const (
 	defaultPolicyRefresh   = 5 * time.Minute
 	defaultCgroupPath      = "/sys/fs/cgroup"
 	defaultPolicyCachePath = "/var/lib/traceguard/policy.yaml"
+	defaultResponseState   = "/var/lib/traceguard/responses.json"
 	defaultLogPath         = "/var/log/traceguard/traceguard.log"
 	defaultLogFormat       = "json"
 	defaultMetricsAddr     = "127.0.0.1:9091"
@@ -68,6 +69,7 @@ type Config struct {
 	EventSyslogCAPath            string
 	EventSchema                  string
 	ResponseMode                 string
+	ResponseStatePath            string
 	ProcessCacheTTL              time.Duration
 	FileAudit                    bool
 	SecurityEvents               bool
@@ -188,6 +190,7 @@ func Parse() (Config, error) {
 	fs.DurationVar(&cfg.EventSyslogTimeout, "event-syslog-timeout", syslogTimeoutDefault, "remote syslog connection/write timeout")
 	fs.StringVar(&cfg.EventSyslogCAPath, "event-syslog-ca-path", envString("TRACEGUARD_EVENT_SYSLOG_CA_PATH", ""), "path to an optional CA bundle for syslog+tls")
 	fs.StringVar(&cfg.ResponseMode, "response-mode", envString("TRACEGUARD_RESPONSE_MODE", "dry-run"), "how policy responses run: off, dry-run (record only), or enforce")
+	fs.StringVar(&cfg.ResponseStatePath, "response-state-path", envString("TRACEGUARD_RESPONSE_STATE_PATH", defaultResponseState), "absolute path that records frozen cgroups so a restart can thaw them; empty disables it")
 	fs.StringVar(&cfg.EventSchema, "event-schema", envString("TRACEGUARD_EVENT_SCHEMA", "traceguard"), "record format for HTTPS export and syslog: traceguard or ocsf")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", processCacheDefault, "how long to cache process metadata from /proc")
 	fs.BoolVar(&cfg.FileAudit, "file-audit", fileAuditDefault, "emit file access audit events for open-style syscalls")
@@ -258,6 +261,9 @@ func Parse() (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.PolicyCachePath) {
 		return Config{}, errors.New("policy-cache-path must be an absolute path")
+	}
+	if cfg.ResponseStatePath != "" && !filepath.IsAbs(cfg.ResponseStatePath) {
+		return Config{}, errors.New("response-state-path must be an absolute path")
 	}
 	if err := resolveAuthorizationFile("policy-authorization", cfg.PolicyAuthorization, &cfg.PolicyAuthorizationFile); err != nil {
 		return Config{}, err

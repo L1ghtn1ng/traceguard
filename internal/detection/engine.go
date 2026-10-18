@@ -45,7 +45,7 @@ type Engine struct {
 	rules             []compiledRule
 	sequences         []compiledSequence
 	sequenceStates    map[groupKey]*sequenceState
-	sequenceAlerts    map[groupKey]time.Time
+	sequenceAlerts    map[groupKey]cooldownRecord
 	maxSequenceStates int
 	exceptions        []policy.DetectionException
 	suppressed        map[string]uint64
@@ -92,7 +92,7 @@ func New(custom []policy.DetectionRule, disabled []string) (*Engine, error) {
 	return &Engine{
 		rules:             compiled.rules,
 		sequenceStates:    make(map[groupKey]*sequenceState),
-		sequenceAlerts:    make(map[groupKey]time.Time),
+		sequenceAlerts:    make(map[groupKey]cooldownRecord),
 		maxSequenceStates: policy.MaxSequenceStates,
 		suppressed:        make(map[string]uint64),
 		groups:            make(map[groupKey]*groupState),
@@ -203,7 +203,7 @@ func (e *Engine) Install(compiled CompiledRules) {
 	e.rules = compiled.rules
 	e.sequences = compiled.sequences
 	e.sequenceStates = make(map[groupKey]*sequenceState)
-	e.sequenceAlerts = make(map[groupKey]time.Time)
+	e.sequenceAlerts = make(map[groupKey]cooldownRecord)
 	e.exceptions = compiled.exceptions
 	e.suppressed = suppressed
 	e.groups = make(map[groupKey]*groupState)

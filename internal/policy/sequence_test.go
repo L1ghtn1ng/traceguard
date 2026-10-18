@@ -75,3 +75,23 @@ func TestMergeDisablesSequencesByID(t *testing.T) {
 		t.Fatalf("disabled sequence survived the merge: %+v", bundle.DetectionSequences)
 	}
 }
+
+func TestMergeOverlayRuleReplacesBaseSequence(t *testing.T) {
+	t.Parallel()
+
+	base, err := Parse([]byte(validSequence))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay, err := Parse([]byte("version: 1\ndetections:\n  - id: shell-then-egress\n    severity: warning\n    events: [exec]\n    message: replaced\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := Merge(base, overlay)
+	if err != nil {
+		t.Fatalf("Merge returned error: %v", err)
+	}
+	if len(bundle.DetectionSequences) != 0 || len(bundle.DetectionRules) != 1 || bundle.DetectionRules[0].Message != "replaced" {
+		t.Fatalf("sequences = %+v rules = %+v, want the overlay rule only", bundle.DetectionSequences, bundle.DetectionRules)
+	}
+}

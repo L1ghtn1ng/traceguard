@@ -317,7 +317,7 @@ func (s alertSink) record(eventName string, alerts []detection.Alert) {
 		s.metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
 		s.recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))
 		if s.responder != nil {
-			s.responder.Handle(alert)
+			s.responder.Submit(alert)
 		}
 	}
 }

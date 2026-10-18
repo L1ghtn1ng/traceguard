@@ -155,7 +155,7 @@ func Merge(base, overlay Document) (Bundle, error) {
 		},
 		DetectionRules:      mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
 		DetectionExceptions: mergeExceptionsByID(base.DetectionExceptions, overlay.DetectionExceptions),
-		DetectionSequences:  mergeSequencesByID(base.DetectionSequences, overlay.DetectionSequences, disabled),
+		DetectionSequences:  mergeSequencesByID(base.DetectionSequences, overlay.DetectionSequences, overlayIDs, disabled),
 		FileIntegrity:       mergeFileIntegrity(base.FileIntegrity, overlay.FileIntegrity),
 		ThreatIntel:         mergeThreatIntel(base.ThreatIntel, overlay.ThreatIntel),
 		Responses:           mergeResponsesByID(base.Responses, overlay.Responses),

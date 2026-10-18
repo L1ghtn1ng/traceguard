@@ -151,6 +151,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	ringBuffer.collect()
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, func(time.Time) { ringBuffer.collect() }) })
 	alerts := alertSink{recorder: recorder, metrics: metrics, responder: responder}
+	workers.Go(func() { responder.Run(ctx) })
 	workers.Go(func() {
 		runEvery(ctx, ringBufferStatsPollInterval, func(now time.Time) {
 			responder.Expire(now)
@@ -169,7 +170,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detections, integrity)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
-	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel, responder)
+	feedLoader := threatintel.NewLoader()
+	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel, responder, feedLoader)
 
 	var yamlManager *policyconfig.Manager
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
@@ -185,7 +187,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			ClientKeyPath:     cfg.PolicyClientKey,
 			SigningKeyPath:    cfg.PolicySigningKey,
 			Validate: func(bundle policyconfig.Bundle) error {
-				return validateBundleForMode(cfg, bundle)
+				return validateBundleForMode(cfg, feedLoader, bundle)
 			},
 		})
 		if err != nil {
@@ -266,7 +268,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 	if yamlManager != nil {
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
-		feeds := &feedWatcher{source: policyController.Source, apply: policyController.ApplyBundle, metrics: metrics, recorder: recorder}
+		feeds := &feedWatcher{source: policyController.Source, refresh: policyController.RefreshFeeds, metrics: metrics, recorder: recorder}
 		feeds.collect(time.Now())
 		workers.Go(func() { runEvery(ctx, threatIntelPollInterval, feeds.collect) })
 	}

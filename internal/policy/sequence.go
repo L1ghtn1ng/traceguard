@@ -107,11 +107,14 @@ func (s DetectionSequence) FinalStepRule() DetectionRule {
 	return DetectionRule{ID: s.ID, Events: last.Events, Match: last.Match}
 }
 
-// mergeSequencesByID lets an overlay sequence replace a base one with the
-// same ID, and drops disabled IDs and disabled sequences.
-func mergeSequencesByID(base, overlay []DetectionSequence, disabled map[string]struct{}) []DetectionSequence {
+// mergeSequencesByID lets an overlay sequence or rule replace a base
+// sequence with the same ID, and drops disabled IDs and disabled sequences.
+func mergeSequencesByID(base, overlay []DetectionSequence, overlayIDs, disabled map[string]struct{}) []DetectionSequence {
 	merged := make(map[string]DetectionSequence, len(base)+len(overlay))
 	for _, sequence := range base {
+		if _, replaced := overlayIDs[sequence.ID]; replaced {
+			continue
+		}
 		merged[sequence.ID] = sequence
 	}
 	for _, sequence := range overlay {

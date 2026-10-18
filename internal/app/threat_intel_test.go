@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
@@ -28,10 +30,10 @@ func TestFeedWatcherReappliesOnlyWhenFeedsChange(t *testing.T) {
 	failing := false
 	watcher := &feedWatcher{
 		source: func() policyconfig.Bundle { return source },
-		apply: func(policyconfig.Bundle) error {
+		refresh: func() error {
 			applied++
 			if failing {
-				return errors.New("feed half written")
+				return errors.New("blocking feed exceeds policy limits")
 			}
 			return nil
 		},
@@ -98,5 +100,39 @@ func TestValidateResponseRules(t *testing.T) {
 	bundle.Responses[0].Rules = append(bundle.Responses[0].Rules, "typo.rule")
 	if err := validateResponseRules(bundle); err == nil || !strings.Contains(err.Error(), `unknown rule "typo.rule"`) {
 		t.Fatalf("unknown rule error = %v", err)
+	}
+}
+
+func TestPolicyDigestIncludesFeedContents(t *testing.T) {
+	t.Parallel()
+
+	bundle := policyconfig.Bundle{DNS: blocklist.Rules{BlockDomains: []string{"example.com"}}}
+	plain, err := bundle.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest, err := policyDigest(bundle, ""); err != nil || digest != plain {
+		t.Fatalf("digest without feeds = %q, %v; want the bundle digest %q", digest, err, plain)
+	}
+	first, _ := policyDigest(bundle, "bad=aa")
+	second, _ := policyDigest(bundle, "bad=bb")
+	if first == plain || first == second {
+		t.Fatalf("feed contents did not change the digest: %q %q %q", plain, first, second)
+	}
+}
+
+func TestDetectionInputsIgnoreKernelRules(t *testing.T) {
+	t.Parallel()
+
+	base := policyconfig.Bundle{DetectionRules: []policyconfig.DetectionRule{{ID: "r"}}}
+	withBlocks := base
+	withBlocks.DNS.BlockSuffixes = []string{"evil.example"}
+	if !reflect.DeepEqual(detectionInputs(base), detectionInputs(withBlocks)) {
+		t.Fatal("a blocking feed's DNS rules counted as a detection change")
+	}
+	changed := base
+	changed.DetectionRules = []policyconfig.DetectionRule{{ID: "other"}}
+	if reflect.DeepEqual(detectionInputs(base), detectionInputs(changed)) {
+		t.Fatal("a changed detection rule was not a detection change")
 	}
 }

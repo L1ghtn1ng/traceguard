@@ -61,7 +61,7 @@ func TestSequenceAlertsWhenStepsMatchInOrderForOneProcess(t *testing.T) {
 		t.Fatal("another process completed the sequence")
 	}
 	alerts := engine.Evaluate(sequenceEvent(4, "connection", 10, 1, outbound))
-	if len(alerts) != 1 || alerts[0].RuleID != "shell-then-egress" || alerts[0].Count != 2 || alerts[0].Window != time.Minute {
+	if len(alerts) != 1 || alerts[0].ID == "" || alerts[0].RuleID != "shell-then-egress" || alerts[0].Count != 2 || alerts[0].Window != time.Minute {
 		t.Fatalf("alerts = %+v", alerts)
 	}
 	if alerts[0].Fields["sequence_started"] != time.Unix(2, 0).UTC().Format(time.RFC3339Nano) || alerts[0].Techniques[0] != "T1059.004" {
@@ -145,5 +145,60 @@ func TestSequenceSkipsEventsWithoutIdentity(t *testing.T) {
 	}
 	if _, ok := sequenceKey("s", policy.SequenceKeyCgroup, map[string]any{}); ok {
 		t.Fatal("cgroup key built without cgroup_id")
+	}
+}
+
+func TestSequenceLaterFirstStepCanComplete(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	engine.Evaluate(sequenceEvent(0, "exec", 10, 1, shellExec))
+	engine.Evaluate(sequenceEvent(40, "exec", 10, 1, shellExec))
+	alerts := engine.Evaluate(sequenceEvent(70, "connection", 10, 1, outbound))
+	if len(alerts) != 1 || alerts[0].Fields["sequence_started"] != time.Unix(40, 0).UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("alerts = %+v, want one starting at the later first step", alerts)
+	}
+}
+
+func TestSequenceRejectsStepsBeforeThePreviousStep(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	engine.Evaluate(sequenceEvent(10, "exec", 10, 1, shellExec))
+	if alerts := engine.Evaluate(sequenceEvent(5, "connection", 10, 1, outbound)); len(alerts) != 0 {
+		t.Fatalf("an earlier event completed the sequence: %+v", alerts)
+	}
+}
+
+func TestSequencePruningUsesEachSequencesWindow(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	started := time.Unix(0, 0)
+	engine.sequenceStates[groupKey{1}] = &sequenceState{window: time.Minute, partial: []partialMatch{{started: started, last: started, ok: true}}}
+	engine.sequenceStates[groupKey{2}] = &sequenceState{window: time.Hour, partial: []partialMatch{{started: started, last: started, ok: true}}}
+	engine.pruneSequenceStates(started.Add(2 * time.Minute))
+	if _, short := engine.sequenceStates[groupKey{1}]; short {
+		t.Fatal("a one-minute partial match outlived its window")
+	}
+	if _, long := engine.sequenceStates[groupKey{2}]; !long {
+		t.Fatal("a one-hour partial match was pruned inside its window")
+	}
+}
+
+func TestSequenceCooldownHoldsWhenRecordsAreFull(t *testing.T) {
+	t.Parallel()
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, time.Hour))
+	engine.maxSequenceStates = 1
+	complete := func(at int64, pid uint32) int {
+		engine.Evaluate(sequenceEvent(at, "exec", pid, 1, shellExec))
+		return len(engine.Evaluate(sequenceEvent(at+1, "connection", pid, 1, outbound)))
+	}
+	if complete(1, 10) != 1 || complete(10, 20) != 1 {
+		t.Fatal("first completions did not alert")
+	}
+	if got := complete(20, 20); got != 0 {
+		t.Fatalf("a key in cooldown alerted %d times after the records filled", got)
 	}
 }

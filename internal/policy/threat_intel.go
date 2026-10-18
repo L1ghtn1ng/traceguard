@@ -10,6 +10,10 @@ import (
 
 const (
 	MaxThreatIntelFeeds = 32
+	// MaxThreatIntelFeedIDLength keeps the egress rule IDs a blocking feed
+	// generates, threat_intel.<id>.<n> with n up to 3,907 for 1,000,000
+	// prefixes, within the 64-character rule ID limit.
+	MaxThreatIntelFeedIDLength = 64 - len("threat_intel.") - len(".0000")
 	// DefaultThreatIntelCooldown suppresses repeat alerts for one indicator
 	// and cgroup.
 	DefaultThreatIntelCooldown = 10 * time.Minute
@@ -64,6 +68,9 @@ func (t ThreatIntelPolicy) validate() error {
 	for index, feed := range t.Feeds {
 		if err := validateRuleID(feed.ID); err != nil {
 			return fmt.Errorf("feed %d: %w", index, err)
+		}
+		if len(feed.ID) > MaxThreatIntelFeedIDLength {
+			return fmt.Errorf("feed %q: id is longer than %d characters", feed.ID, MaxThreatIntelFeedIDLength)
 		}
 		if _, exists := ids[feed.ID]; exists {
 			return fmt.Errorf("duplicate feed id %q", feed.ID)

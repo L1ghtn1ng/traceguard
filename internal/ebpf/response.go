@@ -88,6 +88,32 @@ func (m *Monitor) UnblockPeer(address netip.Addr) error {
 	return nil
 }
 
+// ClearPeers removes every peer block, including any that an earlier run
+// left in a pinned map.
+func (m *Monitor) ClearPeers() error {
+	if m.objects.ResponsePeers == nil {
+		return errors.New("response peer map is unavailable")
+	}
+	var (
+		key      responsePeerKey
+		deadline uint64
+		keys     []responsePeerKey
+	)
+	entries := m.objects.ResponsePeers.Iterate()
+	for entries.Next(&key, &deadline) {
+		keys = append(keys, key)
+	}
+	if err := entries.Err(); err != nil {
+		return fmt.Errorf("list peer blocks: %w", err)
+	}
+	for _, key := range keys {
+		if err := m.objects.ResponsePeers.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("clear peer block: %w", err)
+		}
+	}
+	return nil
+}
+
 // ResponsePeerDrops returns packets dropped by peer blocks, by direction.
 func (m *Monitor) ResponsePeerDrops() (egress, ingress uint64, err error) {
 	if m.objects.ResponsePeerDrops == nil {

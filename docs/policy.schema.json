@@ -66,7 +66,7 @@
             "additionalProperties": false,
             "required": ["id", "path", "type"],
             "properties": {
-              "id": {"$ref": "#/$defs/rule_id"},
+              "id": {"allOf": [{"$ref": "#/$defs/rule_id"}, {"maxLength": 46}]},
               "path": {"type": "string", "pattern": "^/"},
               "type": {"enum": ["domains", "addresses"]},
               "severity": {"enum": ["debug", "informational", "notice", "warning", "error", "critical", "alert", "emergency"]},

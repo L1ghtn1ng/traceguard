@@ -37,6 +37,7 @@ func TestParseRejectsInvalidThreatIntelFeeds(t *testing.T) {
 		"bad type":      {"{id: a, path: /a.txt, type: hashes}", "type must be"},
 		"bad severity":  {"{id: a, path: /a.txt, type: domains, severity: high}", "unsupported severity"},
 		"bad id":        {"{id: A, path: /a.txt, type: domains}", "invalid rule id"},
+		"long id":       {"{id: " + strings.Repeat("a", 47) + ", path: /a.txt, type: domains}", "longer than 46"},
 	} {
 		if _, err := Parse([]byte("version: 1\nthreat_intel:\n  feeds:\n    - " + test.feed + "\n")); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Errorf("%s: error = %v, want %q", name, err, test.want)

@@ -5,6 +5,7 @@ package threatintel
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -234,6 +235,20 @@ func NewMatcher(feeds []Feed) *Matcher {
 	return m
 }
 
+// InheritCooldowns carries alert cooldowns over from the matcher this one
+// replaces, so reloading a feed does not repeat suppressed alerts.
+func (m *Matcher) InheritCooldowns(previous *Matcher) {
+	if previous == nil {
+		return
+	}
+	previous.mu.Lock()
+	cooldowns := maps.Clone(previous.cooldowns)
+	previous.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	maps.Copy(m.cooldowns, cooldowns)
+}
+
 // domainEvents and addressEvents carry the fields a matcher checks.
 var (
 	domainEvents  = []string{"dns", "blocked"}
@@ -270,7 +285,7 @@ func (m *Matcher) Evaluate(event detection.Event) []detection.Alert {
 	fields["threat_intel_feed"] = feed.ID
 	fields["threat_intel_indicator"] = match.value
 	return []detection.Alert{{
-		RuleID: feed.RuleID(), Severity: feed.AlertSeverity(),
+		ID: rand.Text(), RuleID: feed.RuleID(), Severity: feed.AlertSeverity(),
 		Message: "an event matched threat intelligence feed " + feed.ID,
 		Tags:    []string{"threat-intel", feed.Type}, Count: 1, Timestamp: event.Timestamp, Fields: fields,
 	}}
@@ -314,7 +329,12 @@ func (m *Matcher) allow(feed policy.ThreatIntelFeed, match indicator, event dete
 	if cooldown <= 0 {
 		return true
 	}
-	key := fmt.Sprintf("%s\x00%s\x00%v", feed.ID, match.value, event.Fields["cgroup_id"])
+	cgroup := event.Fields["cgroup_id"]
+	if cgroup == nil {
+		// Socket-cache attribution carries the cgroup separately.
+		cgroup = event.Fields["cached_cgroup_id"]
+	}
+	key := fmt.Sprintf("%s\x00%s\x00%v", feed.ID, match.value, cgroup)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if last, ok := m.cooldowns[key]; ok && event.Timestamp.Sub(last) < cooldown {

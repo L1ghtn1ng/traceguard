@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -23,11 +24,41 @@ type compiledStep struct {
 	excludeCIDRs []netip.Prefix
 }
 
-// sequenceState tracks one key's progress through one sequence.
+// sequenceState tracks one key's partial matches of one sequence. partial[i]
+// is the match with i+1 steps done that started latest, which is the one most
+// likely to finish within the window; a later first step therefore never
+// waits on an older one.
 type sequenceState struct {
-	next    int
-	started time.Time
+	window  time.Duration
+	partial []partialMatch
 }
+
+type partialMatch struct {
+	started, last time.Time
+	ok            bool
+}
+
+// expire drops partial matches whose window has passed and reports whether
+// any remain.
+func (s *sequenceState) expire(now time.Time) bool {
+	remaining := false
+	for index := range s.partial {
+		if s.partial[index].ok && now.Sub(s.partial[index].started) > s.window {
+			s.partial[index] = partialMatch{}
+		}
+		remaining = remaining || s.partial[index].ok
+	}
+	return remaining
+}
+
+// cooldownRecord is when a key's sequence last alerted and for how long that
+// suppresses another alert.
+type cooldownRecord struct {
+	at       time.Time
+	cooldown time.Duration
+}
+
+func (r cooldownRecord) until() time.Time { return r.at.Add(r.cooldown) }
 
 func compileSequences(sequences []policy.DetectionSequence) ([]compiledSequence, error) {
 	compiled := make([]compiledSequence, 0, len(sequences))
@@ -90,51 +121,22 @@ func (e *Engine) evaluateSequences(event Event, context *eventMatchContext) []Al
 		if !ok {
 			continue
 		}
-		state := e.sequenceStates[key]
-		if state != nil && event.Timestamp.Sub(state.started) > sequence.sequence.Within.Duration {
-			delete(e.sequenceStates, key)
-			state = nil
-		}
-		next := 0
-		if state != nil {
-			next = state.next
-		}
-		if !sequence.steps[next].matches(event.Name, context) {
+		started, completed := e.advanceSequence(sequence, key, event, context)
+		if !completed {
 			continue
 		}
-		if state == nil {
-			if len(e.sequenceStates) >= e.maxSequenceStates {
-				e.pruneSequenceStates(event.Timestamp)
-				if len(e.sequenceStates) >= e.maxSequenceStates {
-					continue
-				}
-			}
-			state = &sequenceState{started: event.Timestamp}
-			e.sequenceStates[key] = state
-		}
-		state.next++
-		if state.next < len(sequence.steps) {
-			continue
-		}
-		started := state.started
-		delete(e.sequenceStates, key)
 		if id, suppressed := suppressingException(sequence.exceptions, event.Timestamp, context); suppressed {
 			e.suppressed[id]++
 			continue
 		}
 		if cooldown := sequence.sequence.Cooldown.Duration; cooldown > 0 {
-			if last, ok := e.sequenceAlerts[key]; ok && event.Timestamp.Sub(last) < cooldown {
+			if last, ok := e.sequenceAlerts[key]; ok && event.Timestamp.Before(last.until()) {
 				continue
 			}
-			if len(e.sequenceAlerts) >= e.maxSequenceStates {
-				e.pruneSequenceStates(event.Timestamp)
-			}
-			if len(e.sequenceAlerts) < e.maxSequenceStates {
-				e.sequenceAlerts[key] = event.Timestamp
-			}
+			e.recordSequenceAlert(key, cooldownRecord{at: event.Timestamp, cooldown: cooldown})
 		}
 		alert := Alert{
-			RuleID: sequence.sequence.ID, Severity: sequence.sequence.Severity, Message: sequence.sequence.Message,
+			ID: rand.Text(), RuleID: sequence.sequence.ID, Severity: sequence.sequence.Severity, Message: sequence.sequence.Message,
 			Tags: slices.Clone(sequence.sequence.Tags), Tactics: slices.Clone(sequence.sequence.MITRE.Tactics),
 			Techniques: slices.Clone(sequence.sequence.MITRE.Techniques), Compliance: slices.Clone(sequence.sequence.Compliance),
 			Count: len(sequence.steps), Window: sequence.sequence.Within.Duration,
@@ -146,21 +148,84 @@ func (e *Engine) evaluateSequences(event Event, context *eventMatchContext) []Al
 	return alerts
 }
 
-// pruneSequenceStates drops progress older than every sequence's window and
-// cooldown records older than every cooldown.
-func (e *Engine) pruneSequenceStates(now time.Time) {
-	var longestWindow, longestCooldown time.Duration
-	for _, sequence := range e.sequences {
-		longestWindow = max(longestWindow, sequence.sequence.Within.Duration)
-		longestCooldown = max(longestCooldown, sequence.sequence.Cooldown.Duration)
+// advanceSequence applies one event to a key's partial matches and reports
+// the start of a match it completes. Steps are tried from last to first, so
+// one event advances a match by at most one step. A step must not precede
+// the step before it, and must fall within the window of the first.
+func (e *Engine) advanceSequence(sequence *compiledSequence, key groupKey, event Event, context *eventMatchContext) (time.Time, bool) {
+	window := sequence.sequence.Within.Duration
+	state := e.sequenceStates[key]
+	if state != nil && !state.expire(event.Timestamp) {
+		delete(e.sequenceStates, key)
+		state = nil
 	}
+	final := len(sequence.steps) - 1
+	for step := final; step >= 0; step-- {
+		if !sequence.steps[step].matches(event.Name, context) {
+			continue
+		}
+		candidate := partialMatch{started: event.Timestamp, last: event.Timestamp, ok: true}
+		if step > 0 {
+			if state == nil {
+				continue
+			}
+			previous := state.partial[step-1]
+			if !previous.ok || event.Timestamp.Before(previous.last) || event.Timestamp.Sub(previous.started) > window {
+				continue
+			}
+			candidate.started = previous.started
+		}
+		if step == final {
+			// A completed sequence starts over, so one run alerts once.
+			delete(e.sequenceStates, key)
+			return candidate.started, true
+		}
+		if state == nil {
+			if len(e.sequenceStates) >= e.maxSequenceStates {
+				e.pruneSequenceStates(event.Timestamp)
+				if len(e.sequenceStates) >= e.maxSequenceStates {
+					continue
+				}
+			}
+			state = &sequenceState{window: window, partial: make([]partialMatch, final)}
+			e.sequenceStates[key] = state
+		}
+		if current := state.partial[step]; !current.ok || !candidate.started.Before(current.started) {
+			state.partial[step] = candidate
+		}
+	}
+	return time.Time{}, false
+}
+
+// recordSequenceAlert stores a cooldown record. When the records are full
+// after pruning, the one that expires soonest makes room.
+func (e *Engine) recordSequenceAlert(key groupKey, record cooldownRecord) {
+	if _, ok := e.sequenceAlerts[key]; !ok && len(e.sequenceAlerts) >= e.maxSequenceStates {
+		e.pruneSequenceStates(record.at)
+		if len(e.sequenceAlerts) >= e.maxSequenceStates {
+			var soonest groupKey
+			var soonestUntil time.Time
+			for candidate, existing := range e.sequenceAlerts {
+				if soonestUntil.IsZero() || existing.until().Before(soonestUntil) {
+					soonest, soonestUntil = candidate, existing.until()
+				}
+			}
+			delete(e.sequenceAlerts, soonest)
+		}
+	}
+	e.sequenceAlerts[key] = record
+}
+
+// pruneSequenceStates drops partial matches past their own sequence's window
+// and cooldown records past their own cooldown.
+func (e *Engine) pruneSequenceStates(now time.Time) {
 	for key, state := range e.sequenceStates {
-		if now.Sub(state.started) > longestWindow {
+		if !state.expire(now) {
 			delete(e.sequenceStates, key)
 		}
 	}
-	for key, last := range e.sequenceAlerts {
-		if now.Sub(last) >= longestCooldown {
+	for key, record := range e.sequenceAlerts {
+		if !now.Before(record.until()) {
 			delete(e.sequenceAlerts, key)
 		}
 	}

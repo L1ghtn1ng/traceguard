@@ -1043,13 +1043,18 @@ Both keys come from the kernel's event-time snapshot, so every step must use
 events with that identity: DNS packet events, sockops, file integrity
 changes, and connection steps that may match inbound TCP are rejected.
 
-Each key advances one step at a time. An event that matches the next step
-moves it on; events that match no step, or a later step out of order, are
-ignored. When the window passes, progress resets. The alert carries the final
-event's fields, `threshold_count` as the step count, `threshold_window`, and
+An event advances a key's progress by at most one step, and only if it is no
+earlier than the step before it and within the window of the first step.
+Events that match no step, or a later step out of order, are ignored. For each
+number of completed steps a key keeps the match that started latest, so a new
+first step can complete even while an older one is waiting to expire. A
+completed sequence starts over. The alert carries the final event's fields,
+`threshold_count` as the step count, `threshold_window`, and
 `sequence_started`. Exceptions may name a sequence; their match is checked
 against the final event. At most 64 sequences and 16,384 in-progress keys are
-kept; when that is full, new sequences start only as old ones expire.
+kept, each until its own sequence's window passes; when that is full, new
+sequences start only as old ones expire. Cooldown records have the same limit;
+when it is full, the record closest to expiring makes room.
 
 ### Testing rules with replay
 
@@ -1218,16 +1223,20 @@ threat_intel:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `id` | — | Feed ID; alerts carry `detection_rule_id: threat_intel.<id>`. |
+| `id` | — | Feed ID, at most 46 characters; alerts carry `detection_rule_id: threat_intel.<id>`. |
 | `path` | — | Clean absolute path to the feed file. |
 | `type` | — | `domains`, one hostname per line, or `addresses`, one IP address or CIDR prefix per line. |
 | `severity` | `warning` | Alert severity. |
 | `block` | `false` | Also enforce the feed in the kernel. See below. |
-| `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup. |
+| `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup, by event-time or socket-cache cgroup ID. |
 
 Blank lines and text after `#` are ignored. A feed may hold up to 1,000,000
-indicators in up to 64 MiB, and a policy up to 32 feeds. A missing or invalid
-feed rejects the policy, so the previous policy stays active.
+indicators in up to 64 MiB, and a policy up to 32 feeds. A feed that is
+missing, unreadable, or invalid does not reject the policy, so it cannot stop
+TraceGuard from starting: it keeps its last good contents, or is empty until it
+can be read. TraceGuard records a `threat intel feed unavailable` error and sets
+`traceguard_policy_source_healthy{source="threat_intel"}` to `0` until every
+feed loads.
 
 A domain indicator matches the domain and its subdomains on `dns` and
 `blocked` events. An address indicator matches the peer address of
@@ -1245,10 +1254,13 @@ prefixes each. They follow the same enforcement mode as written policy:
 feeds count toward the DNS and egress rule limits, so a policy whose blocking
 feeds do not fit is rejected; keep large feeds alert-only.
 
-Feed files are checked for a changed size or modification time every minute
-and on `SIGHUP`. A change re-applies policy with the new contents, and the
-policy digest changes with it; a failed reload keeps the previous policy and
-is retried on the next check.
+Feed files are checked every minute and on `SIGHUP` for a changed inode, size,
+or modification or change time, so an atomic replace that keeps the size and
+timestamp is still seen; an unchanged feed is not re-read. A change re-applies
+policy with the new contents, and the policy digest changes with it. Detection
+rule thresholds, cooldowns, sequence progress, and feed alert cooldowns carry
+over. A reload that fails, such as one whose blocking feeds no longer fit the
+rule limits, keeps the previous policy and is retried on the next check.
 
 ## Responses
 
@@ -1295,15 +1307,27 @@ and multicast addresses are never blocked. Packets dropped are counted in
 such as `system.slice`, `init.scope`, and any cgroup containing TraceGuard.
 Alerts without an event-time `cgroup_id`, such as DNS packet events, skip it.
 
-A repeat alert for an active action extends it rather than stacking a second
-one, and at most 1,024 actions are active at once. Each action is undone when
-it expires, when its response leaves the policy, or when TraceGuard stops. An
-undo that fails stays tracked, and the expiry check, which runs every five
-seconds, retries it once its deadline has passed. Every step is recorded as an
-`event=response` record: `response applied` or `response would apply`,
-`response extended`, `response reverted` with its `reason` (`expired`,
-`policy_removed`, or `shutdown`), `response skipped` with its `reason`, and
-`response failed` or `response revert failed` with the error.
+An action's duration counts from when it is applied. A repeat alert for an
+active action extends it rather than stacking a second one; when several
+responses apply the same action to the same target, it lasts as long as the
+latest one asks and is listed under each `response_ids`. At most 1,024 actions
+are active at once. Responses run in the background, with up to 256 alerts
+waiting; an alert that finds the queue full is skipped. A cgroup that is
+refused, or has gone, is not rescanned for the same response until its
+deadline.
+
+Each action is undone when it expires, when every response holding it is
+removed from the policy or changed, or when TraceGuard stops. An undo that
+fails stays tracked, and the expiry check, which runs every five seconds,
+retries it once its deadline has passed; shutdown retries it twice more. After
+a crash, the next start clears every peer block and thaws the cgroups recorded
+in `-response-state-path` for the same boot. A thaw checks that the path still
+names the frozen cgroup, so a replacement at the same path is left alone.
+Every step is recorded as an `event=response` record: `response applied` or
+`response would apply`, `response extended`, `response reverted` with its
+`reason` (`expired`, `policy_removed`, `policy_changed`, `shutdown`, or
+`restart`), `response skipped` with its `reason`, and `response failed` or
+`response revert failed` with the error.
 `traceguard_response_actions_total{action,step}` and
 `traceguard_response_active` report the same.
 
@@ -1428,6 +1452,7 @@ trusted through its file ownership, and the signing key requires
 | `-heartbeat-interval` | `TRACEGUARD_HEARTBEAT_INTERVAL` | Interval between heartbeat events; defaults to `5m`, and `0` disables them. |
 | `-connection-dedupe-window` | `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` | Window for suppressing repeated connection and TCP retransmit events from the same flow; defaults to `1m`, at most `1h`, and `0` disables suppression. |
 | `-response-mode` | `TRACEGUARD_RESPONSE_MODE` | `dry-run` (default), `enforce`, or `off` for [responses](#responses). |
+| `-response-state-path` | `TRACEGUARD_RESPONSE_STATE_PATH` | Absolute path recording frozen cgroups so the next start can thaw them after a crash; defaults to `/var/lib/traceguard/responses.json`, and empty disables it. |
 | `-event-schema` | `TRACEGUARD_EVENT_SCHEMA` | Record format for HTTPS export and syslog: `traceguard` (default) or `ocsf` for OCSF 1.3.0 events. |
 | `-security-events` | `TRACEGUARD_SECURITY_EVENTS` | Attach the observe-only [security event](#security-events) tracepoints; enabled by default. |
 | `-replay` | — | Evaluate detection rules over an absolute-path JSONL archive and exit. See [Testing rules with replay](#testing-rules-with-replay). |

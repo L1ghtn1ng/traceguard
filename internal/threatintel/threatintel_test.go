@@ -85,7 +85,7 @@ func TestMatcherMatchesDomainsAndSubdomains(t *testing.T) {
 		return detection.Event{Timestamp: time.Unix(at, 0), Name: "dns", Fields: map[string]any{"domain": domain, "cgroup_id": cgroup}}
 	}
 	alerts := matcher.Evaluate(event(1, "Login.EVIL.example.", 1))
-	if len(alerts) != 1 || alerts[0].RuleID != "threat_intel.bad" || alerts[0].Severity != "warning" ||
+	if len(alerts) != 1 || alerts[0].ID == "" || alerts[0].RuleID != "threat_intel.bad" || alerts[0].Severity != "warning" ||
 		alerts[0].Fields["threat_intel_indicator"] != "evil.example" || alerts[0].Fields["threat_intel_feed"] != "bad" {
 		t.Fatalf("alerts = %+v", alerts)
 	}
@@ -166,5 +166,23 @@ func TestEnforceAddsBlockingFeedsWithinLimits(t *testing.T) {
 	large := mustParse(t, domainFeed("large", true), tooMany.String())
 	if _, err := Enforce(policy.Bundle{}, []Feed{large}); err == nil || !strings.Contains(err.Error(), "set block: false") {
 		t.Fatalf("oversized blocking feed error = %v", err)
+	}
+}
+
+func TestMatcherCooldownsUseCachedCgroupAndSurviveReload(t *testing.T) {
+	t.Parallel()
+
+	feeds := []Feed{mustParse(t, domainFeed("bad", false), "evil.example\n")}
+	event := func(at int64, cgroup uint64) detection.Event {
+		return detection.Event{Timestamp: time.Unix(at, 0), Name: "dns", Fields: map[string]any{"domain": "evil.example", "cached_cgroup_id": cgroup}}
+	}
+	matcher := NewMatcher(feeds)
+	if len(matcher.Evaluate(event(1, 1))) != 1 || len(matcher.Evaluate(event(2, 2))) != 1 {
+		t.Fatal("socket-cache attributed events from two cgroups did not each alert")
+	}
+	reloaded := NewMatcher(feeds)
+	reloaded.InheritCooldowns(matcher)
+	if alerts := reloaded.Evaluate(event(3, 1)); len(alerts) != 0 {
+		t.Fatal("a reloaded matcher forgot the cooldown")
 	}
 }

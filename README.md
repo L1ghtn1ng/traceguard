@@ -456,6 +456,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_SECURITY_EVENTS`
 - `TRACEGUARD_EVENT_SCHEMA`
 - `TRACEGUARD_RESPONSE_MODE`
+- `TRACEGUARD_RESPONSE_STATE_PATH`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
