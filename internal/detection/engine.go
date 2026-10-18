@@ -106,6 +106,19 @@ type CompiledRules struct {
 	exceptions []policy.DetectionException
 }
 
+// KnownRuleIDs returns every rule ID a policy can alert under from the
+// detection engine: all built-in profiles, custom rules, and sequences.
+func KnownRuleIDs(bundle policy.Bundle) map[string]struct{} {
+	known := make(map[string]struct{}, len(bundle.DetectionRules)+len(bundle.DetectionSequences))
+	for _, rule := range append(builtinRules(policy.BuiltinProfiles), bundle.DetectionRules...) {
+		known[rule.ID] = struct{}{}
+	}
+	for _, sequence := range bundle.DetectionSequences {
+		known[sequence.ID] = struct{}{}
+	}
+	return known
+}
+
 // Compile validates and compiles a policy's detection rules, built-in
 // profiles, and exceptions without changing an engine. An exception may name
 // a disabled rule or one from a profile that is not enabled, but not one that
@@ -120,13 +133,7 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	known := make(map[string]struct{}, len(custom)+len(sequences))
-	for _, rule := range append(builtinRules(policy.BuiltinProfiles), custom...) {
-		known[rule.ID] = struct{}{}
-	}
-	for _, sequence := range bundle.DetectionSequences {
-		known[sequence.ID] = struct{}{}
-	}
+	known := KnownRuleIDs(bundle)
 	activeSequences := make(map[string]*compiledSequence, len(sequences))
 	for index := range sequences {
 		activeSequences[sequences[index].sequence.ID] = &sequences[index]

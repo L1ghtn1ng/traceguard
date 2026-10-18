@@ -39,6 +39,21 @@
       "maxItems": 64,
       "items": {"$ref": "#/$defs/detection_sequence"}
     },
+    "responses": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "rules", "action", "duration"],
+        "properties": {
+          "id": {"$ref": "#/$defs/rule_id"},
+          "rules": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/rule_id"}},
+          "action": {"enum": ["block_peer", "freeze_cgroup"]},
+          "duration": {"$ref": "#/$defs/duration"}
+        }
+      }
+    },
     "threat_intel": {
       "type": "object",
       "additionalProperties": false,

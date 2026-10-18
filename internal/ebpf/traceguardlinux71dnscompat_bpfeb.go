@@ -138,6 +138,13 @@ type traceguardLinux71DNSCompatPathLpmKey struct {
 	Data      [256]uint8
 }
 
+type traceguardLinux71DNSCompatResponsePeerKey struct {
+	_      structs.HostLayout
+	Family uint8
+	Pad    [3]uint8
+	Addr   [16]uint8
+}
+
 type traceguardLinux71DNSCompatRuleNameKey struct {
 	_          structs.HostLayout
 	PolicySlot uint8
@@ -249,6 +256,8 @@ const (
 	traceguardLinux71DNSCompatMapLsmPathBuf               = "lsm_path_buf"
 	traceguardLinux71DNSCompatMapPolicyReaders            = "policy_readers"
 	traceguardLinux71DNSCompatMapPolicySelector           = "policy_selector"
+	traceguardLinux71DNSCompatMapResponsePeerDrops        = "response_peer_drops"
+	traceguardLinux71DNSCompatMapResponsePeers            = "response_peers"
 	traceguardLinux71DNSCompatMapRingbufDrops             = "ringbuf_drops"
 	traceguardLinux71DNSCompatMapRuleNames                = "rule_names"
 	traceguardLinux71DNSCompatMapSettings                 = "settings"
@@ -453,6 +462,8 @@ type traceguardLinux71DNSCompatMapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.MapSpec `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.MapSpec `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
@@ -523,6 +534,8 @@ type traceguardLinux71DNSCompatMaps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
@@ -568,6 +581,8 @@ func (m *traceguardLinux71DNSCompatMaps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.ResponsePeerDrops,
+		m.ResponsePeers,
 		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,

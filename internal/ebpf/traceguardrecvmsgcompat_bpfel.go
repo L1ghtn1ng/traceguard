@@ -138,6 +138,13 @@ type traceguardRecvmsgCompatPathLpmKey struct {
 	Data      [256]uint8
 }
 
+type traceguardRecvmsgCompatResponsePeerKey struct {
+	_      structs.HostLayout
+	Family uint8
+	Pad    [3]uint8
+	Addr   [16]uint8
+}
+
 type traceguardRecvmsgCompatRuleNameKey struct {
 	_          structs.HostLayout
 	PolicySlot uint8
@@ -249,6 +256,8 @@ const (
 	traceguardRecvmsgCompatMapLsmPathBuf               = "lsm_path_buf"
 	traceguardRecvmsgCompatMapPolicyReaders            = "policy_readers"
 	traceguardRecvmsgCompatMapPolicySelector           = "policy_selector"
+	traceguardRecvmsgCompatMapResponsePeerDrops        = "response_peer_drops"
+	traceguardRecvmsgCompatMapResponsePeers            = "response_peers"
 	traceguardRecvmsgCompatMapRingbufDrops             = "ringbuf_drops"
 	traceguardRecvmsgCompatMapRuleNames                = "rule_names"
 	traceguardRecvmsgCompatMapSettings                 = "settings"
@@ -453,6 +462,8 @@ type traceguardRecvmsgCompatMapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.MapSpec `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.MapSpec `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
@@ -523,6 +534,8 @@ type traceguardRecvmsgCompatMaps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
@@ -568,6 +581,8 @@ func (m *traceguardRecvmsgCompatMaps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.ResponsePeerDrops,
+		m.ResponsePeers,
 		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,

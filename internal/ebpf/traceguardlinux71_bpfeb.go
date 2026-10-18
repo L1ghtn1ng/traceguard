@@ -138,6 +138,13 @@ type traceguardLinux71PathLpmKey struct {
 	Data      [256]uint8
 }
 
+type traceguardLinux71ResponsePeerKey struct {
+	_      structs.HostLayout
+	Family uint8
+	Pad    [3]uint8
+	Addr   [16]uint8
+}
+
 type traceguardLinux71RuleNameKey struct {
 	_          structs.HostLayout
 	PolicySlot uint8
@@ -249,6 +256,8 @@ const (
 	traceguardLinux71MapLsmPathBuf               = "lsm_path_buf"
 	traceguardLinux71MapPolicyReaders            = "policy_readers"
 	traceguardLinux71MapPolicySelector           = "policy_selector"
+	traceguardLinux71MapResponsePeerDrops        = "response_peer_drops"
+	traceguardLinux71MapResponsePeers            = "response_peers"
 	traceguardLinux71MapRingbufDrops             = "ringbuf_drops"
 	traceguardLinux71MapRuleNames                = "rule_names"
 	traceguardLinux71MapSettings                 = "settings"
@@ -453,6 +462,8 @@ type traceguardLinux71MapSpecs struct {
 	LsmPathBuf              *ebpf.MapSpec `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.MapSpec `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.MapSpec `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.MapSpec `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.MapSpec `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.MapSpec `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
@@ -523,6 +534,8 @@ type traceguardLinux71Maps struct {
 	LsmPathBuf              *ebpf.Map `ebpf:"lsm_path_buf"`
 	PolicyReaders           *ebpf.Map `ebpf:"policy_readers"`
 	PolicySelector          *ebpf.Map `ebpf:"policy_selector"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
 	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
@@ -568,6 +581,8 @@ func (m *traceguardLinux71Maps) Close() error {
 		m.LsmPathBuf,
 		m.PolicyReaders,
 		m.PolicySelector,
+		m.ResponsePeerDrops,
+		m.ResponsePeers,
 		m.RingbufDrops,
 		m.RuleNames,
 		m.Settings,

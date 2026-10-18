@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"errors"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -198,5 +199,55 @@ func TestUnlinkatTracepointEmitsFileChangeForIntegration(t *testing.T) {
 			t.Fatalf("file change event = %+v", event)
 		}
 		return
+	}
+}
+
+func TestResponsePeerBlockDropsEgressForIntegration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	retainIntegrationProgram(spec, "trace_dns")
+	var objects struct {
+		TraceDns          *ebpf.Program `ebpf:"trace_dns"`
+		Settings          *ebpf.Map     `ebpf:"settings"`
+		PolicySelector    *ebpf.Map     `ebpf:"policy_selector"`
+		ResponsePeers     *ebpf.Map     `ebpf:"response_peers"`
+		ResponsePeerDrops *ebpf.Map     `ebpf:"response_peer_drops"`
+	}
+	if err := spec.LoadAndAssign(&objects, newCollectionOptions()); err != nil {
+		fatalVerifierError(t, "LoadAndAssign", err)
+	}
+	defer objects.TraceDns.Close()
+	defer objects.Settings.Close()
+	defer objects.PolicySelector.Close()
+	defer objects.ResponsePeers.Close()
+	defer objects.ResponsePeerDrops.Close()
+	publishIntegrationSettings(t, objects.Settings, objects.PolicySelector, 0, 1, runtimeSettings{})
+	monitor := &Monitor{objects: monitorObjects{ResponsePeers: objects.ResponsePeers, ResponsePeerDrops: objects.ResponsePeerDrops}}
+
+	// ipv4DNSQuestionPacket is addressed to 0.0.0.1.
+	packet := ipv4DNSQuestionPacket([]byte{7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}, false)
+	peer := netip.MustParseAddr("0.0.0.1")
+	if err := monitor.BlockPeer(peer, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BlockPeer: %v", err)
+	}
+	if result, _, err := objects.TraceDns.Test(packet); err != nil || result != 0 {
+		t.Fatalf("blocked peer result = %d, %v; want 0", result, err)
+	}
+	if egress, _, err := monitor.ResponsePeerDrops(); err != nil || egress == 0 {
+		t.Fatalf("egress drops = %d, %v", egress, err)
+	}
+	if err := monitor.UnblockPeer(peer); err != nil {
+		t.Fatalf("UnblockPeer: %v", err)
+	}
+	if result, _, err := objects.TraceDns.Test(packet); err != nil || result != 1 {
+		t.Fatalf("unblocked peer result = %d, %v; want 1", result, err)
 	}
 }

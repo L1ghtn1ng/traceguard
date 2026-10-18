@@ -186,13 +186,13 @@ func specialModeBits(state *fim.State) uint32 {
 
 // newIntegrityEmitter records each change, counts it, and evaluates
 // detections against it.
-func newIntegrityEmitter(recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine) func(fim.Change, fim.Actor) {
+func newIntegrityEmitter(sink alertSink, detector *detection.Engine) func(fim.Change, fim.Actor) {
 	return func(change fim.Change, actor fim.Actor) {
 		fields := integrityRecordFields(change, actor)
 		now := time.Now().UTC()
-		metrics.IncFileIntegrityChange(change.Kind)
-		recorder.InfoAt(now, "file_integrity", fields)
-		emitDetectionAlerts(detector, recorder, metrics, now, "file_integrity", fields)
+		sink.metrics.IncFileIntegrityChange(change.Kind)
+		sink.recorder.InfoAt(now, "file_integrity", fields)
+		emitDetectionAlerts(detector, sink, now, "file_integrity", fields)
 	}
 }
 

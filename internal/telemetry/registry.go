@@ -209,6 +209,21 @@ func (r *Registry) SetThreatIntelIndicators(counts map[string]int) {
 	r.replaceGauges("traceguard_threat_intel_indicators", gauges)
 }
 
+// IncResponseAction counts one response step, such as "response applied".
+func (r *Registry) IncResponseAction(action, step string) {
+	r.incCounter(metricKey2("traceguard_response_actions_total", "action", action, "step", step))
+}
+
+// SetResponseStats publishes active responses and packets dropped by peer
+// blocks in each direction.
+func (r *Registry) SetResponseStats(active int, egressDrops, ingressDrops uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_response_active"] = int64(active)
+	r.counters[metricKey1("traceguard_response_peer_drops_total", "direction", "egress")] = boundedMetricUint64(egressDrops)
+	r.counters[metricKey1("traceguard_response_peer_drops_total", "direction", "ingress")] = boundedMetricUint64(ingressDrops)
+}
+
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
 	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
 }

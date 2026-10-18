@@ -259,6 +259,7 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
 		"TRACEGUARD_EVENT_SCHEMA",
+		"TRACEGUARD_RESPONSE_MODE",
 	)
 
 	cfg, err := Parse()
@@ -291,6 +292,9 @@ func TestParseDefaultsMatchPackagedEnv(t *testing.T) {
 	}
 	if cfg.EventSchema != "traceguard" {
 		t.Fatalf("EventSchema = %q, want packaged default traceguard", cfg.EventSchema)
+	}
+	if cfg.ResponseMode != "dry-run" {
+		t.Fatalf("ResponseMode = %q, want packaged default dry-run", cfg.ResponseMode)
 	}
 	if cfg.KubernetesEnrich {
 		t.Fatal("KubernetesEnrich = true, want packaged default false")
@@ -736,6 +740,7 @@ func clearTypedEnv(t *testing.T) {
 		"TRACEGUARD_POLICY_SIGNING_KEY",
 		"TRACEGUARD_SECURITY_EVENTS",
 		"TRACEGUARD_EVENT_SCHEMA",
+		"TRACEGUARD_RESPONSE_MODE",
 	} {
 		t.Setenv(key, "")
 	}
@@ -871,5 +876,26 @@ func TestSanitizeURLDoesNotEchoInvalidOrCredentialBearingInput(t *testing.T) {
 	}
 	if got := SanitizeURL("%%%secret"); got != "[invalid-url]" {
 		t.Fatalf("SanitizeURL(invalid) = %q", got)
+	}
+}
+
+func TestParseResponseMode(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-response-mode", "enforce"}, "enforce"},
+		{[]string{"-response-mode", "OFF"}, "off"},
+		{[]string{"-response-mode", "enforce", "-emergency-allow"}, "off"},
+	} {
+		originalArgs := os.Args
+		os.Args = append([]string{"traceguard"}, test.args...)
+		clearPolicyEnv(t)
+		clearTypedEnv(t)
+		cfg, err := Parse()
+		os.Args = originalArgs
+		if err != nil || cfg.ResponseMode != test.want {
+			t.Fatalf("Parse(%v) = %q, %v; want %q", test.args, cfg.ResponseMode, err, test.want)
+		}
 	}
 }

@@ -97,6 +97,7 @@ type Document struct {
 	DetectionSequences  []DetectionSequence  `yaml:"detection_sequences,omitempty"`
 	FileIntegrity       FileIntegrityPolicy  `yaml:"file_integrity,omitempty"`
 	ThreatIntel         ThreatIntelPolicy    `yaml:"threat_intel,omitempty"`
+	Responses           []Response           `yaml:"responses,omitempty"`
 }
 
 // FileIntegrityPolicy selects the files whose content and attributes are
@@ -360,6 +361,7 @@ type Bundle struct {
 	DetectionSequences  []DetectionSequence
 	FileIntegrity       FileIntegrityPolicy
 	ThreatIntel         ThreatIntelPolicy
+	Responses           []Response
 	BuiltinProfiles     []string
 	DisabledRuleIDs     []string
 }
@@ -490,6 +492,9 @@ func (d Document) Validate() error {
 	}
 	if err := d.ThreatIntel.validate(); err != nil {
 		return fmt.Errorf("threat_intel: %w", err)
+	}
+	if err := validateResponses(d.Responses); err != nil {
+		return fmt.Errorf("responses: %w", err)
 	}
 	exceptionIDs := make(map[string]struct{}, len(d.DetectionExceptions))
 	for index, exception := range d.DetectionExceptions {

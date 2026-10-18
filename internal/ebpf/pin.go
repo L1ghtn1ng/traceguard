@@ -326,7 +326,7 @@ func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*
 		"sockopt_allow": o.SockoptAllow, "sockopt_block": o.SockoptBlock,
 		"policy_selector": o.PolicySelector, "policy_readers": o.PolicyReaders,
 		"daemon_identity": o.DaemonIdentity, "rule_names": o.RuleNames,
-		"ringbuf_drops": o.RingbufDrops, "settings": o.Settings, "lsm_path_buf": optional.LsmPathBuf,
+		"ringbuf_drops": o.RingbufDrops, "response_peers": o.ResponsePeers, "response_peer_drops": o.ResponsePeerDrops, "settings": o.Settings, "lsm_path_buf": optional.LsmPathBuf,
 	}
 }
 

@@ -530,6 +530,34 @@ struct {
 /* Set by userspace at load time; 0 disables connection event deduplication. */
 volatile const __u64 connection_dedupe_window_ns = 60000000000ULL;
 
+/* Addresses a response blocks until the value, a bpf_ktime_get_ns deadline.
+ * Userspace adds and removes entries; the deadline also stops a stale entry
+ * from blocking if userspace cannot remove it.
+ */
+struct response_peer_key {
+	__u8 family;
+	__u8 pad[3];
+	__u8 addr[16];
+};
+
+#define RESPONSE_PEERS_MAX_ENTRIES 4096
+#define RESPONSE_DROP_EGRESS 0
+#define RESPONSE_DROP_INGRESS 1
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, RESPONSE_PEERS_MAX_ENTRIES);
+	__type(key, struct response_peer_key);
+	__type(value, __u64);
+} response_peers SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, __u32);
+	__type(value, __u64);
+} response_peer_drops SEC(".maps");
+
 /* Indexed by event kind; counts events lost because the ring buffer was full. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -3282,12 +3310,55 @@ static __always_inline int trace_dns_with_policy(struct __sk_buff *skb, const st
 	return 1;
 }
 
+/* peer_blocked reports whether a response currently blocks the packet's
+ * remote address: the destination on egress, the source on ingress.
+ */
+static __always_inline int peer_blocked(struct __sk_buff *skb, __u32 direction)
+{
+	struct response_peer_key key = {0};
+	__u8 version_ihl;
+	__u64 *deadline;
+	__u64 *drops;
+	__u32 offset;
+
+	if (bpf_skb_load_bytes(skb, 0, &version_ihl, sizeof(version_ihl)) < 0) {
+		return 0;
+	}
+	if (version_ihl >> 4 == 4) {
+		key.family = FAMILY_IPV4;
+		offset = direction == RESPONSE_DROP_EGRESS ? 16 : 12;
+		if (bpf_skb_load_bytes(skb, offset, key.addr, 4) < 0) {
+			return 0;
+		}
+	} else if (version_ihl >> 4 == 6) {
+		key.family = FAMILY_IPV6;
+		offset = direction == RESPONSE_DROP_EGRESS ? 24 : 8;
+		if (bpf_skb_load_bytes(skb, offset, key.addr, 16) < 0) {
+			return 0;
+		}
+	} else {
+		return 0;
+	}
+	deadline = bpf_map_lookup_elem(&response_peers, &key);
+	if (!deadline || bpf_ktime_get_ns() >= *deadline) {
+		return 0;
+	}
+	drops = bpf_map_lookup_elem(&response_peer_drops, &direction);
+	if (drops) {
+		__sync_fetch_and_add(drops, 1);
+	}
+	return 1;
+}
+
 SEC("cgroup_skb/egress")
 int trace_dns(struct __sk_buff *skb)
 {
 	struct policy_guard guard = {0};
 	int verdict;
 
+	if (peer_blocked(skb, RESPONSE_DROP_EGRESS)) {
+		return 0;
+	}
 	if (!acquire_policy_guard(&guard)) {
 		return 1;
 	}
@@ -3303,6 +3374,9 @@ int trace_connection_ingress(struct __sk_buff *skb)
 	__u8 version_ihl;
 	__u8 version;
 
+	if (peer_blocked(skb, RESPONSE_DROP_INGRESS)) {
+		return 0;
+	}
 	if (packet_len < 1) {
 		return 1;
 	}

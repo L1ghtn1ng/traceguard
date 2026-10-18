@@ -334,6 +334,8 @@ type monitorObjects struct {
 	DaemonIdentity          *ebpf.Map `ebpf:"daemon_identity"`
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	RingbufDrops            *ebpf.Map `ebpf:"ringbuf_drops"`
+	ResponsePeers           *ebpf.Map `ebpf:"response_peers"`
+	ResponsePeerDrops       *ebpf.Map `ebpf:"response_peer_drops"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 }
 
@@ -394,6 +396,8 @@ func (o *monitorObjects) Close() error {
 		o.DaemonIdentity,
 		o.RuleNames,
 		o.RingbufDrops,
+		o.ResponsePeers,
+		o.ResponsePeerDrops,
 		o.Events,
 		o.Settings,
 	} {

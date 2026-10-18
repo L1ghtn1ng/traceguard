@@ -69,8 +69,9 @@ func TestEmitThreatIntelAlertsRecordsMatches(t *testing.T) {
 	}
 	recorder, output := newTestRecorder(t)
 	metrics := telemetry.NewRegistry()
-	emitThreatIntelAlerts(threatintel.NewMatcher([]threatintel.Feed{feed}), recorder, metrics, time.Unix(1, 0), "dns", map[string]any{"domain": "c2.evil.example"})
-	emitThreatIntelAlerts(nil, recorder, metrics, time.Unix(1, 0), "dns", map[string]any{"domain": "c2.evil.example"})
+	sink := alertSink{recorder: recorder, metrics: metrics}
+	emitThreatIntelAlerts(threatintel.NewMatcher([]threatintel.Feed{feed}), sink, time.Unix(1, 0), "dns", map[string]any{"domain": "c2.evil.example"})
+	emitThreatIntelAlerts(nil, sink, time.Unix(1, 0), "dns", map[string]any{"domain": "c2.evil.example"})
 	for _, want := range []string{`"detection_rule_id":"threat_intel.bad"`, `"threat_intel_indicator":"evil.example"`, `"severity":"critical"`} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("alert record missing %s: %s", want, output.String())
@@ -78,5 +79,24 @@ func TestEmitThreatIntelAlertsRecordsMatches(t *testing.T) {
 	}
 	if !strings.Contains(metrics.Render(), `traceguard_detection_alerts_total{rule_id="threat_intel.bad",severity="critical"} 1`) {
 		t.Fatalf("alert metric missing:\n%s", metrics.Render())
+	}
+}
+
+func TestValidateResponseRules(t *testing.T) {
+	t.Parallel()
+
+	bundle := policyconfig.Bundle{
+		DetectionSequences: []policyconfig.DetectionSequence{{ID: "web-shell-egress"}},
+		ThreatIntel:        policyconfig.ThreatIntelPolicy{Feeds: []policyconfig.ThreatIntelFeed{{ID: "c2"}}},
+		Responses: []policyconfig.Response{{ID: "r", Rules: []string{
+			"baseline.inbound-ssh-bruteforce", "runtime.ptrace-attach", "web-shell-egress", "threat_intel.c2",
+		}}},
+	}
+	if err := validateResponseRules(bundle); err != nil {
+		t.Fatalf("known rules rejected: %v", err)
+	}
+	bundle.Responses[0].Rules = append(bundle.Responses[0].Rules, "typo.rule")
+	if err := validateResponseRules(bundle); err == nil || !strings.Contains(err.Error(), `unknown rule "typo.rule"`) {
+		t.Fatalf("unknown rule error = %v", err)
 	}
 }

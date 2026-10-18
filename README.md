@@ -36,6 +36,9 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - optionally require a detached Ed25519 signature on remote policy
 - suppress named detections with scoped, expiring exceptions that record a reason
 - replay detection rules over an archived event stream to measure noise before rollout
+- correlate ordered steps for one process or cgroup with detection sequences
+- match DNS and connection events against local threat intelligence feeds, optionally enforcing small feeds in the kernel
+- run reversible responses to alerts, temporarily blocking a peer address or freezing a cgroup, in dry-run by default
 
 Remote YAML policy is cached for validated startup fallback and refreshed every
 five minutes by default. After a remote policy has been activated, refresh
@@ -446,6 +449,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_CONNECTION_DEDUPE_WINDOW`
 - `TRACEGUARD_SECURITY_EVENTS`
 - `TRACEGUARD_EVENT_SCHEMA`
+- `TRACEGUARD_RESPONSE_MODE`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -469,6 +473,7 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - security events enabled: `TRACEGUARD_SECURITY_EVENTS=true`
 - HTTPS export and syslog records in the TraceGuard format: `TRACEGUARD_EVENT_SCHEMA=traceguard`
 - connection event deduplication: `TRACEGUARD_CONNECTION_DEDUPE_WINDOW=1m`
+- policy responses recorded but not applied: `TRACEGUARD_RESPONSE_MODE=dry-run`
 - strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
 - remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint

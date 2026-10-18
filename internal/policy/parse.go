@@ -158,6 +158,7 @@ func Merge(base, overlay Document) (Bundle, error) {
 		DetectionSequences:  mergeSequencesByID(base.DetectionSequences, overlay.DetectionSequences, disabled),
 		FileIntegrity:       mergeFileIntegrity(base.FileIntegrity, overlay.FileIntegrity),
 		ThreatIntel:         mergeThreatIntel(base.ThreatIntel, overlay.ThreatIntel),
+		Responses:           mergeResponsesByID(base.Responses, overlay.Responses),
 		BuiltinProfiles:     profiles,
 		DisabledRuleIDs:     disabledIDs,
 	}
@@ -179,6 +180,7 @@ func (b Bundle) Validate() error {
 		DetectionSequences:  slices.Clone(b.DetectionSequences),
 		FileIntegrity:       b.FileIntegrity,
 		ThreatIntel:         b.ThreatIntel,
+		Responses:           slices.Clone(b.Responses),
 	}
 	if err := document.Validate(); err != nil {
 		return err

@@ -67,6 +67,7 @@ type Config struct {
 	EventSyslogTimeout           time.Duration
 	EventSyslogCAPath            string
 	EventSchema                  string
+	ResponseMode                 string
 	ProcessCacheTTL              time.Duration
 	FileAudit                    bool
 	SecurityEvents               bool
@@ -186,6 +187,7 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventSyslogTag, "event-syslog-tag", envString("TRACEGUARD_EVENT_SYSLOG_TAG", defaultSyslogTag), "remote syslog app-name/tag")
 	fs.DurationVar(&cfg.EventSyslogTimeout, "event-syslog-timeout", syslogTimeoutDefault, "remote syslog connection/write timeout")
 	fs.StringVar(&cfg.EventSyslogCAPath, "event-syslog-ca-path", envString("TRACEGUARD_EVENT_SYSLOG_CA_PATH", ""), "path to an optional CA bundle for syslog+tls")
+	fs.StringVar(&cfg.ResponseMode, "response-mode", envString("TRACEGUARD_RESPONSE_MODE", "dry-run"), "how policy responses run: off, dry-run (record only), or enforce")
 	fs.StringVar(&cfg.EventSchema, "event-schema", envString("TRACEGUARD_EVENT_SCHEMA", "traceguard"), "record format for HTTPS export and syslog: traceguard or ocsf")
 	fs.DurationVar(&cfg.ProcessCacheTTL, "process-cache-ttl", processCacheDefault, "how long to cache process metadata from /proc")
 	fs.BoolVar(&cfg.FileAudit, "file-audit", fileAuditDefault, "emit file access audit events for open-style syscalls")
@@ -326,6 +328,19 @@ func Parse() (Config, error) {
 	}
 	if cfg.ProcessCacheTTL <= 0 {
 		return Config{}, errors.New("process-cache-ttl must be positive")
+	}
+	cfg.ResponseMode = strings.ToLower(strings.TrimSpace(cfg.ResponseMode))
+	if cfg.ResponseMode == "" {
+		cfg.ResponseMode = "dry-run"
+	}
+	switch cfg.ResponseMode {
+	case "off", "dry-run", "enforce":
+	default:
+		return Config{}, errors.New("response-mode must be off, dry-run, or enforce")
+	}
+	if cfg.EmergencyAllow {
+		// Emergency allow keeps every enforcement path open, responses too.
+		cfg.ResponseMode = "off"
 	}
 	cfg.EventSchema = strings.ToLower(strings.TrimSpace(cfg.EventSchema))
 	if cfg.EventSchema == "" {

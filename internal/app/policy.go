@@ -19,6 +19,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
+	"github.com/L1ghtn1ng/traceguard/internal/response"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
@@ -32,6 +33,7 @@ type policyController struct {
 	detector      *detection.Engine
 	integrity     *fim.Watcher
 	intel         *atomic.Pointer[threatintel.Matcher]
+	responder     *response.Responder
 	mu            sync.Mutex
 	source        policyconfig.Bundle
 	bundle        policyconfig.Bundle
@@ -42,8 +44,11 @@ type policyController struct {
 	digest        string
 }
 
-func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher]) *policyController {
-	return &policyController{ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics, detector: detector, integrity: integrity, intel: intel}
+func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher], responder *response.Responder) *policyController {
+	return &policyController{
+		ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics,
+		detector: detector, integrity: integrity, intel: intel, responder: responder,
+	}
 }
 
 // expandThreatIntel loads a policy's feeds and adds blocking feeds to its
@@ -111,6 +116,7 @@ func (p *policyController) ApplyBundle(source policyconfig.Bundle) error {
 		matcher := threatintel.NewMatcher(feeds)
 		p.intel.Store(matcher)
 		p.metrics.SetThreatIntelIndicators(matcher.Indicators())
+		p.responder.Configure(bundle.Responses)
 		p.detector.Install(detections)
 		p.metrics.SetDetectionRules(p.detector.RuleCount())
 		p.recorder.InfoIfChanged("detection policy loaded", map[string]any{
@@ -146,6 +152,23 @@ func validateEffectiveBundle(cfg config.Config, bundle policyconfig.Bundle) erro
 	}
 	if _, err := detection.Compile(bundle); err != nil {
 		return fmt.Errorf("compile detection policy: %w", err)
+	}
+	return validateResponseRules(bundle)
+}
+
+// validateResponseRules rejects responses naming a rule that no built-in
+// profile, custom rule, sequence, or threat intelligence feed defines.
+func validateResponseRules(bundle policyconfig.Bundle) error {
+	known := detection.KnownRuleIDs(bundle)
+	for _, feed := range bundle.ThreatIntel.Feeds {
+		known[feed.RuleID()] = struct{}{}
+	}
+	for _, configured := range bundle.Responses {
+		for _, id := range configured.Rules {
+			if _, ok := known[id]; !ok {
+				return fmt.Errorf("response %q references unknown rule %q", configured.ID, id)
+			}
+		}
 	}
 	return nil
 }
@@ -222,6 +245,7 @@ func (p *policyController) RecordApplied(bundle policyconfig.Bundle) error {
 	}
 	p.setDigestLocked(digest)
 	p.integrity.Configure(bundle.FileIntegrity)
+	p.responder.Configure(bundle.Responses)
 	return nil
 }
 

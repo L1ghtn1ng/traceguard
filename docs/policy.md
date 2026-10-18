@@ -24,6 +24,7 @@ editor.
 - [Detection rules](#detection-rules)
 - [File integrity monitoring](#file-integrity-monitoring)
 - [Threat intelligence feeds](#threat-intelligence-feeds)
+- [Responses](#responses)
 - [Local and remote policy configuration](#local-and-remote-policy-configuration)
 - [Operational controls](#operational-controls)
 - [Validation rules and limits](#validation-rules-and-limits)
@@ -86,6 +87,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | `detection_sequences` | Correlation rules that alert when ordered steps match for one process or cgroup within a window. |
 | `file_integrity` | Files whose content and attributes are baselined and compared after changes. |
 | `threat_intel` | Local indicator files that DNS and connection events are matched against. |
+| `responses` | Reversible actions run when named rules alert. |
 
 A minimal document is:
 
@@ -1229,6 +1231,67 @@ and on `SIGHUP`. A change re-applies policy with the new contents, and the
 policy digest changes with it; a failed reload keeps the previous policy and
 is retried on the next check.
 
+## Responses
+
+A response runs a reversible action when one of its rules alerts:
+
+```yaml
+version: 1
+responses:
+  - id: block-ssh-scanner
+    rules: [baseline.inbound-ssh-bruteforce]
+    action: block_peer
+    duration: 1h
+  - id: freeze-injector
+    rules: [runtime.process-memory-write, runtime.ptrace-attach]
+    action: freeze_cgroup
+    duration: 10m
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Response ID, unique among responses. |
+| `rules` | Detection rule, sequence, or `threat_intel.<feed>` IDs. A name that nothing defines rejects the policy. |
+| `action` | `block_peer` or `freeze_cgroup`. |
+| `duration` | How long the action lasts, at most `24h`. |
+
+`-response-mode` / `TRACEGUARD_RESPONSE_MODE` controls whether actions run:
+
+| Mode | Behavior |
+| --- | --- |
+| `dry-run` | Default. Records `response would apply` without changing anything. |
+| `enforce` | Applies actions. |
+| `off` | Ignores responses. `-emergency-allow` forces this mode. |
+
+**`block_peer`** drops traffic to and from the alert's `peer_address`, or
+`address` for resolver events, in the cgroup packet hooks, so it covers the
+processes under `-cgroup-path`. The kernel entry carries its own deadline, so
+it stops applying even if TraceGuard cannot remove it. Loopback, unspecified,
+and multicast addresses are never blocked. Packets dropped are counted in
+`traceguard_response_peer_drops_total{direction}`.
+
+**`freeze_cgroup`** writes `1` to the alert's event-time cgroup's
+`cgroup.freeze`, stopping every process in it until it is thawed. It needs
+`-cgroup-path` at the cgroup v2 root and refuses the root, top-level slices
+such as `system.slice`, `init.scope`, and any cgroup containing TraceGuard.
+Alerts without an event-time `cgroup_id`, such as DNS packet events, skip it.
+
+A repeat alert for an active action extends it rather than stacking a second
+one, and at most 1,024 actions are active at once. Each action is undone when
+it expires, when its response leaves the policy, or when TraceGuard stops. An
+undo that fails stays tracked, and the expiry check, which runs every five
+seconds, retries it once its deadline has passed. Every step is recorded as an
+`event=response` record: `response applied` or `response would apply`,
+`response extended`, `response reverted` with its `reason` (`expired`,
+`policy_removed`, or `shutdown`), `response skipped` with its `reason`, and
+`response failed` or `response revert failed` with the error.
+`traceguard_response_actions_total{action,step}` and
+`traceguard_response_active` report the same.
+
+Start in `dry-run` and check the `response would apply` records, ideally with
+[replay](#testing-rules-with-replay) evidence that the rules are quiet, before
+enabling `enforce`.
+
 ## Local and remote policy configuration
 
 ### Local policy
@@ -1345,6 +1408,7 @@ trusted through its file ownership, and the signing key requires
 | `-strict-hooks` | `TRACEGUARD_STRICT_HOOKS` | Refuse to start when any optional eBPF hook cannot be loaded or attached, instead of running with reduced coverage. |
 | `-heartbeat-interval` | `TRACEGUARD_HEARTBEAT_INTERVAL` | Interval between heartbeat events; defaults to `5m`, and `0` disables them. |
 | `-connection-dedupe-window` | `TRACEGUARD_CONNECTION_DEDUPE_WINDOW` | Window for suppressing repeated connection and TCP retransmit events from the same flow; defaults to `1m`, at most `1h`, and `0` disables suppression. |
+| `-response-mode` | `TRACEGUARD_RESPONSE_MODE` | `dry-run` (default), `enforce`, or `off` for [responses](#responses). |
 | `-event-schema` | `TRACEGUARD_EVENT_SCHEMA` | Record format for HTTPS export and syslog: `traceguard` (default) or `ocsf` for OCSF 1.3.0 events. |
 | `-security-events` | `TRACEGUARD_SECURITY_EVENTS` | Attach the observe-only [security event](#security-events) tracepoints; enabled by default. |
 | `-replay` | — | Evaluate detection rules over an absolute-path JSONL archive and exit. See [Testing rules with replay](#testing-rules-with-replay). |
@@ -1518,6 +1582,7 @@ Important limits:
 | Detection sequences | 64, with 2 to 8 steps each |
 | In-progress sequence keys | 16,384 |
 | Threat intelligence feeds | 32, each up to 1,000,000 indicators and 64 MiB |
+| Responses | 64; at most 1,024 active actions, each up to 24 hours |
 | File integrity paths and excludes | 256 |
 | File integrity baseline | 100,000 entries |
 | Values in one rule list | 256 |

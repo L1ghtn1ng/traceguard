@@ -78,6 +78,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			runErr = errors.Join(runErr, monitor.RemoveFreshPins())
 		}
 	}()
+	// Responses are undone after the workers stop, so none can apply a new
+	// one, and before the monitor closes the peer block map.
+	responder := newResponder(cfg, monitor, recorder, metrics)
+	defer responder.RevertAll()
 	// Background workers apply policy to and read stats from the monitor.
 	// Deferred after monitor.Close so it runs first: cancel and join them
 	// before any map or program descriptor is closed.
@@ -146,15 +150,22 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	ringBuffer := newRingBufferWatcher(monitor, metrics, recorder)
 	ringBuffer.collect()
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, func(time.Time) { ringBuffer.collect() }) })
+	alerts := alertSink{recorder: recorder, metrics: metrics, responder: responder}
+	workers.Go(func() {
+		runEvery(ctx, ringBufferStatsPollInterval, func(now time.Time) {
+			responder.Expire(now)
+			publishResponseStats(responder, monitor, metrics)
+		})
+	})
 	integrity := fim.NewWatcher("/")
-	workers.Go(func() { integrity.Run(ctx, newIntegrityEmitter(recorder, metrics, detector)) })
+	workers.Go(func() { integrity.Run(ctx, newIntegrityEmitter(alerts, detector)) })
 	integrityStats := &integrityStatsWatcher{watcher: integrity, metrics: metrics, recorder: recorder}
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, integrityStats.collect) })
 	intel := &atomic.Pointer[threatintel.Matcher]{}
-	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector, integrity, intel)
+	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector, integrity, intel, alerts)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
-	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel)
+	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel, responder)
 
 	var yamlManager *policyconfig.Manager
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
@@ -276,7 +287,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 // newEventHandler enriches, records, and evaluates detections for each
 // kernel event read from the ring buffer.
-func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher]) func(ebpf.Event) {
+func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine, integrity *fim.Watcher, intel *atomic.Pointer[threatintel.Matcher], alerts alertSink) func(ebpf.Event) {
 	selfPID := uint32(os.Getpid()) //nolint:gosec // PIDs fit in 32 bits
 	return func(event ebpf.Event) {
 		// File integrity hashing opens every watched file; auditing the
@@ -538,7 +549,7 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			fields["kind"] = event.Kind
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}
-		emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
-		emitThreatIntelAlerts(intel.Load(), recorder, metrics, event.Timestamp, eventName, fields)
+		emitDetectionAlerts(detector, alerts, event.Timestamp, eventName, fields)
+		emitThreatIntelAlerts(intel.Load(), alerts, event.Timestamp, eventName, fields)
 	}
 }

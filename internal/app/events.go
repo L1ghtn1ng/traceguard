@@ -13,6 +13,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/response"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
 )
@@ -304,25 +305,35 @@ func fileCreated(flags uint32) bool {
 	return flags&unknownFlags == 0 && flags&oCreat != 0
 }
 
-func emitDetectionAlerts(detector *detection.Engine, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
+// alertSink records alerts and hands each to the responder, if any.
+type alertSink struct {
+	recorder  *eventsink.Recorder
+	metrics   *telemetry.Registry
+	responder *response.Responder
+}
+
+func (s alertSink) record(eventName string, alerts []detection.Alert) {
+	for _, alert := range alerts {
+		s.metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
+		s.recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))
+		if s.responder != nil {
+			s.responder.Handle(alert)
+		}
+	}
+}
+
+func emitDetectionAlerts(detector *detection.Engine, sink alertSink, timestamp time.Time, eventName string, fields map[string]any) {
 	alerts := detector.Evaluate(detection.Event{
 		Timestamp: timestamp,
 		Name:      eventName,
 		Fields:    fields,
 	})
-	metrics.SetDetectionStateGroups(detector.StateCount())
-	recordAlerts(recorder, metrics, eventName, alerts)
+	sink.metrics.SetDetectionStateGroups(detector.StateCount())
+	sink.record(eventName, alerts)
 }
 
 // emitThreatIntelAlerts records alerts for events whose domain or peer
 // address is in a loaded feed.
-func emitThreatIntelAlerts(matcher *threatintel.Matcher, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
-	recordAlerts(recorder, metrics, eventName, matcher.Evaluate(detection.Event{Timestamp: timestamp, Name: eventName, Fields: fields}))
-}
-
-func recordAlerts(recorder *eventsink.Recorder, metrics *telemetry.Registry, eventName string, alerts []detection.Alert) {
-	for _, alert := range alerts {
-		metrics.IncDetectionAlert(alert.RuleID, alert.Severity)
-		recorder.InfoAt(alert.Timestamp, "detection-alert", alert.RecordFields(eventName))
-	}
+func emitThreatIntelAlerts(matcher *threatintel.Matcher, sink alertSink, timestamp time.Time, eventName string, fields map[string]any) {
+	sink.record(eventName, matcher.Evaluate(detection.Event{Timestamp: timestamp, Name: eventName, Fields: fields}))
 }
