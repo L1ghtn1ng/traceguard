@@ -212,21 +212,18 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 		if attached == 0 {
 			return nil, rollback(errors.New("file audit enabled but no open-style syscall tracepoints could be attached"))
 		}
-		for _, tracepoint := range objects.fileChangeTracepoints() {
-			if _, err := attachTracepoint(tracepoint.tracepoint, tracepoint.handle, true); err != nil {
-				return nil, rollback(err)
-			}
-		}
 	} else {
 		for _, name := range []string{"sys_enter_open", "sys_enter_openat", "sys_enter_openat2", "sys_enter_creat"} {
 			if err := removePinnedLink(opts, name); err != nil {
 				return nil, rollback(err)
 			}
 		}
-		for _, tracepoint := range objects.fileChangeTracepoints() {
-			if err := removePinnedLink(opts, tracepoint.tracepoint); err != nil {
-				return nil, rollback(err)
-			}
+	}
+	// File change tracepoints feed file integrity checks, so they attach even
+	// with open auditing off.
+	for _, tracepoint := range objects.fileChangeTracepoints() {
+		if _, err := attachTracepoint(tracepoint.tracepoint, tracepoint.handle, true); err != nil {
+			return nil, rollback(err)
 		}
 	}
 

@@ -39,8 +39,9 @@ does not take others with it:
 
 - An unavailable hook is recorded as an `optional eBPF hook unavailable` error
   and listed in the heartbeat's `unavailable_hooks`.
-- A hook that the active policy requires turns `traceguard_hook_healthy`
-  unhealthy, and that policy is rejected.
+- An exec, file, bind, AF_UNIX, or socket-option enforcement policy whose
+  hook is not attached is rejected, and `traceguard_hook_healthy` for that hook
+  is `0`.
 - With `-strict-hooks`, any unavailable optional hook stops startup instead.
 
 Syscall tracepoints attach individually too. An architecture without a syscall,
@@ -64,9 +65,12 @@ the host TraceGuard protects, not whether TraceGuard can run on it.
 
 ## Testing
 
-CI runs the eBPF integration tests, which load every object variant through
-the verifier and exercise programs against the runner's kernel, on GitHub's
-`ubuntu-latest` runners. Run them on a target host before rollout:
+CI runs the eBPF integration tests on GitHub's `ubuntu-latest` runners. They
+load the object variant the runner's kernel selects through the verifier and
+exercise its programs; unit tests check that every embedded variant has the
+expected programs and maps, but do not verifier-load them. The other variants
+are verified only on a kernel that selects them, so run the tests on each
+target kernel before rollout:
 
 ```bash
 sudo make test-ebpf

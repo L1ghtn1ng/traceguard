@@ -239,6 +239,12 @@ func marshalUDPRecord(entry record, limit int, encode recordEncoder) ([]byte, er
 		"telemetry_truncated":        true,
 		"telemetry_truncated_fields": len(originalFields),
 	}
+	// Keep what classifies the record, so an OCSF event keeps its class.
+	for _, name := range udpClassificationFields {
+		if text, ok := originalFields[name].(string); ok {
+			entry.Fields[name], _ = truncateUTF8(text, 128)
+		}
+	}
 	payload, err := encode(entry)
 	if err != nil {
 		return nil, err
@@ -247,6 +253,12 @@ func marshalUDPRecord(entry record, limit int, encode recordEncoder) ([]byte, er
 		return nil, fmt.Errorf("bounded syslog record exceeds %d-byte payload budget", limit)
 	}
 	return payload, nil
+}
+
+// udpClassificationFields survive the last UDP fallback: the event name and
+// the fields that pick its OCSF class, activity, disposition, and finding.
+var udpClassificationFields = []string{
+	"event", "operation", "change", "mode", "source_event", "alert_id", "detection_rule_id", "severity",
 }
 
 func (s *syslogSink) Close() error {

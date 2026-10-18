@@ -24,6 +24,7 @@ type KernelFeatures struct {
 	BTFAvailable        bool
 	BPFLSMAvailable     bool
 	LSMProgramType      bool
+	TaskStorage         bool
 	EnhancedTelemetry   bool
 	SelectedFeatureSet  string
 	SelectedObject      string
@@ -38,6 +39,7 @@ func DetectKernelFeatures() KernelFeatures {
 	}
 	features.BPFLSMAvailable = detectBPFLSM()
 	features.LSMProgramType = featureAvailable(ebpffeatures.HaveProgramType(cebpf.LSM))
+	features.TaskStorage = featureAvailable(ebpffeatures.HaveMapType(cebpf.TaskStorage))
 	return features
 }
 

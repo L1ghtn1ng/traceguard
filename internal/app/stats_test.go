@@ -156,6 +156,7 @@ func TestRunStartsEventReaderBeforePolicyLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := map[string]token.Pos{}
+	last := map[string]token.Pos{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "Run" {
@@ -178,6 +179,7 @@ func TestRunStartsEventReaderBeforePolicyLoad(t *testing.T) {
 			if _, seen := calls[name]; !seen {
 				calls[name] = call.Pos()
 			}
+			last[name] = call.Pos()
 			return true
 		})
 	}
@@ -193,6 +195,36 @@ func TestRunStartsEventReaderBeforePolicyLoad(t *testing.T) {
 		if pos < reader {
 			t.Errorf("%s at %s runs before the ring buffer reader starts at %s", policyCall, fset.Position(pos), fset.Position(reader))
 		}
+		// Detection must stay held until every startup policy path has run.
+		if armed, ok := calls["detections.arm"]; !ok || armed < last[policyCall] {
+			t.Errorf("detections.arm must follow %s at %s", policyCall, fset.Position(last[policyCall]))
+		}
+	}
+}
+
+func TestRingBufferWatcherBaselinesKindsFirstSeenLater(t *testing.T) {
+	t.Parallel()
+
+	recorder, output := newTestRecorder(t)
+	// The first read fails for exec, so its pinned-map history is not yet
+	// known; its first successful reading must not be reported as new loss.
+	source := &fakeRingBufferStats{
+		stats: ebpfmonitor.RingBufferStats{Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 1}},
+		err:   errors.New("lookup failed"),
+	}
+	watcher := newRingBufferWatcher(source, telemetry.NewRegistry(), recorder)
+	watcher.collect()
+	output.Reset()
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 1, ebpfmonitor.EventExec: 400}
+	source.err = nil
+	watcher.collect()
+	if strings.Contains(output.String(), "events dropped") {
+		t.Fatalf("a kind's first reading was reported as new loss: %s", output.String())
+	}
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 1, ebpfmonitor.EventExec: 402}
+	watcher.collect()
+	if !strings.Contains(output.String(), `"dropped_exec":2`) {
+		t.Fatalf("later loss not reported: %s", output.String())
 	}
 }
 

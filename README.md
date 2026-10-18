@@ -392,12 +392,18 @@ sudo ./traceguard \
 | Heartbeats and daemon status | Base Event (0) |
 
 Fields that map to an OCSF attribute move there: the acting process and user
-to `actor`, endpoints to `src_endpoint` and `dst_endpoint`, paths and digests
-to `file`, and enforcement outcomes to `action_id` and `disposition_id`. Every
-other field, including the TraceGuard `event` name, is kept under `unmapped`,
-so nothing is lost. An event over the 32 KiB record limit drops `unmapped` and
-records `unmapped.telemetry_truncated=true`. The local event archive and logs
-keep the TraceGuard format, which `-replay` reads.
+to `actor` (for `file_integrity`, the triggering `actor_*` process), endpoints
+to `src_endpoint` and `dst_endpoint`, paths and digests to `file`, and the
+alert's `alert_id` to `finding_info.uid`. Events use the `security_control`
+profile: `action_id` is `2` (Denied) for blocked events and `1` (Allowed)
+otherwise, with `disposition_id` `2` (Blocked) or, for dry-run, `15`
+(Detected). Activities without an OCSF name, such as `memfd_create`, carry the
+TraceGuard operation or event name as `activity_name`. A pathless module load
+and a BPF program load have a driver file named `unknown`. Every other field,
+including the TraceGuard `event` name, is kept under `unmapped`, so nothing is
+lost. An event over the 32 KiB record limit drops `unmapped`, then shortens
+mapped strings and lists, and records `unmapped.telemetry_truncated=true`. The
+local event archive and logs keep the TraceGuard format, which `-replay` reads.
 
 Amazon Security Lake accepts OCSF 1.3 or earlier, but as Apache Parquet objects
 per event class; send OCSF JSON through a collector that writes Parquet.

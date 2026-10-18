@@ -9,6 +9,7 @@ package ocsf
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,6 +35,23 @@ const (
 )
 
 const activityOther = 99
+
+// activityNames are the OCSF captions of the activities classify returns,
+// by class. activityOther is named after the source operation instead.
+var activityNames = map[int]map[int]string{
+	ClassBase:                    {0: "Unknown"},
+	ClassDNSActivity:             {1: "Query"},
+	ClassNetworkActivity:         {1: "Open", 5: "Refuse"},
+	ClassProcessActivity:         {1: "Launch", 3: "Open", 4: "Inject", 5: "Set User ID"},
+	ClassKernelExtensionActivity: {1: "Load"},
+	ClassFileSystemActivity: {
+		0: "Unknown", 1: "Create", 3: "Update", 4: "Delete", 5: "Rename", 6: "Set Attributes", 12: "Mount", 14: "Open",
+	},
+	ClassDetectionFinding: {1: "Create"},
+}
+
+// fileTypeIDs maps file integrity file types to OCSF file type IDs.
+var fileTypeIDs = map[string]int{"file": 1, "directory": 2, "symlink": 7, "other": 99}
 
 // Record is one TraceGuard record: the envelope and its flat fields.
 type Record struct {
@@ -74,14 +92,15 @@ func Convert(record Record) map[string]any {
 	if c.fields == nil {
 		c.fields = map[string]any{}
 	}
+	metadata := map[string]any{
+		"version": Version,
+		"product": map[string]any{"name": "TraceGuard", "vendor_name": "TraceGuard", "version": version.Program},
+	}
 	event := map[string]any{
 		"message":     record.Message,
 		"severity_id": severityID(record.Level),
-		"metadata": map[string]any{
-			"version": Version,
-			"product": map[string]any{"name": "TraceGuard", "vendor_name": "TraceGuard", "version": version.Program},
-		},
-		"device": map[string]any{"hostname": record.Hostname, "type_id": 0},
+		"metadata":    metadata,
+		"device":      map[string]any{"hostname": record.Hostname, "type_id": 0},
 	}
 	if at, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil {
 		event["time"] = at.UnixMilli()
@@ -89,8 +108,16 @@ func Convert(record Record) map[string]any {
 
 	name := c.text("event")
 	class, activity := classify(name, c)
+	activityName := activityNames[class][activity]
+	if activity == activityOther {
+		activityName = name
+		if operation := c.peek("operation"); operation != "" {
+			activityName = operation
+		}
+	}
 	if class == ClassDetectionFinding {
-		mapFinding(event, c)
+		mapDisposition(event, c.peek("source_event"), c)
+		mapFinding(event, record.Timestamp, c)
 	} else {
 		mapActor(event, c)
 		switch class {
@@ -103,7 +130,12 @@ func Convert(record Record) map[string]any {
 		case ClassFileSystemActivity:
 			mapFile(event, name, c)
 		}
-		mapDisposition(event, name, c)
+		if class != ClassBase {
+			mapDisposition(event, name, c)
+		}
+	}
+	if _, ok := event["action_id"]; ok {
+		metadata["profiles"] = []string{"security_control"}
 	}
 	category := map[int]int{
 		ClassFileSystemActivity: categorySystem, ClassKernelExtensionActivity: categorySystem,
@@ -113,6 +145,7 @@ func Convert(record Record) map[string]any {
 	event["category_uid"] = category
 	event["class_uid"] = class
 	event["activity_id"] = activity
+	event["activity_name"] = activityName
 	event["type_uid"] = class*100 + activity
 	if name != "" {
 		c.fields["event"] = name
@@ -196,21 +229,28 @@ func severityID(level string) int {
 	}
 }
 
-// mapActor fills actor.process and actor.user from event-time identity.
+// mapActor fills actor.process and actor.user from event-time identity. A
+// file integrity change carries its triggering process as actor_* fields.
 func mapActor(event map[string]any, c *converter) {
+	prefix := ""
+	if _, ok := c.fields["pid"]; !ok {
+		if _, ok := c.fields["actor_pid"]; ok {
+			prefix = "actor_"
+		}
+	}
 	process := map[string]any{}
-	if pid, ok := c.take("pid"); ok {
+	if pid, ok := c.take(prefix + "pid"); ok {
 		process["pid"] = pid
 	}
-	if name := c.text("program"); name != "" {
+	if name := c.text(prefix + "program"); name != "" {
 		process["name"] = name
 	}
-	if exe := c.text("current_exe"); exe != "" {
-		process["file"] = map[string]any{"path": exe, "type_id": 1}
+	if exe := c.text(prefix + "current_exe"); exe != "" {
+		process["file"] = fileObject(exe, 1)
 	}
 	actor := map[string]any{}
-	if uid, ok := c.take("kernel_uid"); ok {
-		c.take("uid")
+	if uid, ok := c.take(prefix + "kernel_uid"); ok {
+		c.take(prefix + "uid")
 		actor["user"] = map[string]any{"uid": fmt.Sprint(uid)}
 	}
 	if len(process) > 0 {
@@ -219,6 +259,14 @@ func mapActor(event map[string]any, c *converter) {
 	if len(actor) > 0 {
 		event["actor"] = actor
 	}
+}
+
+// fileObject builds an OCSF file, whose name is required.
+func fileObject(path string, typeID int) map[string]any {
+	if path == "" {
+		return map[string]any{"name": "unknown", "type_id": 0}
+	}
+	return map[string]any{"name": filepath.Base(path), "path": path, "type_id": typeID}
 }
 
 func endpoint(address, port any) map[string]any {
@@ -269,20 +317,22 @@ func mapNetwork(event map[string]any, c *converter) {
 	}
 }
 
-// mapProcessTarget fills the process an event acts on.
+// mapProcessTarget fills the process an event acts on, or the kernel
+// extension it loads. A requested exec path that differs from the resolved
+// executable stays under unmapped.
 func mapProcessTarget(event map[string]any, name string, c *converter) {
 	process := map[string]any{}
 	switch name {
 	case "exec", "exec_blocked", "exec_would_block":
-		path := c.text("requested_path")
-		if exe := c.text("exe"); exe != "" {
-			path = exe
+		path := c.text("exe")
+		if path == "" {
+			path = c.text("requested_path")
 		}
 		if path == "" {
 			path = c.text("path")
 		}
 		if path != "" {
-			process["file"] = map[string]any{"path": path, "type_id": 1}
+			process["file"] = fileObject(path, 1)
 		}
 		if args, ok := c.take("command_line"); ok {
 			process["cmd_line"] = joinArgs(args)
@@ -291,10 +341,18 @@ func mapProcessTarget(event map[string]any, name string, c *converter) {
 		if pid, ok := c.take("target_pid"); ok {
 			process["pid"] = pid
 		}
-	case "module_load":
-		if path := c.text("module_path"); path != "" {
-			event["driver"] = map[string]any{"file": map[string]any{"path": path, "type_id": 1}}
+	case "memfd_create", "io_uring_setup", "namespace_change", "privilege_change":
+		// These act on the calling process itself.
+		if actor, ok := event["actor"].(map[string]any); ok {
+			if self, ok := actor["process"].(map[string]any); ok {
+				process = maps.Clone(self)
+			}
 		}
+	case "module_load":
+		// init_module loads from memory, so there may be no path.
+		event["driver"] = map[string]any{"file": fileObject(c.text("module_path"), 1)}
+	case "bpf_prog_load":
+		event["driver"] = map[string]any{"file": fileObject("", 0)}
 	}
 	if len(process) > 0 {
 		event["process"] = process
@@ -302,48 +360,57 @@ func mapProcessTarget(event map[string]any, name string, c *converter) {
 }
 
 func mapFile(event map[string]any, name string, c *converter) {
-	file := map[string]any{"type_id": 1}
+	var file map[string]any
 	switch name {
 	case "file_integrity":
-		file["path"] = c.text("path")
+		// A deletion has only the previous state.
+		fileType := c.peek("file_type")
+		if fileType == "" {
+			fileType = c.peek("previous_file_type")
+		}
+		file = fileObject(c.text("path"), fileTypeIDs[fileType])
 		if digest := c.text("sha256"); digest != "" {
 			file["hashes"] = []map[string]any{{"algorithm_id": 3, "algorithm": "SHA-256", "value": digest}}
 		}
 		if size, ok := c.take("size"); ok {
 			file["size"] = size
 		}
-		if c.peek("file_type") == "directory" {
-			file["type_id"] = 2
-		}
 	case "mount":
-		file["path"] = c.text("mount_target")
-		file["type_id"] = 2
+		file = fileObject(c.text("mount_target"), 2)
 	case "file_blocked", "file_would_block":
-		file["path"] = c.text("path")
+		file = fileObject(c.text("path"), 1)
 	default:
-		file["path"] = c.text("requested_path")
+		file = fileObject(c.text("requested_path"), 1)
 	}
 	event["file"] = file
 	if newPath := c.text("new_path"); newPath != "" {
-		event["file_result"] = map[string]any{"path": newPath, "type_id": 1}
+		event["file_result"] = fileObject(newPath, 1)
 	}
 }
 
-// mapDisposition records whether policy allowed the operation.
+// mapDisposition records whether policy allowed the operation. Activity
+// TraceGuard only observes was allowed.
 func mapDisposition(event map[string]any, name string, c *converter) {
 	switch {
 	case strings.HasSuffix(name, "_blocked") || name == "blocked":
 		event["action_id"], event["disposition_id"] = 2, 2 // Denied, Blocked
 	case strings.HasSuffix(name, "_would_block") || c.peek("mode") == "dry-run":
 		event["action_id"], event["disposition_id"] = 1, 15 // Allowed, Detected
+	default:
+		event["action_id"] = 1 // Allowed
 	}
 }
 
 // mapFinding maps a detection alert to a Detection Finding.
-func mapFinding(event map[string]any, c *converter) {
+func mapFinding(event map[string]any, timestamp string, c *converter) {
 	ruleID := c.text("detection_rule_id")
+	uid := c.text("alert_id")
+	if uid == "" {
+		// Alerts recorded before alert_id existed.
+		uid = ruleID + ":" + timestamp
+	}
 	finding := map[string]any{
-		"uid":      fmt.Sprintf("%s:%v", ruleID, event["time"]),
+		"uid":      uid,
 		"title":    c.text("detection_message"),
 		"analytic": map[string]any{"uid": ruleID, "name": ruleID, "type_id": 1},
 	}

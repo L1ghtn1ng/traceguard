@@ -113,6 +113,7 @@ func (p *policyController) ApplyBundle(source policyconfig.Bundle) error {
 	}
 	if bundleChanged {
 		p.integrity.Configure(bundle.FileIntegrity)
+		warnIntegrityWithoutAudit(p.cfg, bundle.FileIntegrity, p.recorder)
 		matcher := threatintel.NewMatcher(feeds)
 		p.intel.Store(matcher)
 		p.metrics.SetThreatIntelIndicators(matcher.Indicators())

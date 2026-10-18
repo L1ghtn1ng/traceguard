@@ -2,7 +2,9 @@ package fim
 
 import (
 	"context"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +32,9 @@ type Stats struct {
 type pendingCheck struct {
 	actor Actor
 	due   time.Time
+	// ambiguous records that another process also touched the path before
+	// the check ran, so the actor may not be the one that changed it.
+	ambiguous bool
 }
 
 // Watcher holds the baseline and checks paths it is notified about.
@@ -38,13 +43,15 @@ type Watcher struct {
 	now  func() time.Time
 	wake chan struct{}
 
-	mu       sync.Mutex
-	policy   policy.FileIntegrityPolicy
-	rebuild  bool
-	baseline map[string]State
-	pending  map[string]pendingCheck
-	overflow bool
-	stats    Stats
+	mu     sync.Mutex
+	policy policy.FileIntegrityPolicy
+	// baselinePolicy is the policy the current baseline was scanned under.
+	baselinePolicy policy.FileIntegrityPolicy
+	rebuild        bool
+	baseline       map[string]State
+	pending        map[string]pendingCheck
+	overflow       bool
+	stats          Stats
 }
 
 // NewWatcher returns a watcher over root, "/" outside tests.
@@ -56,7 +63,7 @@ func NewWatcher(root string) *Watcher {
 }
 
 // Configure installs a policy. A changed policy rebuilds the baseline on the
-// Run goroutine without reporting changes.
+// Run goroutine, reporting changes only for paths both policies watch.
 func (w *Watcher) Configure(integrity policy.FileIntegrityPolicy) {
 	w.mu.Lock()
 	changed := !reflect.DeepEqual(integrity, w.policy)
@@ -68,6 +75,13 @@ func (w *Watcher) Configure(integrity policy.FileIntegrityPolicy) {
 	if changed {
 		w.signal()
 	}
+}
+
+// Enabled reports whether the installed policy watches any path.
+func (w *Watcher) Enabled() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.policy.Enabled()
 }
 
 // Watched reports whether a change to path could affect a watched file: the
@@ -100,6 +114,16 @@ func (w *Watcher) Notify(path string, actor Actor) {
 		w.stats.Dropped++
 		w.mu.Unlock()
 		w.signal()
+		return
+	}
+	if existing, queued := w.pending[path]; queued {
+		// Keep the first due time so a busy path is still checked within the
+		// settle delay, and the first actor, marking any later different one.
+		if !reflect.DeepEqual(existing.actor["actor_pid"], actor["actor_pid"]) {
+			existing.ambiguous = true
+			w.pending[path] = existing
+		}
+		w.mu.Unlock()
 		return
 	}
 	w.pending[path] = pendingCheck{actor: actor, due: w.now().Add(settleDelay)}
@@ -143,13 +167,19 @@ func (w *Watcher) Run(ctx context.Context, emit func(Change, Actor)) {
 		w.mu.Unlock()
 
 		now := w.now()
+		installed := true
 		switch {
 		case rebuild:
-			w.install(false, emit)
+			installed = w.install(true, emit)
 			nextRescan = nextRescanAt(now, interval)
 		case overflow || (!nextRescan.IsZero() && !now.Before(nextRescan)):
-			w.install(true, emit)
+			installed = w.install(false, emit)
 			nextRescan = nextRescanAt(now, interval)
+		}
+		if !installed {
+			// The policy changed during the scan. Queued checks wait for the
+			// rebuild so they are not compared against the old baseline.
+			continue
 		}
 		w.checkDue(now, emit)
 	}
@@ -162,64 +192,86 @@ func nextRescanAt(now time.Time, interval time.Duration) time.Time {
 	return now.Add(interval)
 }
 
-// install scans every watched path and replaces the baseline, reporting the
-// differences when report is set. Queued checks are dropped because the scan
-// covers them.
-func (w *Watcher) install(report bool, emit func(Change, Actor)) {
+// install scans every watched path and replaces the baseline. A rescan
+// reports every difference; a rebuild for a new policy reports only paths
+// that both the old and new policy watch. Queued checks are kept: a change
+// made while the scan ran may postdate what it read. install reports false
+// when the policy changed during the scan.
+func (w *Watcher) install(rebuild bool, emit func(Change, Actor)) bool {
 	w.mu.Lock()
 	s := w.scannerLocked()
+	old := scanner{root: w.root, policy: w.baselinePolicy}
 	w.mu.Unlock()
-	current := map[string]State{}
-	truncated := false
+	result := newScanResult()
 	if s.policy.Enabled() {
-		current, truncated = s.Baseline()
+		result = s.Baseline()
 	}
 
 	w.mu.Lock()
 	if w.rebuild {
-		// The policy changed during the scan; the next pass rebuilds.
 		w.mu.Unlock()
-		return
+		return false
 	}
-	previous := w.baseline
-	w.baseline = current
-	w.pending = make(map[string]pendingCheck)
-	w.stats.Files, w.stats.Truncated = len(current), truncated
-	w.mu.Unlock()
-
-	if report {
-		for _, change := range diffSubset("/", previous, current) {
-			emit(change, nil)
+	keys := make(map[string]struct{}, len(w.baseline)+len(result.states))
+	for key := range w.baseline {
+		keys[key] = struct{}{}
+	}
+	for key := range result.states {
+		keys[key] = struct{}{}
+	}
+	report := func(string) bool { return true }
+	if rebuild {
+		report = func(key string) bool { return old.watched(key) && s.watched(key) }
+	}
+	changes, final := reconcile(slices.Sorted(maps.Keys(keys)), w.baseline, result, report)
+	baseline := make(map[string]State, len(final))
+	for key, state := range final {
+		if state != nil && s.watched(key) {
+			baseline[key] = *state
 		}
 	}
+	w.baseline = baseline
+	w.baselinePolicy = s.policy
+	w.stats.Files, w.stats.Truncated = len(baseline), result.truncated
+	w.mu.Unlock()
+
+	for _, change := range changes {
+		emit(change, nil)
+	}
+	return true
 }
 
 // checkDue rechecks queued paths whose settle delay has passed.
 func (w *Watcher) checkDue(now time.Time, emit func(Change, Actor)) {
 	w.mu.Lock()
-	due := make(map[string]Actor)
+	due := make(map[string]pendingCheck)
 	for path, check := range w.pending {
 		if !now.Before(check.due) {
-			due[path] = check.actor
+			due[path] = check
 			delete(w.pending, path)
 		}
 	}
 	s := w.scannerLocked()
 	w.mu.Unlock()
 
-	for path, actor := range due {
-		current := w.scanAffected(s, path)
+	for path, check := range due {
+		result := w.scanAffected(s, path)
 		w.mu.Lock()
-		changes := diffSubset(path, w.baseline, current)
-		for _, change := range changes {
-			if change.Current != nil {
-				w.baseline[change.Path] = *change.Current
+		changes, final := reconcile(affectedKeys(path, w.baseline, result), w.baseline, result, func(string) bool { return true })
+		for key, state := range final {
+			if state != nil {
+				w.baseline[key] = *state
 			} else {
-				delete(w.baseline, change.Path)
+				delete(w.baseline, key)
 			}
 		}
 		w.stats.Files = len(w.baseline)
 		w.mu.Unlock()
+		actor := check.actor
+		if check.ambiguous {
+			actor = maps.Clone(actor)
+			actor["actor_ambiguous"] = true
+		}
 		for _, change := range changes {
 			emit(change, actor)
 		}
@@ -229,17 +281,17 @@ func (w *Watcher) checkDue(now time.Time, emit func(Change, Actor)) {
 // scanAffected returns the current state of the watched files a change to
 // path can affect: path itself and, for a directory, the watched entries
 // beneath it.
-func (w *Watcher) scanAffected(s scanner, path string) map[string]State {
-	states := make(map[string]State)
+func (w *Watcher) scanAffected(s scanner, path string) scanResult {
+	result := newScanResult()
 	prefix := strings.TrimSuffix(path, "/") + "/"
 	for _, pattern := range s.policy.Paths {
 		stem, subtree := strings.CutSuffix(pattern, "/**")
 		switch {
 		case stem == path || strings.HasPrefix(stem, prefix):
-			s.scanTree(stem, subtree, states)
+			s.scanTree(stem, subtree, &result)
 		case subtree && (stem == "" || strings.HasPrefix(path, strings.TrimSuffix(stem, "/")+"/")):
-			s.scanTree(path, true, states)
+			s.scanTree(path, true, &result)
 		}
 	}
-	return states
+	return result
 }

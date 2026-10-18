@@ -312,7 +312,7 @@ func mergeFileIntegrity(base, overlay FileIntegrityPolicy) FileIntegrityPolicy {
 	if overlay.Hash != nil {
 		merged.Hash = overlay.Hash
 	}
-	if overlay.MaxHashBytes != 0 {
+	if overlay.MaxHashBytes != nil {
 		merged.MaxHashBytes = overlay.MaxHashBytes
 	}
 	if overlay.RescanInterval != nil {
