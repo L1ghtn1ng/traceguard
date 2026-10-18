@@ -44,9 +44,9 @@ type ringBufferStatsSource interface {
 }
 
 // ringBufferWatcher publishes ring buffer occupancy and drop counters, and
-// records an error when drops grow. The first collection only establishes the
-// baseline, so drops already counted in adopted pinned maps are exported but
-// not reported as new loss.
+// records an error when drops grow. A kind's first successful reading only
+// establishes its baseline, so drops already counted in adopted pinned maps,
+// or before a failed read, are exported but not reported as new loss.
 type ringBufferWatcher struct {
 	source   ringBufferStatsSource
 	metrics  *telemetry.Registry
@@ -69,7 +69,6 @@ func (w *ringBufferWatcher) collect() {
 	}
 
 	w.mu.Lock()
-	first := w.baseline == nil
 	next := make(map[uint32]uint64, len(stats.Drops))
 	maps.Copy(next, w.baseline)
 	byName := make(map[string]uint64, len(stats.Drops))
@@ -79,8 +78,8 @@ func (w *ringBufferWatcher) collect() {
 		name := eventKindName(kind)
 		byName[name] = dropped
 		next[kind] = dropped
-		if !first && dropped > w.baseline[kind] {
-			delta := dropped - w.baseline[kind]
+		if baseline, seen := w.baseline[kind]; seen && dropped > baseline {
+			delta := dropped - baseline
 			// Event sinks bound nested values, so keep per-kind counts flat.
 			fields["dropped_"+name] = delta
 			total += delta
