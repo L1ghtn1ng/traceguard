@@ -366,3 +366,12 @@ func TestConvertLinkCreationNamesTheCreatedFile(t *testing.T) {
 		t.Fatalf("link file = %v, want the created link", file)
 	}
 }
+
+func TestConvertDirectoryRemovalIsAFolder(t *testing.T) {
+	t.Parallel()
+
+	event := convert(t, "info", map[string]any{"event": "file_change", "operation": "rmdir", "requested_path": "/etc/cron.d"})
+	if file := object(t, event["file"]); file["type_id"] != 2 || event["activity_id"] != 4 {
+		t.Fatalf("rmdir file = %v activity = %v, want a deleted folder", file, event["activity_id"])
+	}
+}

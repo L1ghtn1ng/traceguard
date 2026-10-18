@@ -1707,3 +1707,55 @@ func encodeServerCertPEM(t *testing.T, server *httptest.Server) []byte {
 		Bytes: server.Certificate().Raw,
 	})
 }
+
+// Not parallel: it points the package's spool path at a temporary directory.
+func TestStrandedSpoolWarningReachesSyslog(t *testing.T) {
+	spoolDir := filepath.Join(t.TempDir(), "spool")
+	originalSpoolPath := exportSpoolPath
+	exportSpoolPath = spoolDir
+	t.Cleanup(func() { exportSpoolPath = originalSpoolPath })
+	stranded, err := newSpoolStore(spoolDir, SchemaOCSF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stranded.Write([]json.RawMessage{json.RawMessage(`{"class_uid":4003}`)}); err != nil {
+		t.Fatal(err)
+	}
+	closeTestResource(t, stranded)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	defer server.Close()
+	packetConn, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = packetConn.Close() }()
+	received := make(chan string, 16)
+	go func() {
+		buffer := make([]byte, 64<<10)
+		for {
+			_ = packetConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			n, _, err := packetConn.ReadFrom(buffer)
+			if err != nil {
+				close(received)
+				return
+			}
+			received <- string(buffer[:n])
+		}
+	}()
+
+	recorder, err := newSyslogTestRecorder(t, Config{
+		ExportURL: server.URL, ExportSpool: true,
+		SyslogURL: "syslog+udp://" + packetConn.LocalAddr().String(), SyslogFacility: "local0", SyslogTag: "traceguard", SyslogTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestResource(t, recorder)
+	for message := range received {
+		if strings.Contains(message, "export spool holds batches in another event schema") {
+			return
+		}
+	}
+	t.Fatal("the stranded-batch warning never reached syslog")
+}
