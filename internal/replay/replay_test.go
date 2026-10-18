@@ -130,3 +130,25 @@ func TestConvertNumberKeepsIntegersExact(t *testing.T) {
 		}
 	}
 }
+
+func TestRunMatchesLiveAlertEnvelopeAndRejectsTrailingContent(t *testing.T) {
+	t.Parallel()
+
+	connection := `{"timestamp":"2026-10-18T10:00:01Z","level":"warn","message":"connection","event":"connection","direction":"outbound","peer_address":"169.254.169.254","peer_port":80,"socket_protocol":"tcp","kernel_uid":0,"cgroup_id":1,"program":"agent"}`
+	archivePath := writeFile(t, "events.jsonl", connection+"\n"+connection+` {"event":"exec"}`+"\n"+connection+" garbage\n")
+	var alerts bytes.Buffer
+	summary, err := Run(Config{ArchivePath: archivePath}, &alerts)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Evaluated != 1 || summary.Malformed != 2 {
+		t.Fatalf("summary = %+v, want lines with trailing content counted malformed", summary)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(alerts.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["message"] != "detection-alert" || record["level"] != "info" {
+		t.Fatalf("alert envelope = message %v level %v, want the live detection-alert envelope", record["message"], record["level"])
+	}
+}
