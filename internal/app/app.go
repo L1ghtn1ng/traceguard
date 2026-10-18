@@ -131,7 +131,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	// startup does not fill the buffer and drop events.
 	ringBufferBaseline := collectRingBufferStats(monitor, metrics, recorder, nil)
 	workers.Go(func() { runRingBufferStats(ctx, monitor, metrics, recorder, ringBufferBaseline) })
-	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detector)
+	detections := newDetectionGate(func(timestamp time.Time, name string, fields map[string]any) {
+		emitDetectionAlerts(detector, recorder, metrics, timestamp, name, fields)
+	})
+	handleEvent := newEventHandler(cfg, recorder, metrics, processCache, kubeEnricher, detections)
 	workers.Go(func() { reportErr(monitor.Run(ctx, handleEvent, metrics)) })
 
 	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector)
@@ -222,6 +225,10 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
 	}
 
+	if skipped := detections.arm(); skipped > 0 {
+		recorder.Error("detection skipped events read while policy loaded", nil, map[string]any{"skipped_events": skipped})
+	}
+
 	started = true
 	monitor.KeepPins()
 
@@ -235,7 +242,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 
 // newEventHandler enriches, records, and evaluates detections for each
 // kernel event read from the ring buffer.
-func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detector *detection.Engine) func(ebpf.Event) {
+func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, processCache *processinfo.Cache, kubeEnricher *kubeinfo.Enricher, detections *detectionGate) func(ebpf.Event) {
 	return func(event ebpf.Event) {
 		process, hit := lookupProcessForEvent(processCache, event)
 		metrics.IncProcessCache(hit)
@@ -482,6 +489,6 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			fields["kind"] = event.Kind
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}
-		emitDetectionAlerts(detector, recorder, metrics, event.Timestamp, eventName, fields)
+		detections.submit(event.Timestamp, eventName, fields)
 	}
 }
