@@ -157,6 +157,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity)
 
 	var yamlManager *policyconfig.Manager
+	// watchRemote refreshes the remote policy; it starts after detection
+	// is armed.
+	var watchRemote func()
 	if !cfg.EmergencyAllow && (cfg.PolicyPath != "" || cfg.PolicyURL != "") {
 		yamlManager, err = policyconfig.NewManager(policyconfig.Config{
 			Path:              cfg.PolicyPath,
@@ -193,7 +196,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			return fmt.Errorf("apply YAML policy: %w", err)
 		}
 		if cfg.PolicyURL != "" {
-			workers.Go(func() {
+			watchRemote = func() {
 				yamlManager.Watch(ctx, func(bundle policyconfig.Bundle, metadata policyconfig.LoadMetadata, loadErr error) {
 					source := yamlPolicySource(metadata, cfg)
 					metrics.IncPolicySourceLoad(source, loadErr == nil)
@@ -214,7 +217,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 						recorder.ErrorDedup("apply refreshed YAML policy", err, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
 					}
 				})
-			})
+			}
 		}
 	}
 	emptyPolicy, err := policyconfig.EmptyBundle()
@@ -246,6 +249,14 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		}
 	}
 
+	// Held events are evaluated before any worker can change the policy, so
+	// all of them are judged by the startup policy.
+	if skipped := detections.arm(); skipped > 0 {
+		recorder.Error("detection skipped events read while policy loaded", nil, map[string]any{"skipped_events": skipped})
+	}
+	if watchRemote != nil {
+		workers.Go(watchRemote)
+	}
 	if reloadCh != nil && yamlManager != nil {
 		workers.Go(func() { runPolicyReloads(ctx, reloadCh, yamlManager, policyController, cfg, recorder, metrics) })
 	}
@@ -256,9 +267,6 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	exceptions := newExceptionWatcher(detector, metrics, recorder)
 	exceptions.collect(time.Now())
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, exceptions.collect) })
-	if skipped := detections.arm(); skipped > 0 {
-		recorder.Error("detection skipped events read while policy loaded", nil, map[string]any{"skipped_events": skipped})
-	}
 
 	started = true
 	monitor.KeepPins()
@@ -471,7 +479,9 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			if !cfg.FileAudit {
 				return
 			}
-			recorder.InfoAt(event.Timestamp, eventName, fields)
+			// Like opens, repeats of the same request are suppressed, so
+			// temporary-file churn does not record every syscall.
+			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
 		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 			fields["direction"] = event.Direction
 			fields["peer_address"] = event.Address

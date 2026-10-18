@@ -1564,6 +1564,30 @@ func TestFileAuditFingerprintUsesFixedDigestAndRequestedPath(t *testing.T) {
 	}
 }
 
+func TestFileAuditFingerprintSeparatesFileChangeRequests(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]any{"event": "file_change", "requested_path": "/etc/hosts", "program": "sh"}
+	seen := map[recordFingerprint]string{}
+	for name, extra := range map[string]map[string]any{
+		"unlink":       {"operation": "unlink"},
+		"chmod 0644":   {"operation": "chmod", "requested_mode": "0644"},
+		"chmod 4755":   {"operation": "chmod", "requested_mode": "4755"},
+		"rename":       {"operation": "rename", "new_path": "/etc/hosts.bak"},
+		"rename other": {"operation": "rename", "new_path": "/tmp/x"},
+		"chown":        {"operation": "chown", "requested_uid": uint32(0)},
+		"truncate":     {"operation": "truncate", "truncate_length": uint64(0)},
+	} {
+		fields := maps.Clone(base)
+		maps.Copy(fields, extra)
+		fingerprint := fingerprintFileAuditRecord("file_change", fields)
+		if other, ok := seen[fingerprint]; ok {
+			t.Errorf("%s and %s share a fingerprint, so one would be suppressed", name, other)
+		}
+		seen[fingerprint] = name
+	}
+}
+
 func TestExportBatchRejectsPayloadAboveByteLimit(t *testing.T) {
 	t.Parallel()
 

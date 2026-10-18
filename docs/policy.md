@@ -663,7 +663,7 @@ excluded.
 | `mount` | `mount` request. |
 | `namespace_change` | `setns` or `unshare` request. |
 | `privilege_change` | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, or `capset` request. |
-| `file_change` | Path-based unlink, rmdir, rename, chmod, chown, or truncate request, observed with file auditing. |
+| `file_change` | Path-based unlink, rmdir, rename, link, symlink, chmod, chown, or truncate request, observed with file auditing. |
 | `file_integrity` | A watched file was created, modified, deleted, or changed attributes. See [file integrity monitoring](#file-integrity-monitoring). |
 
 `memfd_create` through `privilege_change` are [security events](#security-events).
@@ -1066,7 +1066,7 @@ file_integrity:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `paths` | — | Exact clean absolute paths, or subtrees ending in `/**`. Watching starts when at least one is set. |
-| `exclude` | — | Paths or subtrees within `paths` to skip. |
+| `exclude` | — | Paths within `paths` to skip. An exact path skips only itself, so an excluded directory's entries are still watched; end it in `/**` to skip its whole subtree. |
 | `hash` | `true` | Record a SHA-256 of each regular file. |
 | `max_hash_bytes` | 16 MiB | Larger files are compared by size and modification time instead; at most 1 GiB. `0` selects the default. |
 | `rescan_interval` | `1h` | Period of the full rescan; `0` disables it, otherwise at least `1m`. |
@@ -1120,7 +1120,11 @@ detection rules:
 | `actor_*` | The triggering event's `event`, `operation`, `pid`, `program`, `kernel_uid`, `cgroup_id`, `process_start_ticks`, and `current_*` enrichment, for `detection_source=event`. |
 
 Content comparison uses digests when both states were hashed and falls back to
-size and modification time otherwise. Metrics are
+size and modification time otherwise. A hashed file that can no longer be read
+is reported once as a content change, since its content cannot be verified,
+and is compared with its last digest once it can be read again. A watched path
+is never read through a symlinked directory above it, so a symlink cannot
+redirect the scan. Metrics are
 `traceguard_file_integrity_files`, `traceguard_file_integrity_truncated`,
 `traceguard_file_integrity_changes_total{change}`, and
 `traceguard_file_integrity_dropped_checks_total`; when more than 4,096 paths are
@@ -1135,11 +1139,14 @@ specific subtrees to `/**`.
 The file change hooks attach whether or not file auditing is on, so file
 integrity monitoring always sees these requests; `file_change` events are
 recorded only with file auditing. They report path-based unlink, rmdir,
-rename, chmod, chown, and truncate requests at syscall entry, with
-`requested_path`, `operation`, and as relevant `new_path`, `requested_mode`,
-`requested_uid`, `requested_gid`, `truncate_length`, `requested_dirfd`, and
-`requested_flags`. Like `file_access`, the path is as requested and may be
-relative. Descriptor-based variants such as `fchmod` and `ftruncate` are not
+rename, link, symlink, chmod, chown, and truncate requests at syscall entry,
+with `requested_path`, `operation`, and as relevant `new_path`,
+`requested_mode`, `requested_uid`, `requested_gid`, `truncate_length`,
+`requested_dirfd`, and `requested_flags`. For `link`, `requested_path` is the
+existing file and `new_path` the new link; for `symlink`, `requested_path` is
+the link's target text and `new_path` the symlink created. A repeat of the same
+request by the same process is recorded once per five minutes, like file
+audit. Like `file_access`, the path is as requested and may be relative. Descriptor-based variants such as `fchmod` and `ftruncate` are not
 observed; the rescan covers them. TraceGuard's own file activity is excluded
 from file audit and file change events, because hashing would otherwise audit
 itself.

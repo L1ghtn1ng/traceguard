@@ -159,3 +159,29 @@ func TestAppendExecFields(t *testing.T) {
 		})
 	}
 }
+
+func TestExecDescriptorNormalisesPaths(t *testing.T) {
+	t.Parallel()
+
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "42"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc/42/fd", filepath.Join(procRoot, "42", "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]int32{
+		"//proc/self/fd/3": 3, "/proc/./self/fd/4": 4, "/proc/self/task/42/fd/5": 5, "/proc/42/task/43/fd/6": 6,
+		"/dev//fd/7": 7, "/proc/self/fd/../fd/8": 8, "9": 9,
+	} {
+		event := ebpf.Event{PID: 42, Filename: path, FileMode: atFDCWD}
+		if fd, ok := execDescriptor(procRoot, event); !ok || fd != want {
+			t.Errorf("execDescriptor(%q) = %d, %t; want %d", path, fd, ok, want)
+		}
+	}
+	for _, path := range []string{"/proc/self/exe", "/proc/self/task/x/fd/3", "/usr/bin/fd/3", "./tool"} {
+		if fd, ok := execDescriptor(procRoot, ebpf.Event{PID: 42, Filename: path, FileMode: atFDCWD}); ok {
+			t.Errorf("execDescriptor(%q) = %d, want a path exec", path, fd)
+		}
+	}
+}

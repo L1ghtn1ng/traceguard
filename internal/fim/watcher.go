@@ -130,6 +130,13 @@ func (w *Watcher) Notify(path string, actor Actor) {
 	w.mu.Unlock()
 }
 
+// PendingPaths lists the paths waiting for a check, sorted.
+func (w *Watcher) PendingPaths() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Sorted(maps.Keys(w.pending))
+}
+
 // Stats returns the current watcher statistics.
 func (w *Watcher) Stats() Stats {
 	w.mu.Lock()
@@ -257,6 +264,15 @@ func (w *Watcher) checkDue(now time.Time, emit func(Change, Actor)) {
 	for path, check := range due {
 		result := w.scanAffected(s, path)
 		w.mu.Lock()
+		if w.rebuild {
+			// The policy changed during the scan. Requeue the check for
+			// after the rebuild, so it is judged by the new policy.
+			if _, queued := w.pending[path]; !queued {
+				w.pending[path] = check
+			}
+			w.mu.Unlock()
+			continue
+		}
 		changes, final := reconcile(affectedKeys(path, w.baseline, result), w.baseline, result, func(string) bool { return true })
 		for key, state := range final {
 			if state != nil {
@@ -270,6 +286,9 @@ func (w *Watcher) checkDue(now time.Time, emit func(Change, Actor)) {
 		actor := check.actor
 		if check.ambiguous {
 			actor = maps.Clone(actor)
+			if actor == nil {
+				actor = Actor{}
+			}
 			actor["actor_ambiguous"] = true
 		}
 		for _, change := range changes {

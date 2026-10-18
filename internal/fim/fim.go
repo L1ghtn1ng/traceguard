@@ -52,6 +52,9 @@ type State struct {
 	// HashSkipped says why SHA256 is empty: "disabled", "size",
 	// "not_regular", or "unreadable".
 	HashSkipped string
+	// verifiedSHA256 is the last digest of a file that has since become
+	// unreadable, so its content is checked again once it can be read.
+	verifiedSHA256 string
 }
 
 // Change describes how a watched path differs from its baseline.
@@ -120,6 +123,11 @@ func (s scanner) Baseline() scanResult {
 // scanTree records path and, for a subtree, everything beneath it. It
 // returns false once MaxFiles is reached.
 func (s scanner) scanTree(path string, subtree bool, result *scanResult) bool {
+	if s.throughSymlink(path) {
+		// The configured path only resolves through a symlinked directory,
+		// so nothing at it lies within the watched path.
+		return s.withinLimit(result)
+	}
 	if !subtree {
 		if s.watched(path) {
 			s.record(path, result)
@@ -135,7 +143,9 @@ func (s scanner) scanTree(path string, subtree bool, result *scanResult) bool {
 			return nil
 		}
 		if !s.watched(logical) {
-			if entry.IsDir() && logical != "/" {
+			// An exact exclusion leaves out only that path; its entries may
+			// still be watched.
+			if entry.IsDir() && logical != "/" && (!matchesAny(s.policy.Paths, logical) || excludesSubtree(s.policy.Exclude, logical)) {
 				return fs.SkipDir
 			}
 			return nil
@@ -173,6 +183,30 @@ func (s scanner) record(path string, result *scanResult) {
 // excluded.
 func (s scanner) watched(path string) bool {
 	return matchesAny(s.policy.Paths, path) && !matchesAny(s.policy.Exclude, path)
+}
+
+// excludesSubtree reports whether a /** pattern excludes path and
+// everything beneath it.
+func excludesSubtree(patterns []string, path string) bool {
+	for _, pattern := range patterns {
+		if stem, ok := strings.CutSuffix(pattern, "/**"); ok && (stem == "" || path == stem || strings.HasPrefix(path, stem+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// throughSymlink reports whether a directory above path, below the scan
+// root, is a symlink. Lstat and O_NOFOLLOW protect only the last component.
+func (s scanner) throughSymlink(path string) bool {
+	parent := filepath.Dir(path)
+	for directory := parent; directory != "/" && directory != "."; directory = filepath.Dir(directory) {
+		info, err := os.Lstat(s.host(directory))
+		if err == nil && info.Mode()&fs.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesAny(patterns []string, path string) bool {
@@ -319,8 +353,10 @@ func diff(path string, previous, current *State) (Change, bool) {
 }
 
 // contentChanged compares digests when both sides were hashed, and falls
-// back to size and modification time otherwise. Directories have no content
-// to compare.
+// back to size and modification time otherwise. A hashed file that can no
+// longer be read counts as changed, since its content cannot be verified, and
+// it is compared with its last digest once it can be read again. Directories
+// have no content to compare.
 func contentChanged(previous, current *State) bool {
 	switch {
 	case current.Type == "directory":
@@ -329,6 +365,10 @@ func contentChanged(previous, current *State) bool {
 		return previous.LinkTarget != current.LinkTarget
 	case previous.SHA256 != "" && current.SHA256 != "":
 		return previous.SHA256 != current.SHA256
+	case previous.SHA256 != "" && current.HashSkipped == "unreadable":
+		return true
+	case previous.verifiedSHA256 != "" && current.SHA256 != "":
+		return previous.verifiedSHA256 != current.SHA256
 	default:
 		return previous.Size != current.Size || !previous.ModTime.Equal(current.ModTime)
 	}
@@ -350,9 +390,11 @@ func reconcile(keys []string, baseline map[string]State, result scanResult, repo
 		case !hasCurrent && hadPrevious && !result.known(key):
 			final[key] = &previous
 			continue
-		case hasCurrent && hadPrevious && current.HashSkipped == "unreadable" && previous.SHA256 != "" &&
-			current.Type == previous.Type && current.Size == previous.Size && current.ModTime.Equal(previous.ModTime):
-			current.SHA256, current.HashSkipped = previous.SHA256, ""
+		case hasCurrent && hadPrevious && current.HashSkipped == "unreadable":
+			current.verifiedSHA256 = previous.SHA256
+			if current.verifiedSHA256 == "" {
+				current.verifiedSHA256 = previous.verifiedSHA256
+			}
 		}
 		var before, after *State
 		if hadPrevious {
