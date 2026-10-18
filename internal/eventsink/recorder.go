@@ -132,16 +132,6 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 			return nil, err
 		}
 		recorder.exporter = exporter
-		if exporter.spool != nil {
-			// Batches spooled under another -event-schema are kept for when
-			// it returns, so say how many are waiting.
-			if count, err := exporter.spool.stranded(); err == nil && count > 0 {
-				recorder.Error("export spool holds batches in another event schema", nil, map[string]any{
-					"spool_batches": count, "event_schema": cfg.Schema,
-					"detail": "they are kept and sent when that -event-schema is configured again",
-				})
-			}
-		}
 	}
 	if strings.TrimSpace(cfg.SyslogURL) != "" {
 		syslog, err := newSyslogSink(ctx, cfg, metrics, recorder.hostname)
@@ -150,6 +140,16 @@ func NewRecorder(ctx context.Context, logger *logging.Logger, metrics *telemetry
 			return nil, err
 		}
 		recorder.syslog = syslog
+	}
+	// Batches spooled under another -event-schema are kept for when it
+	// returns, so say how many are waiting, once every sink can carry it.
+	if recorder.exporter != nil && recorder.exporter.spool != nil {
+		if count, err := recorder.exporter.spool.stranded(); err == nil && count > 0 {
+			recorder.Error("export spool holds batches in another event schema", nil, map[string]any{
+				"spool_batches": count, "event_schema": cfg.Schema,
+				"detail": "they are kept and sent when that -event-schema is configured again",
+			})
+		}
 	}
 	return recorder, nil
 }

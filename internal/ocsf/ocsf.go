@@ -428,7 +428,11 @@ func mapFile(event map[string]any, name string, c *converter) {
 			event["file"] = fileObject(c.text("new_path"), 1)
 			return
 		}
-		file = fileObject(c.text("requested_path"), 1)
+		typeID := 1
+		if c.peek("operation") == "rmdir" {
+			typeID = 2 // Folder
+		}
+		file = fileObject(c.text("requested_path"), typeID)
 	}
 	event["file"] = file
 	if newPath := c.text("new_path"); newPath != "" {
