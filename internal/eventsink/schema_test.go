@@ -1,12 +1,18 @@
 package eventsink
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 )
 
 func TestNewRecordEncoderSelectsSchema(t *testing.T) {
@@ -244,5 +250,94 @@ func TestSpoolReplaySkipsUnreadableEntries(t *testing.T) {
 	}
 	if len(files) != 1 || files[0] != "0-oversized.json" {
 		t.Fatalf("spool files = %v, want only the unreadable entry left in place", files)
+	}
+}
+
+// stalledCollector answers after headers only once release is closed; until
+// then it holds the request or, with headersFirst, the reply body.
+func stalledCollector(t *testing.T, headersFirst bool) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if headersFirst {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+	return server
+}
+
+func TestExportSendStopsDrainingAStalledReply(t *testing.T) {
+	t.Parallel()
+
+	server := stalledCollector(t, true)
+	sink := &exportSink{client: server.Client(), target: server.URL, drainTimeout: 50 * time.Millisecond}
+	started := time.Now()
+	if err := sink.sendPayload(t.Context(), []byte("[]")); err != nil {
+		t.Fatalf("sendPayload returned error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("sendPayload waited %s on a stalled reply body, want about the drain timeout", elapsed)
+	}
+}
+
+func TestExportReplayBudgetBoundsAStalledRequest(t *testing.T) {
+	t.Parallel()
+
+	store, err := newSpoolStore(t.TempDir(), SchemaTraceGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.Write([]json.RawMessage{json.RawMessage(`{"event":"dns"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	server := stalledCollector(t, false)
+	metrics := telemetry.NewRegistry()
+	sink := &exportSink{
+		client: server.Client(), target: server.URL, metrics: metrics, spool: store,
+		drainTimeout: time.Second, replayBudget: 100 * time.Millisecond,
+	}
+	started := time.Now()
+	sink.replay(context.Background())
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("replay ran %s against a stalled collector, want about its budget", elapsed)
+	}
+	if files, err := store.files(); err != nil || len(files) != 1 {
+		t.Fatalf("spool files = %v, %v; want the unsent batch kept", files, err)
+	}
+	if rendered := metrics.Render(); !strings.Contains(rendered, `traceguard_event_export_total{status="replay_error"} 1`) {
+		t.Fatalf("metrics lack the replay error:\n%s", rendered)
+	}
+}
+
+func TestExportReplayCountsUnreadableEntries(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := newSpoolStore(dir, SchemaTraceGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := os.WriteFile(filepath.Join(dir, "0-oversized.json"), make([]byte, maxSpoolPayloadBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metrics := telemetry.NewRegistry()
+	sink := &exportSink{metrics: metrics, spool: store, replayBudget: time.Second}
+	sink.replay(t.Context())
+	if rendered := metrics.Render(); !strings.Contains(rendered, `traceguard_event_export_total{status="spool_error"} 1`) {
+		t.Fatalf("metrics lack the unreadable spool entry:\n%s", rendered)
 	}
 }

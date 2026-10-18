@@ -33,6 +33,19 @@ type syslogSink struct {
 	wg         sync.WaitGroup
 	hostname   string
 	encode     recordEncoder
+	// maxConnAge, when positive, redials a connection that old, so a
+	// collector hostname is resolved again; for UDP it is the only way a
+	// changed address is noticed. A reused TCP or TLS connection idle for at
+	// least idleProbe is checked for a peer close before it is written to.
+	maxConnAge time.Duration
+	idleProbe  time.Duration
+}
+
+// syslogConn is the sink's open connection with when it was dialed and last
+// written.
+type syslogConn struct {
+	net.Conn
+	dialed, used time.Time
 }
 
 // RFC 5424 section 6 header field limits. HOSTNAME, APP-NAME, PROCID and
@@ -40,6 +53,16 @@ type syslogSink struct {
 const (
 	maxSyslogHostnameBytes = 255
 	maxSyslogTagBytes      = 48
+)
+
+const (
+	syslogMaxConnAge = time.Minute
+	// syslogIdleProbe is how long a connection sits unused before a write
+	// first checks that the collector has not closed it; a burst of
+	// messages pays no check.
+	syslogIdleProbe = time.Second
+	// syslogProbeWait is how long the check waits for a close to show.
+	syslogProbeWait = time.Millisecond
 )
 
 func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry, hostname string) (*syslogSink, error) {
@@ -111,6 +134,8 @@ func newSyslogSink(ctx context.Context, cfg Config, metrics *telemetry.Registry,
 		cancel:     cancel,
 		hostname:   sanitizeSyslogToken(hostname, maxSyslogHostnameBytes),
 		encode:     encode,
+		maxConnAge: syslogMaxConnAge,
+		idleProbe:  syslogIdleProbe,
 	}
 	sink.wg.Go(func() {
 		sink.run(sinkCtx)
@@ -140,8 +165,9 @@ func (s *syslogSink) Enqueue(entry record) {
 
 func (s *syslogSink) run(ctx context.Context) {
 	// One connection carries every message, so a burst does not pay a TCP or
-	// TLS handshake per record; it is redialed after a failed write.
-	var conn net.Conn
+	// TLS handshake per record; it is redialed when stale or after a failed
+	// write.
+	var conn *syslogConn
 	defer func() {
 		if conn != nil {
 			_ = conn.Close()
@@ -166,26 +192,32 @@ func (s *syslogSink) run(ctx context.Context) {
 	}
 }
 
-// send writes payload over conn, dialing when conn is nil, and returns the
-// connection to reuse. A write on a reused connection that fails, as one the
-// collector closed while idle does, is retried once on a new connection.
-func (s *syslogSink) send(ctx context.Context, conn net.Conn, payload []byte) (net.Conn, error) {
+// send writes payload over conn, dialing when conn is nil or stale, and
+// returns the connection to reuse. A write on a reused connection that fails
+// is retried once on a new connection.
+func (s *syslogSink) send(ctx context.Context, conn *syslogConn, payload []byte) (*syslogConn, error) {
 	if s.network == "tcp" {
 		payload = fmt.Appendf(nil, "%d %s", len(payload), payload)
+	}
+	if conn != nil && s.stale(conn, time.Now()) {
+		_ = conn.Close()
+		conn = nil
 	}
 	for attempt := 0; ; attempt++ {
 		reused := conn != nil
 		if conn == nil {
-			var err error
-			if conn, err = s.dial(ctx); err != nil {
+			dialed, err := s.dial(ctx)
+			if err != nil {
 				return nil, err
 			}
+			conn = &syslogConn{Conn: dialed, dialed: time.Now()}
 		}
 		err := conn.SetWriteDeadline(time.Now().Add(s.timeout))
 		if err == nil {
 			_, err = conn.Write(payload)
 		}
 		if err == nil {
+			conn.used = time.Now()
 			return conn, nil
 		}
 		_ = conn.Close()
@@ -194,6 +226,30 @@ func (s *syslogSink) send(ctx context.Context, conn net.Conn, payload []byte) (n
 			return nil, err
 		}
 	}
+}
+
+// stale reports whether conn should be replaced before the next write: it
+// is past maxConnAge, or it is a TCP or TLS connection that sat idle and the
+// collector has since closed. A write to a peer-closed TCP connection can
+// succeed locally and lose the record, so the close is looked for first.
+func (s *syslogSink) stale(conn *syslogConn, now time.Time) bool {
+	if s.maxConnAge > 0 && now.Sub(conn.dialed) >= s.maxConnAge {
+		return true
+	}
+	if s.network != "tcp" || now.Sub(conn.used) < s.idleProbe {
+		return false
+	}
+	if err := conn.SetReadDeadline(now.Add(syslogProbeWait)); err != nil {
+		return true
+	}
+	// Collectors send nothing back, so any byte, EOF, or error other than
+	// the deadline means the stream is no longer usable.
+	n, err := conn.Read(make([]byte, 1))
+	if resetErr := conn.SetReadDeadline(time.Time{}); resetErr != nil {
+		return true
+	}
+	var netErr net.Error
+	return n > 0 || !errors.As(err, &netErr) || !netErr.Timeout()
 }
 
 func (s *syslogSink) dial(ctx context.Context) (net.Conn, error) {

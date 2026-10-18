@@ -62,28 +62,36 @@ func (r *Responder) Recover() {
 		})
 		return
 	}
-	// Track every record before thawing any, because each thaw rewrites the
-	// state file from what is tracked; a crash mid-way must not lose the rest.
-	recovered := make([]actionKey, 0, len(records))
-	for _, frozen := range records {
-		key := actionKey{action: policy.ResponseFreezeCgroup, target: fmt.Sprint(frozen.CgroupID)}
-		if r.freezer == nil {
+	if r.freezer == nil {
+		for _, frozen := range records {
 			r.retained = append(r.retained, frozen)
 			r.record("response revert failed", map[string]any{
-				"event": "response", "action": key.action, "target": key.target, "mode": r.mode, "reason": "restart",
+				"event": "response", "action": policy.ResponseFreezeCgroup, "target": fmt.Sprint(frozen.CgroupID), "mode": r.mode, "reason": "restart",
 				"error": "cgroup freezing is unavailable, so " + frozen.Path + " stays frozen and stays recorded for the next start",
 			})
+		}
+		r.persistLocked()
+		return
+	}
+	// Each thaw rewrites the state file from what is tracked, so records not
+	// yet attempted stay retained until their turn: a crash mid-way must not
+	// lose them. Records are taken one at a time, so two with the same
+	// cgroup ID each get their own attempt.
+	kept := r.retained
+	for index, frozen := range records {
+		r.retained = append(slices.Clone(kept), records[index+1:]...)
+		key := actionKey{action: policy.ResponseFreezeCgroup, target: fmt.Sprint(frozen.CgroupID)}
+		if _, tracked := r.active[key]; tracked {
+			// An earlier record of this cgroup failed to thaw and is retried
+			// under this key; keep this one for the next start.
+			kept = append(kept, frozen)
 			continue
 		}
 		action := &active{owners: map[string]owner{}, until: r.options.Now(), applied: true, cgroupID: frozen.CgroupID, cgroupPath: frozen.Path}
 		r.active[key] = action
-		recovered = append(recovered, key)
+		r.revertLocked(key, action, "restart")
 	}
-	for _, key := range recovered {
-		if action, ok := r.active[key]; ok {
-			r.revertLocked(key, action, "restart")
-		}
-	}
+	r.retained = kept
 	r.persistLocked()
 }
 

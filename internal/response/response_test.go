@@ -52,7 +52,9 @@ type fakeFreezer struct {
 	already  bool
 	thawedID map[uint64]bool
 	// onThaw, when set, runs before each thaw.
-	onThaw func(id uint64)
+	onThaw func(id uint64, path string)
+	// thawedPaths lists each successful thaw's path in order.
+	thawedPaths []string
 }
 
 func (f *fakeFreezer) Check(id uint64) (string, error) {
@@ -75,13 +77,14 @@ func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
 
 func (f *fakeFreezer) Thaw(id uint64, path string) error {
 	if f.onThaw != nil {
-		f.onThaw(id)
+		f.onThaw(id, path)
 	}
 	if f.thawErr != nil {
 		return f.thawErr
 	}
 	delete(f.frozen, path)
 	f.thawedID[id] = true
+	f.thawedPaths = append(f.thawedPaths, path)
 	return nil
 }
 
@@ -506,7 +509,7 @@ func TestRecoverKeepsUnthawedRecordsWhileThawing(t *testing.T) {
 	}
 
 	again := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
-	again.freezer.onThaw = func(id uint64) {
+	again.freezer.onThaw = func(id uint64, _ string) {
 		// A crash now must leave every cgroup not yet thawed recorded.
 		payload, err := os.ReadFile(state) //nolint:gosec // test path
 		if err != nil {
@@ -521,6 +524,34 @@ func TestRecoverKeepsUnthawedRecordsWhileThawing(t *testing.T) {
 	again.responder.Recover()
 	if len(again.freezer.thawedID) != 3 || again.responder.Active() != 0 {
 		t.Fatalf("recover thawed %v with %d active, want all three thawed", again.freezer.thawedID, again.responder.Active())
+	}
+}
+
+func TestRecoverThawsEveryRecordOfADuplicateCgroupID(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	payload := `{"boot_id":"boot-a","frozen":[{"cgroup_id":7,"path":"/a.slice/old"},{"cgroup_id":7,"path":"/a.slice/new"},{"cgroup_id":8,"path":"/b.slice/c"}]}`
+	if err := os.WriteFile(state, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	want := []string{"/a.slice/old", "/a.slice/new", "/b.slice/c"}
+	h.freezer.onThaw = func(_ uint64, path string) {
+		// Every record not yet attempted is still in the file.
+		saved, err := os.ReadFile(state) //nolint:gosec // test path
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, later := range want[slices.Index(want, path)+1:] {
+			if !strings.Contains(string(saved), later) {
+				t.Errorf("while thawing %s the state file dropped %s: %s", path, later, saved)
+			}
+		}
+	}
+	h.responder.Recover()
+	if !slices.Equal(h.freezer.thawedPaths, want) || h.responder.Active() != 0 {
+		t.Fatalf("thawed %v with %d active, want %v", h.freezer.thawedPaths, h.responder.Active(), want)
 	}
 }
 

@@ -19,7 +19,9 @@ const (
 	exportReplayInterval = 15 * time.Second
 	// exportReplayBudget bounds how long one replay tick sends spooled
 	// batches before the worker returns to the live queue.
-	exportReplayBudget      = 5 * time.Second
+	exportReplayBudget = 5 * time.Second
+	// exportDrainTimeout bounds reading an export reply body.
+	exportDrainTimeout      = time.Second
 	maxDrainedResponseBytes = 64 << 10
 	exportShutdownFlush     = 10 * time.Second
 	exportBatchSize         = 50
