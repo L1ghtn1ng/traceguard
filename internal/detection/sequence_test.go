@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -200,5 +201,44 @@ func TestSequenceCooldownHoldsWhenRecordsAreFull(t *testing.T) {
 	}
 	if got := complete(20, 20); got != 0 {
 		t.Fatalf("a key in cooldown alerted %d times after the records filled", got)
+	}
+}
+
+func TestSequenceSkipsNullIdentity(t *testing.T) {
+	t.Parallel()
+
+	for _, fields := range []map[string]any{
+		{"pid": nil, "process_start_ticks": nil},
+		{"pid": uint32(0), "process_start_ticks": uint64(0)},
+	} {
+		if _, ok := sequenceKey("s", policy.SequenceKeyProcess, fields); ok {
+			t.Errorf("process key built from %v", fields)
+		}
+	}
+	if _, ok := sequenceKey("s", policy.SequenceKeyCgroup, map[string]any{"cgroup_id": nil}); ok {
+		t.Error("cgroup key built from a null cgroup_id")
+	}
+}
+
+func TestSequenceIDsAndDisabledExceptions(t *testing.T) {
+	t.Parallel()
+
+	builtinID := shellThenEgress(policy.SequenceKeyProcess, 0)
+	builtinID.ID = "baseline.cloud-metadata-access"
+	if _, err := Compile(policy.Bundle{DetectionSequences: []policy.DetectionSequence{builtinID}}); err == nil || !strings.Contains(err.Error(), "built-in rule") {
+		t.Fatalf("sequence with a built-in ID error = %v", err)
+	}
+
+	exception := policy.DetectionException{
+		ID: "quiet", Rules: []string{"shell-then-egress"}, Reason: "kept for later", Match: policy.DetectionMatch{UIDs: []uint32{33}},
+	}
+	if _, err := Compile(policy.Bundle{DisabledRuleIDs: []string{"shell-then-egress"}, DetectionExceptions: []policy.DetectionException{exception}}); err != nil {
+		t.Fatalf("an exception for a disabled sequence rejected the policy: %v", err)
+	}
+
+	engine := sequenceEngine(t, shellThenEgress(policy.SequenceKeyProcess, 0))
+	engine.Evaluate(sequenceEvent(1, "exec", 10, 1, shellExec))
+	if got := engine.StateCount(); got < 1 {
+		t.Fatalf("StateCount = %d, want the in-progress sequence counted", got)
 	}
 }

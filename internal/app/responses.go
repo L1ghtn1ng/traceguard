@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
@@ -20,6 +22,11 @@ func newResponder(cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.
 		}
 	} else {
 		freezer = response.NewCgroupFreezer(cfg.CgroupPath, procCgroup)
+		// Every freeze is refused until TraceGuard can find itself in the
+		// hierarchy; say so now rather than at the first alert.
+		if _, err := response.LocateSelf(cfg.CgroupPath, procCgroup, os.Getpid()); err != nil && cfg.ResponseMode != response.ModeOff {
+			recorder.Error("cgroup freeze responses will be refused", err, nil)
+		}
 	}
 	options := response.Options{StatePath: cfg.ResponseStatePath}
 	bootID, err := response.BootID("/proc/sys/kernel/random/boot_id")

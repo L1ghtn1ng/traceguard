@@ -215,7 +215,8 @@ type Matcher struct {
 	ipv4    prefixIndex
 	ipv6    prefixIndex
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// cooldowns maps a cooldown key to when its cooldown ends.
 	cooldowns map[string]time.Time
 }
 
@@ -274,17 +275,13 @@ func (m *Matcher) Evaluate(event detection.Event) []detection.Alert {
 	case slices.Contains(domainEvents, event.Name):
 		match, ok = m.matchDomain(event.Fields["domain"])
 	case slices.Contains(addressEvents, event.Name):
-		address, _ := event.Fields["peer_address"].(string)
-		if address == "" {
-			address, _ = event.Fields["address"].(string)
-		}
-		match, ok = m.matchAddress(address)
+		match, ok = m.matchAddress(address(event))
 	}
 	if !ok {
 		return nil
 	}
 	feed := m.feeds[match.feed].Config
-	if !m.allow(feed, match, event) {
+	if !m.allow(feed, match, address(event), event) {
 		return nil
 	}
 	fields := maps.Clone(event.Fields)
@@ -295,6 +292,15 @@ func (m *Matcher) Evaluate(event detection.Event) []detection.Alert {
 		Message: "an event matched threat intelligence feed " + feed.ID,
 		Tags:    []string{"threat-intel", feed.Type}, Count: 1, Timestamp: event.Timestamp, Fields: fields,
 	}}
+}
+
+// address returns an address event's peer address.
+func address(event detection.Event) string {
+	peer, _ := event.Fields["peer_address"].(string)
+	if peer == "" {
+		peer, _ = event.Fields["address"].(string)
+	}
+	return peer
 }
 
 func (m *Matcher) matchDomain(value any) (indicator, bool) {
@@ -329,8 +335,12 @@ func (m *Matcher) matchAddress(text string) (indicator, bool) {
 	return indicator{feed: feed, value: prefix.String()}, true
 }
 
-// allow applies the feed's cooldown per indicator and cgroup.
-func (m *Matcher) allow(feed policy.ThreatIntelFeed, match indicator, event detection.Event) bool {
+// allow applies the feed's cooldown per indicator, peer address, and
+// cgroup. Keying by peer address lets every host in a listed range alert, and
+// so drive its own response. Each record keeps its own end time, so a feed
+// with a short cooldown never clears another feed's records; when the records
+// are full, the one ending soonest makes room.
+func (m *Matcher) allow(feed policy.ThreatIntelFeed, match indicator, peer string, event detection.Event) bool {
 	cooldown := feed.AlertCooldown()
 	if cooldown <= 0 {
 		return true
@@ -340,22 +350,34 @@ func (m *Matcher) allow(feed policy.ThreatIntelFeed, match indicator, event dete
 		// Socket-cache attribution carries the cgroup separately.
 		cgroup = event.Fields["cached_cgroup_id"]
 	}
-	key := fmt.Sprintf("%s\x00%s\x00%v", feed.ID, match.value, cgroup)
+	if feed.Type != policy.FeedTypeAddresses {
+		peer = ""
+	}
+	key := fmt.Sprintf("%s\x00%s\x00%s\x00%v", feed.ID, match.value, peer, cgroup)
+	now := event.Timestamp
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if last, ok := m.cooldowns[key]; ok && event.Timestamp.Sub(last) < cooldown {
+	if until, ok := m.cooldowns[key]; ok && now.Before(until) {
 		return false
 	}
-	if len(m.cooldowns) >= maxCooldowns {
-		for existing, last := range m.cooldowns {
-			if event.Timestamp.Sub(last) >= cooldown {
+	if _, ok := m.cooldowns[key]; !ok && len(m.cooldowns) >= maxCooldowns {
+		for existing, until := range m.cooldowns {
+			if !now.Before(until) {
 				delete(m.cooldowns, existing)
 			}
 		}
+		if len(m.cooldowns) >= maxCooldowns {
+			var soonest string
+			var soonestUntil time.Time
+			for existing, until := range m.cooldowns {
+				if soonestUntil.IsZero() || until.Before(soonestUntil) {
+					soonest, soonestUntil = existing, until
+				}
+			}
+			delete(m.cooldowns, soonest)
+		}
 	}
-	if len(m.cooldowns) < maxCooldowns {
-		m.cooldowns[key] = event.Timestamp
-	}
+	m.cooldowns[key] = now.Add(cooldown)
 	return true
 }
 
@@ -366,4 +388,78 @@ func (m *Matcher) Indicators() map[string]int {
 		counts[feed.Config.ID] = len(feed.Domains) + len(feed.Prefixes)
 	}
 	return counts
+}
+
+// Shadow is a blocking feed's indicators that an allow rule lets through.
+// Allow rules are checked before block rules, so the feed blocks none of
+// them for the traffic that rule matches.
+type Shadow struct {
+	Feed       string
+	Rule       string
+	Indicators int
+}
+
+// Shadowed lists blocking feeds whose indicators overlap an egress allow
+// rule's destinations or a DNS allow entry in bundle, the policy before
+// Enforce adds the feeds.
+func Shadowed(bundle policy.Bundle, feeds []Feed) []Shadow {
+	var shadows []Shadow
+	for _, feed := range feeds {
+		if !feed.Config.Block {
+			continue
+		}
+		for _, rule := range bundle.Egress.Rules {
+			if rule.Action != "allow" {
+				continue
+			}
+			if count := overlappingPrefixes(feed.Prefixes, rule.Destinations.CIDRs); count > 0 {
+				shadows = append(shadows, Shadow{Feed: feed.Config.ID, Rule: rule.ID, Indicators: count})
+			}
+		}
+		if count := overlappingDomains(feed.Domains, bundle.DNS.AllowDomains, bundle.DNS.AllowSuffixes); count > 0 {
+			shadows = append(shadows, Shadow{Feed: feed.Config.ID, Rule: "dns.allow", Indicators: count})
+		}
+	}
+	return shadows
+}
+
+// overlappingPrefixes counts prefixes that share an address with cidrs;
+// omitted CIDRs match every destination.
+func overlappingPrefixes(prefixes []netip.Prefix, cidrs []string) int {
+	if len(prefixes) == 0 {
+		return 0
+	}
+	if len(cidrs) == 0 {
+		return len(prefixes)
+	}
+	allowed := make([]netip.Prefix, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		if prefix, err := netip.ParsePrefix(cidr); err == nil {
+			allowed = append(allowed, prefix.Masked())
+		}
+	}
+	count := 0
+	for _, prefix := range prefixes {
+		if slices.ContainsFunc(allowed, prefix.Overlaps) {
+			count++
+		}
+	}
+	return count
+}
+
+// overlappingDomains counts blocked domains that an allowed domain or suffix
+// covers in whole or in part.
+func overlappingDomains(domains, allowDomains, allowSuffixes []string) int {
+	count := 0
+	for _, domain := range domains {
+		overlaps := slices.ContainsFunc(allowDomains, func(allowed string) bool {
+			return allowed == domain || strings.HasSuffix(allowed, "."+domain)
+		}) || slices.ContainsFunc(allowSuffixes, func(allowed string) bool {
+			return allowed == domain || strings.HasSuffix(allowed, "."+domain) || strings.HasSuffix(domain, "."+allowed)
+		})
+		if overlaps {
+			count++
+		}
+	}
+	return count
 }

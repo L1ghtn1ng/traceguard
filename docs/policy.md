@@ -621,7 +621,7 @@ Or after a threshold:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `id` | Yes | Stable rule ID. |
+| `id` | Yes | Stable rule ID. IDs starting with `threat_intel.` are reserved for feed alerts. |
 | `enabled` | No | Defaults to `true`. Use `false` to disable a custom or overlaid remote rule. |
 | `severity` | Yes when enabled | Syslog severity: `debug`, `informational`, `notice`, `warning`, `error`, `critical`, `alert`, or `emergency`. |
 | `events` | Yes when enabled | One or more supported source event names. |
@@ -985,7 +985,7 @@ detection_exceptions:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `id` | Yes | Exception ID, unique among exceptions, using the rule ID format. |
-| `rules` | Yes | Built-in or custom detection rule IDs the exception applies to. Naming a rule that is neither built in nor defined is an error; naming a disabled rule is allowed. |
+| `rules` | Yes | Built-in or custom detection rule IDs the exception applies to. Naming a rule that is neither built in nor defined is an error; naming a disabled rule is allowed, and an exception for a disabled custom rule or sequence stays dormant until it returns. |
 | `reason` | Yes | Why the exception exists, up to 512 bytes. |
 | `expires` | No | RFC 3339 instant after which the exception stops applying. Without it the exception never expires. |
 | `match` | Yes | Conditions using the same fields as a rule's `match`. It must not be empty, and it must only use fields that every event of each named rule carries at event time. |
@@ -1032,7 +1032,7 @@ detection_sequences:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `id` | Yes | Unique among rules and sequences. |
+| `id` | Yes | Unique among rules and sequences, and not a built-in rule's ID. |
 | `key` | Yes | `process` follows one process by its event-time PID and start time, across execs; `cgroup` follows its event-time cgroup ID, such as one container or service. |
 | `within` | Yes | Window from the first step's event, at most one hour. |
 | `steps` | Yes | Two to eight steps, each with `events` and optional `match` and `exclude`, using the same fields as rules. |
@@ -1236,7 +1236,7 @@ threat_intel:
 | `type` | — | `domains`, one hostname per line, or `addresses`, one IP address or CIDR prefix per line. IPv4-mapped IPv6 entries are read as IPv4, and a mapped prefix shorter than `/96` is invalid. |
 | `severity` | `warning` | Alert severity. |
 | `block` | `false` | Also enforce the feed in the kernel. See below. |
-| `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup, by event-time or socket-cache cgroup ID. |
+| `cooldown` | `10m` | Suppresses repeat alerts for one indicator in one cgroup, by event-time or socket-cache cgroup ID; for address feeds, per peer address, so each host in a listed range alerts. |
 
 Blank lines and text after `#` are ignored. A feed may hold up to 1,000,000
 indicators in up to 64 MiB, and a policy up to 32 feeds. A feed that is
@@ -1260,7 +1260,11 @@ address indicators as egress block rules named `threat_intel.<id>.<n>`, 256
 prefixes each. They follow the same enforcement mode as written policy:
 `-dry-run` reports would-block decisions and only `-block` denies. Blocking
 feeds count toward the DNS and egress rule limits, so a policy whose blocking
-feeds do not fit is rejected; keep large feeds alert-only.
+feeds do not fit is rejected; keep large feeds alert-only. Allow rules are
+checked before block rules, so an egress allow rule or DNS allow entry that
+covers a blocking feed's indicators lets that traffic through; TraceGuard
+records `threat intel block shadowed by an allow rule` with the feed, the rule,
+and how many indicators it covers.
 
 Feed files are checked every minute and on `SIGHUP` for a changed inode, size,
 or modification or change time, so an atomic replace that keeps the size and
@@ -1313,7 +1317,13 @@ and multicast addresses are never blocked. Packets dropped are counted in
 `cgroup.freeze`, stopping every process in it until it is thawed. It needs
 `-cgroup-path` at the cgroup v2 root and refuses the root, top-level slices
 such as `system.slice`, `init.scope`, and any cgroup containing TraceGuard.
-Alerts without an event-time `cgroup_id`, such as DNS packet events, skip it.
+TraceGuard confirms its own cgroup by finding itself in that cgroup's
+`cgroup.procs`, so in a private cgroup namespace, where it cannot, every freeze
+is refused. A cgroup that something else already froze is recorded with
+`already_frozen=true` and left frozen when the action ends. Dry-run runs the
+same checks, so `response would apply` appears only for freezes enforce would
+make. Alerts without an event-time `cgroup_id`, such as DNS packet events, skip
+it.
 
 An action's duration counts from when it is applied. A repeat alert for an
 active action extends it rather than stacking a second one; when several
@@ -1600,7 +1610,7 @@ Its fields are:
 | `unavailable_hooks` | Optional eBPF hooks that failed to load or attach. |
 | `ringbuf_dropped_events` | Events lost to a full ring buffer since startup. |
 | `ringbuf_unread_bytes` | Ring buffer bytes waiting to be read at the last sample. |
-| `detection_rules`, `detection_state_groups` | Active detection rules and threshold groups. |
+| `detection_rules`, `detection_state_groups` | Active detection rules, and threshold groups plus in-progress sequence keys. |
 | `detection_exceptions`, `expired_detection_exceptions` | Installed exception count and the IDs that have expired. |
 
 A host whose heartbeats stop, whose digest differs from its peers, or whose

@@ -52,9 +52,13 @@ type PeerBlocker interface {
 
 // Freezer freezes and thaws cgroups by ID.
 type Freezer interface {
-	// Freeze freezes the cgroup and returns its path. A *RefusedError means
-	// retrying cannot succeed.
-	Freeze(id uint64) (string, error)
+	// Check returns the path Freeze would freeze, or why it would refuse,
+	// without changing anything. A *RefusedError means retrying cannot
+	// succeed.
+	Check(id uint64) (string, error)
+	// Freeze freezes the cgroup and returns its path, and false when it was
+	// already frozen, in which case it must not be thawed.
+	Freeze(id uint64) (string, bool, error)
 	// Thaw unfreezes the cgroup at path if it is still the cgroup with id.
 	Thaw(id uint64, path string) error
 }
@@ -99,10 +103,13 @@ type active struct {
 	until time.Time
 	// applied reports whether the kernel or cgroupfs was changed, which
 	// dry-run actions never do.
-	applied    bool
-	peer       netip.Addr
-	cgroupID   uint64
-	cgroupPath string
+	applied bool
+	// alreadyFrozen means the cgroup was frozen by something else, so it is
+	// left frozen when the action ends.
+	alreadyFrozen bool
+	peer          netip.Addr
+	cgroupID      uint64
+	cgroupPath    string
 }
 
 type refusal struct {
@@ -332,25 +339,32 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 	if !r.admitLocked(response, alert, policy.ResponseFreezeCgroup, target, until) {
 		return
 	}
-	var path string
-	applied := false
-	if r.mode == ModeEnforce {
-		if r.freezer == nil {
-			r.skip(response, alert, "cgroup freezing is unavailable")
-			return
-		}
-		frozen, err := r.freezer.Freeze(id)
-		if err != nil {
-			var refused *RefusedError
-			if errors.As(err, &refused) && len(r.refused) < MaxActive {
-				r.refused[key] = refusal{until: until, reason: refused.Reason}
-			}
-			r.failed(response, alert, target, err)
-			return
-		}
-		path, applied = frozen, true
+	// Dry-run runs the same safety checks, so its records show only freezes
+	// enforce would make.
+	if r.freezer == nil {
+		r.skip(response, alert, "cgroup freezing is unavailable")
+		return
 	}
-	r.track(response, alert, policy.ResponseFreezeCgroup, target, until, &active{cgroupID: id, cgroupPath: path, applied: applied})
+	var (
+		path string
+		err  error
+	)
+	froze := false
+	if r.mode == ModeEnforce {
+		path, froze, err = r.freezer.Freeze(id)
+	} else {
+		path, err = r.freezer.Check(id)
+	}
+	if err != nil {
+		var refused *RefusedError
+		if errors.As(err, &refused) && len(r.refused) < MaxActive {
+			r.refused[key] = refusal{until: until, reason: refused.Reason}
+		}
+		r.failed(response, alert, target, err)
+		return
+	}
+	state := &active{cgroupID: id, cgroupPath: path, applied: froze, alreadyFrozen: r.mode == ModeEnforce && !froze}
+	r.track(response, alert, policy.ResponseFreezeCgroup, target, until, state)
 	r.persistLocked()
 }
 
@@ -359,10 +373,9 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 func (r *Responder) admitLocked(response policy.Response, alert detection.Alert, action, target string, until time.Time) bool {
 	key := actionKey{action: action, target: target}
 	if existing, ok := r.active[key]; ok {
-		if held, ok := existing.owners[response.ID]; !ok || until.After(held.until) {
-			existing.owners[response.ID] = owner{ruleID: alert.RuleID, until: until}
-		}
 		if until.After(existing.until) {
+			// Extend the kernel entry first, so a failure leaves the
+			// recorded deadlines matching it.
 			if action == policy.ResponseBlockPeer && existing.applied && r.blocker != nil {
 				if err := r.blocker.BlockPeer(existing.peer, until); err != nil {
 					r.failed(response, alert, target, err)
@@ -374,6 +387,9 @@ func (r *Responder) admitLocked(response policy.Response, alert detection.Alert,
 			if action == policy.ResponseFreezeCgroup {
 				r.persistLocked()
 			}
+		}
+		if held, ok := existing.owners[response.ID]; !ok || until.After(held.until) {
+			existing.owners[response.ID] = owner{ruleID: alert.RuleID, until: until}
 		}
 		return false
 	}
@@ -392,7 +408,11 @@ func (r *Responder) track(response policy.Response, alert detection.Alert, actio
 	if r.mode == ModeDryRun {
 		message = "response would apply"
 	}
-	r.record(message, r.fields(response, alert, target, until))
+	fields := r.fields(response, alert, target, until)
+	if state.alreadyFrozen {
+		fields["already_frozen"] = true
+	}
+	r.record(message, fields)
 }
 
 func (r *Responder) failed(response policy.Response, alert detection.Alert, target string, err error) {

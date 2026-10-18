@@ -122,6 +122,13 @@ func (p *policyController) apply(source policyconfig.Bundle, generation *uint64)
 	if expansion.feedErr != nil {
 		p.recorder.ErrorDedup("threat intel feed unavailable", expansion.feedErr, nil, policyRefreshErrorDedupeTTL)
 	}
+	// Allow rules are checked before block rules, so say when one lets a
+	// blocking feed's indicators through.
+	for _, shadow := range threatintel.Shadowed(source, expansion.feeds) {
+		p.recorder.ErrorDedup("threat intel block shadowed by an allow rule", nil, map[string]any{
+			"feed": shadow.Feed, "rule": shadow.Rule, "indicators": shadow.Indicators,
+		}, policyRefreshErrorDedupeTTL)
+	}
 	bundleChanged := !reflect.DeepEqual(bundle, p.bundle) || feedDigest != p.feedDigest
 	refreshEndpoints := policyHasResolverEndpoints(p.bundle) || policyHasResolverEndpoints(bundle)
 	if !bundleChanged && !refreshEndpoints {

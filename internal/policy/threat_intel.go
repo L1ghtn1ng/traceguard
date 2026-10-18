@@ -13,7 +13,7 @@ const (
 	// MaxThreatIntelFeedIDLength keeps the egress rule IDs a blocking feed
 	// generates, threat_intel.<id>.<n> with n up to 3,907 for 1,000,000
 	// prefixes, within the 64-character rule ID limit.
-	MaxThreatIntelFeedIDLength = 64 - len("threat_intel.") - len(".0000")
+	MaxThreatIntelFeedIDLength = 64 - len(ThreatIntelRulePrefix) - len(".0000")
 	// DefaultThreatIntelCooldown suppresses repeat alerts for one indicator
 	// and cgroup.
 	DefaultThreatIntelCooldown = 10 * time.Minute
@@ -57,8 +57,11 @@ func (f ThreatIntelFeed) AlertCooldown() time.Duration {
 	return f.Cooldown.Duration
 }
 
+// ThreatIntelRulePrefix starts the rule ID of every feed's alerts.
+const ThreatIntelRulePrefix = "threat_intel."
+
 // RuleID is the detection rule ID the feed's alerts carry.
-func (f ThreatIntelFeed) RuleID() string { return "threat_intel." + f.ID }
+func (f ThreatIntelFeed) RuleID() string { return ThreatIntelRulePrefix + f.ID }
 
 func (t ThreatIntelPolicy) validate() error {
 	if len(t.Feeds) > MaxThreatIntelFeeds {

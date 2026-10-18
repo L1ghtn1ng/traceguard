@@ -136,6 +136,17 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 	if err != nil {
 		return CompiledRules{}, err
 	}
+	// A sequence sharing a built-in rule's ID would take that rule's
+	// exceptions while both alert under the one ID.
+	builtin := make(map[string]struct{})
+	for _, rule := range builtinRules(policy.BuiltinProfiles) {
+		builtin[rule.ID] = struct{}{}
+	}
+	for _, sequence := range bundle.DetectionSequences {
+		if _, taken := builtin[sequence.ID]; taken {
+			return CompiledRules{}, fmt.Errorf("detection sequence %q uses the ID of a built-in rule", sequence.ID)
+		}
+	}
 	// definitions holds every rule an exception may name, enabled or not, so
 	// an exception is validated against its rule even while that rule is
 	// disabled or its profile is off, and cannot fail later when the rule is
@@ -166,6 +177,11 @@ func Compile(bundle policy.Bundle) (CompiledRules, error) {
 				continue
 			}
 			definition, ok := definitions[id]
+			if !ok && slices.Contains(bundle.DisabledRuleIDs, id) {
+				// A disabled custom rule or sequence was dropped in the
+				// merge; its exception stays dormant until it returns.
+				continue
+			}
 			if !ok {
 				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
 			}
@@ -354,10 +370,12 @@ func (e *Engine) RuleCount() int {
 	return len(e.rules) + len(e.sequences)
 }
 
+// StateCount returns the threshold groups and in-progress sequence keys the
+// engine holds.
 func (e *Engine) StateCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.groups)
+	return len(e.groups) + len(e.sequenceStates)
 }
 
 func (e *Engine) StateSampleCount() int {

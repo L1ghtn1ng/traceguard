@@ -1,6 +1,7 @@
 package threatintel
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -188,5 +189,66 @@ func TestMatcherCooldownsUseCachedCgroupAndSurviveReload(t *testing.T) {
 	reloaded.InheritCooldowns(matcher)
 	if alerts := reloaded.Evaluate(event(3, 1)); len(alerts) != 0 {
 		t.Fatal("a reloaded matcher forgot the cooldown")
+	}
+}
+
+func TestMatcherCooldownsPerHostFeedAndCapacity(t *testing.T) {
+	t.Parallel()
+
+	short, long := addressFeed("short", false), addressFeed("long", false)
+	short.Cooldown = &policy.Duration{Duration: time.Minute}
+	long.Cooldown = &policy.Duration{Duration: time.Hour}
+	matcher := NewMatcher([]Feed{mustParse(t, short, "198.51.100.0/24\n"), mustParse(t, long, "203.0.113.0/24\n")})
+	event := func(at int64, peer string, cgroup uint64) detection.Event {
+		return detection.Event{Timestamp: time.Unix(at, 0), Name: "connection", Fields: map[string]any{"peer_address": peer, "cgroup_id": cgroup}}
+	}
+
+	// Each host in a listed range alerts, so each can get its own response.
+	if len(matcher.Evaluate(event(1, "203.0.113.5", 1))) != 1 || len(matcher.Evaluate(event(2, "203.0.113.6", 1))) != 1 {
+		t.Fatal("a second host in the same range was suppressed")
+	}
+	if len(matcher.Evaluate(event(3, "203.0.113.5", 1))) != 0 {
+		t.Fatal("a repeat for the same host was not suppressed")
+	}
+
+	// Fill the records with the short feed; its expiry must not clear the
+	// long feed's hour.
+	for index := range maxCooldowns {
+		matcher.Evaluate(event(10, fmt.Sprintf("198.51.100.%d", index%256), uint64(index)+100))
+	}
+	matcher.Evaluate(event(200, "198.51.100.1", 1))
+	if len(matcher.Evaluate(event(300, "203.0.113.5", 1))) != 0 {
+		t.Fatal("a short feed's cooldown cleared a long feed's record")
+	}
+
+	// A full set of live records still holds the new record's cooldown.
+	full := NewMatcher([]Feed{mustParse(t, long, "203.0.113.0/24\n")})
+	for index := range maxCooldowns {
+		full.Evaluate(event(1, "203.0.113.9", uint64(index)+100))
+	}
+	if len(full.Evaluate(event(2, "203.0.113.7", 1))) != 1 || len(full.Evaluate(event(3, "203.0.113.7", 1))) != 0 {
+		t.Fatal("a match recorded while the cooldowns were full alerted again")
+	}
+}
+
+func TestShadowedReportsAllowRulesThatLetBlocksThrough(t *testing.T) {
+	t.Parallel()
+
+	feeds := []Feed{
+		mustParse(t, addressFeed("c2", true), "203.0.113.0/24\n198.51.100.7\n"),
+		mustParse(t, domainFeed("phish", true), "evil.example\nbad.example\n"),
+		mustParse(t, addressFeed("alerts-only", false), "203.0.113.0/24\n"),
+	}
+	bundle := policy.Bundle{
+		Egress: policy.EgressPolicy{Rules: []policy.EgressRule{
+			{ID: "office", Action: "allow", Destinations: policy.EgressDestinations{CIDRs: []string{"203.0.113.128/25"}}},
+			{ID: "deny-tor", Action: "block", Destinations: policy.EgressDestinations{CIDRs: []string{"198.51.100.0/24"}}},
+		}},
+	}
+	bundle.DNS.AllowSuffixes = []string{"cdn.evil.example"}
+	got := Shadowed(bundle, feeds)
+	want := []Shadow{{Feed: "c2", Rule: "office", Indicators: 1}, {Feed: "phish", Rule: "dns.allow", Indicators: 1}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Shadowed = %+v, want %+v", got, want)
 	}
 }

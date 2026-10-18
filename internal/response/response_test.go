@@ -47,18 +47,28 @@ type fakeFreezer struct {
 	frozen   map[string]bool
 	thawErr  error
 	freezeN  int
+	checkN   int
 	refuse   bool
+	already  bool
 	thawedID map[uint64]bool
 }
 
-func (f *fakeFreezer) Freeze(id uint64) (string, error) {
-	f.freezeN++
+func (f *fakeFreezer) Check(id uint64) (string, error) {
+	f.checkN++
 	if f.refuse {
 		return "", &RefusedError{Reason: "refusing to freeze: it contains TraceGuard"}
 	}
-	path := fmt.Sprintf("/kubepods.slice/pod-%d", id)
+	return fmt.Sprintf("/kubepods.slice/pod-%d", id), nil
+}
+
+func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
+	f.freezeN++
+	path, err := f.Check(id)
+	if err != nil || f.already {
+		return path, false, err
+	}
 	f.frozen[path] = true
-	return path, nil
+	return path, true, nil
 }
 
 func (f *fakeFreezer) Thaw(id uint64, path string) error {
@@ -401,6 +411,9 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte("cpu memory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	self := "/system.slice/traceguard.service"
 	ids := map[string]uint64{}
 	for _, entry := range entries {
@@ -417,13 +430,16 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 		},
 	}
 	for id, want := range map[uint64]string{1: "below a top-level slice", 2: "below a top-level slice", 3: "contains TraceGuard", 6: "below a top-level slice", 9: "no longer exists"} {
-		if _, err := freezer.Freeze(id); err == nil || !strings.Contains(err.Error(), want) {
+		if _, _, err := freezer.Freeze(id); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Freeze(%d) error = %v, want %q", id, err, want)
 		}
 	}
-	path, err := freezer.Freeze(5)
-	if err != nil || path != "/kubepods.slice/pod-a" {
-		t.Fatalf("Freeze(5) = %q, %v", path, err)
+	path, froze, err := freezer.Freeze(5)
+	if err != nil || !froze || path != "/kubepods.slice/pod-a" {
+		t.Fatalf("Freeze(5) = %q, %t, %v", path, froze, err)
+	}
+	if again, froze, err := freezer.Freeze(5); err != nil || froze || again != path {
+		t.Fatalf("Freeze of a frozen cgroup = %q, %t, %v; want it left to whoever froze it", again, froze, err)
 	}
 	state, err := os.ReadFile(filepath.Join(root, path, "cgroup.freeze")) //nolint:gosec // test path
 	if err != nil || string(state) != "1" {
@@ -451,14 +467,14 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 	// The daemon's cgroup is read at each freeze, so a moved daemon is
 	// still protected.
 	self = "/kubepods.slice/pod-a/traceguard"
-	if _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "contains TraceGuard") {
+	if _, _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "contains TraceGuard") {
 		t.Fatalf("Freeze after the daemon moved = %v, want a refusal", err)
 	}
 
 	nested := &CgroupFreezer{Root: root, self: func() (string, error) { return "/x", nil }, scan: func(context.Context, string) ([]cgroupinfo.Entry, error) {
 		return []cgroupinfo.Entry{{ID: 1, Path: "/", Level: 1}, {ID: 5, Path: "/pod-a", Level: 2}}, nil
 	}}
-	if _, err := nested.Freeze(5); err == nil || !strings.Contains(err.Error(), "cgroup v2 root") {
+	if _, _, err := nested.Freeze(5); err == nil || !strings.Contains(err.Error(), "cgroup v2 root") {
 		t.Fatalf("non-root cgroup path error = %v", err)
 	}
 }
@@ -515,5 +531,94 @@ func TestRecoverLeavesAnUnreadableStateFile(t *testing.T) {
 	payload, err := os.ReadFile(state) //nolint:gosec // test path
 	if err != nil || string(payload) != `{"boot_id": "boot-a", "frozen": [` || h.output.count("response state unreadable") != 1 {
 		t.Fatalf("state = %q, %v; records %v; want the file left as it was and the failure reported", payload, err, h.output.messages)
+	}
+}
+
+func TestThawWaitsForAMissingHierarchy(t *testing.T) {
+	t.Parallel()
+
+	freezer := &CgroupFreezer{Root: filepath.Join(t.TempDir(), "unmounted"), id: func(string) (uint64, error) { return 0, fs.ErrNotExist }}
+	if err := freezer.Thaw(5, "/kubepods.slice/pod-a"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("Thaw without a hierarchy = %v, want an error so the record is kept", err)
+	}
+}
+
+func TestLocateSelfNeedsTheDaemonInItsCgroup(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	procCgroup := filepath.Join(t.TempDir(), "cgroup")
+	if err := os.MkdirAll(filepath.Join(root, "system.slice", "traceguard.service"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "system.slice", "traceguard.service", "cgroup.procs"), []byte("7\n42\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cgroup.procs"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for content, want := range map[string]string{
+		"0::/system.slice/traceguard.service\n": "",
+		// In a private cgroup namespace the daemon sees itself at the root.
+		"0::/\n": "private cgroup namespace",
+	} {
+		if err := os.WriteFile(procCgroup, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path, err := LocateSelf(root, procCgroup, 42)
+		if want == "" && (err != nil || path != "/system.slice/traceguard.service") {
+			t.Errorf("%q: locateSelf = %q, %v", content, path, err)
+		}
+		if want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+			t.Errorf("%q: locateSelf error = %v, want %q", content, err, want)
+		}
+	}
+}
+
+func TestDryRunFreezeRunsTheSafetyChecks(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(ModeDryRun, Options{})
+	h.freezer.refuse = true
+	h.responder.Handle(alertFor("runtime.process-memory-write", 1, map[string]any{"cgroup_id": uint64(2)}))
+	if h.output.count("response would apply") != 0 || h.output.count("response failed") != 1 || h.responder.Active() != 0 || h.freezer.freezeN != 0 {
+		t.Fatalf("records %v active %d freezes %d, want the refusal reported and nothing frozen", h.output.messages, h.responder.Active(), h.freezer.freezeN)
+	}
+}
+
+func TestAlreadyFrozenCgroupIsLeftFrozen(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "b"})
+	h.freezer.already = true
+	h.responder.Handle(alertFor("runtime.process-memory-write", 1, map[string]any{"cgroup_id": uint64(2)}))
+	if fields := h.output.fields[len(h.output.fields)-1]; fields["already_frozen"] != true {
+		t.Fatalf("applied record = %v, want already_frozen", fields)
+	}
+	h.responder.RevertAll()
+	if len(h.freezer.thawedID) != 0 {
+		t.Fatalf("thawed %v, want a freeze made by something else left alone", h.freezer.thawedID)
+	}
+	if payload, _ := os.ReadFile(state); strings.Contains(string(payload), `"cgroup_id"`) { //nolint:gosec // test path
+		t.Fatalf("state %s records a freeze TraceGuard did not make", payload)
+	}
+}
+
+func TestFailedExtensionKeepsTheRecordedDeadline(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(ModeEnforce, Options{})
+	peer := map[string]any{"peer_address": "203.0.113.9"}
+	h.responder.Handle(alertFor("baseline.inbound-ssh-bruteforce", 1, peer))
+	h.blocker.err = errors.New("map busy")
+	h.clock.now = time.Unix(600, 0)
+	h.responder.Handle(alertFor("baseline.inbound-ssh-bruteforce", 600, peer))
+	h.blocker.err = nil
+	// Removing nothing still recomputes the deadline from the owners.
+	h.responder.Configure(testResponses)
+	h.responder.Expire(time.Unix(0, 0).Add(time.Hour))
+	if h.responder.Active() != 0 {
+		t.Fatalf("the block outlived the deadline its kernel entry has: active %d", h.responder.Active())
 	}
 }

@@ -95,3 +95,16 @@ func TestMergeOverlayRuleReplacesBaseSequence(t *testing.T) {
 		t.Fatalf("sequences = %+v rules = %+v, want the overlay rule only", bundle.DetectionSequences, bundle.DetectionRules)
 	}
 }
+
+func TestRuleAndSequenceIDsCannotUseTheFeedPrefix(t *testing.T) {
+	t.Parallel()
+
+	rule := "version: 1\ndetections:\n  - id: threat_intel.c2\n    severity: warning\n    events: [exec]\n    message: x\n"
+	if _, err := Parse([]byte(rule)); err == nil || !strings.Contains(err.Error(), "reserved for threat intelligence feeds") {
+		t.Fatalf("rule with the feed prefix error = %v", err)
+	}
+	sequence := strings.Replace(validSequence, "id: shell-then-egress", "id: threat_intel.seq", 1)
+	if _, err := Parse([]byte(sequence)); err == nil || !strings.Contains(err.Error(), "reserved for threat intelligence feeds") {
+		t.Fatalf("sequence with the feed prefix error = %v", err)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/L1ghtn1ng/traceguard/internal/cgroupinfo"
@@ -28,10 +30,31 @@ type CgroupFreezer struct {
 // NewCgroupFreezer returns a freezer over root for a daemon whose cgroup
 // procCgroup, normally /proc/self/cgroup, names.
 func NewCgroupFreezer(root, procCgroup string) *CgroupFreezer {
+	root = filepath.Clean(root)
 	return &CgroupFreezer{
-		Root: filepath.Clean(root), self: func() (string, error) { return SelfCgroup(procCgroup) },
+		Root: root, self: func() (string, error) { return LocateSelf(root, procCgroup, os.Getpid()) },
 		scan: cgroupinfo.ScanContext, id: cgroupinfo.ID,
 	}
+}
+
+// LocateSelf returns the daemon's cgroup path in the hierarchy at root,
+// confirmed by finding pid in that cgroup's cgroup.procs. In a private cgroup
+// namespace /proc/self/cgroup names a path relative to the namespace, which
+// would not match the host hierarchy, so the self-freeze check cannot be
+// trusted there.
+func LocateSelf(root, procCgroup string, pid int) (string, error) {
+	path, err := SelfCgroup(procCgroup)
+	if err != nil {
+		return "", err
+	}
+	procs, err := os.ReadFile(filepath.Join(root, path, "cgroup.procs")) //nolint:gosec // cgroupfs path
+	if err != nil {
+		return "", fmt.Errorf("read %s cgroup.procs: %w", path, err)
+	}
+	if !slices.Contains(strings.Fields(string(procs)), strconv.Itoa(pid)) {
+		return "", fmt.Errorf("process %d is not in %s under %s; TraceGuard may run in a private cgroup namespace", pid, path, root)
+	}
+	return path, nil
 }
 
 // SelfCgroup reads the calling process's cgroup v2 path from procCgroup,
@@ -49,11 +72,12 @@ func SelfCgroup(procCgroup string) (string, error) {
 	return "", errors.New("no cgroup v2 entry in " + procCgroup)
 }
 
-// Freeze freezes the cgroup with the given ID and returns its path.
-func (f *CgroupFreezer) Freeze(id uint64) (string, error) {
+// Check returns the path of the cgroup with the given ID, or why it must not
+// be frozen, without changing anything.
+func (f *CgroupFreezer) Check(id uint64) (string, error) {
 	self, err := f.self()
 	if err != nil {
-		return "", fmt.Errorf("read TraceGuard's own cgroup: %w", err)
+		return "", &RefusedError{Reason: "cannot locate TraceGuard's own cgroup, so no cgroup is frozen: " + err.Error()}
 	}
 	entries, err := f.scan(context.Background(), f.Root)
 	if err != nil {
@@ -74,10 +98,25 @@ func (f *CgroupFreezer) Freeze(id uint64) (string, error) {
 	if reason := freezeRefusal(*target, self); reason != "" {
 		return "", &RefusedError{Reason: reason}
 	}
-	if err := writeFreeze(filepath.Join(f.Root, target.Path), "1"); err != nil {
-		return "", fmt.Errorf("freeze cgroup %s: %w", target.Path, err)
-	}
 	return target.Path, nil
+}
+
+// Freeze freezes the cgroup with the given ID and returns its path, and
+// whether this call froze it. A cgroup that something else had already
+// frozen is left as it is, so thawing later cannot undo that freeze.
+func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
+	path, err := f.Check(id)
+	if err != nil {
+		return "", false, err
+	}
+	directory := filepath.Join(f.Root, path)
+	if state, err := os.ReadFile(filepath.Join(directory, "cgroup.freeze")); err == nil && strings.TrimSpace(string(state)) == "1" { //nolint:gosec // cgroupfs path from a validated scan
+		return path, false, nil
+	}
+	if err := writeFreeze(directory, "1"); err != nil {
+		return "", false, fmt.Errorf("freeze cgroup %s: %w", path, err)
+	}
+	return path, true, nil
 }
 
 // freezeRefusal explains why target must not be frozen for a daemon in self, or
@@ -101,6 +140,11 @@ func (f *CgroupFreezer) Thaw(id uint64, path string) error {
 	directory := filepath.Join(f.Root, path)
 	current, err := f.id(directory)
 	if errors.Is(err, fs.ErrNotExist) {
+		// Only a mounted hierarchy proves the cgroup is gone; without one
+		// the thaw must be retried.
+		if _, rootErr := os.Stat(filepath.Join(f.Root, "cgroup.controllers")); rootErr != nil {
+			return fmt.Errorf("thaw cgroup %s: cgroup hierarchy %s is unavailable: %w", path, f.Root, rootErr)
+		}
 		return nil
 	}
 	if err != nil {

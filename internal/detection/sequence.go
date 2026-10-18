@@ -93,15 +93,14 @@ func sequenceKey(sequenceID, key string, fields map[string]any) (groupKey, bool)
 	_, _ = io.WriteString(hash, "sequence\x00"+sequenceID+"\x00"+key+"\x00")
 	switch key {
 	case policy.SequenceKeyCgroup:
-		cgroup, ok := fields["cgroup_id"]
-		if !ok || cgroup == nil {
+		cgroup := fields["cgroup_id"]
+		if !identityValue(cgroup) {
 			return groupKey{}, false
 		}
 		_, _ = fmt.Fprint(hash, cgroup)
 	default:
-		pid, hasPID := fields["pid"]
-		start, hasStart := fields["process_start_ticks"]
-		if !hasPID || !hasStart {
+		pid, start := fields["pid"], fields["process_start_ticks"]
+		if !identityValue(pid) || !identityValue(start) {
 			return groupKey{}, false
 		}
 		_, _ = fmt.Fprintf(hash, "%v:%v", pid, start)
@@ -109,6 +108,17 @@ func sequenceKey(sequenceID, key string, fields map[string]any) (groupKey, bool)
 	var out groupKey
 	copy(out[:], hash.Sum(nil))
 	return out, true
+}
+
+// identityValue reports whether an identity field holds a usable value. A
+// replayed record can carry null or zero, which would make unrelated
+// processes share a key.
+func identityValue(value any) bool {
+	switch text := fmt.Sprint(value); text {
+	case "<nil>", "", "0":
+		return false
+	}
+	return true
 }
 
 // evaluateSequences advances every sequence the event matches a step of and

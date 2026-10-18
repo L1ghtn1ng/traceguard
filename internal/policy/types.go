@@ -426,6 +426,11 @@ func (d Document) Validate() error {
 		if previous, exists := ids[id]; exists {
 			return fmt.Errorf("duplicate rule id %q in %s and %s", id, previous, area)
 		}
+		// Feed alerts carry threat_intel.<feed>, so a rule or sequence with
+		// such an ID could not be told apart from them, nor its responses.
+		if (area == "detections" || area == "detection_sequences") && strings.HasPrefix(id, ThreatIntelRulePrefix) {
+			return fmt.Errorf("%s rule %d: id %q uses the %q prefix reserved for threat intelligence feeds", area, index, id, ThreatIntelRulePrefix)
+		}
 		ids[id] = area
 		return nil
 	}
