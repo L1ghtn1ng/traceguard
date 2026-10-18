@@ -511,6 +511,30 @@ func (s *spoolStore) files() (files []string, listErr error) {
 	return out, nil
 }
 
+// stranded counts spool files written under another event schema. They
+// are kept, and sent once that schema is configured again.
+func (s *spoolStore) stranded() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := safefile.OpenBeneath(int(s.dir.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasSuffix(name, ".json") && !isSpoolFile(name, s.suffix) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (s *spoolStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

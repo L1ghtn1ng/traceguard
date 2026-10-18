@@ -116,8 +116,15 @@ func TestSharesMountNamespace(t *testing.T) {
 		}
 	}
 	for pid, want := range map[uint32]bool{42: true, 43: false, 44: true} {
-		if got := sharesMountNamespace(procRoot, pid); got != want {
+		if got := sharesMountNamespace(procRoot, ebpf.Event{PID: pid}); got != want {
 			t.Errorf("sharesMountNamespace(%d) = %t, want %t", pid, got, want)
+		}
+	}
+	// The kernel's event-time namespace wins, so a container process that
+	// has exited (pid 44, gone from /proc) is still told apart.
+	for namespace, want := range map[uint32]bool{1: true, 2: false} {
+		if got := sharesMountNamespace(procRoot, ebpf.Event{PID: 44, MountNamespace: namespace}); got != want {
+			t.Errorf("sharesMountNamespace(namespace %d) = %t, want %t", namespace, got, want)
 		}
 	}
 }

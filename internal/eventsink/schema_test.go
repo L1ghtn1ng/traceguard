@@ -162,3 +162,28 @@ func TestSpoolReplaysOnlyTheConfiguredSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestSpoolCountsBatchesOfAnotherSchema(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ocsf, err := newSpoolStore(dir, SchemaOCSF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ocsf.Close() }()
+	if err := ocsf.Write([]json.RawMessage{json.RawMessage(`{"class_uid":4003}`)}); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := newSpoolStore(dir, SchemaTraceGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = plain.Close() }()
+	if count, err := plain.stranded(); err != nil || count != 1 {
+		t.Fatalf("stranded = %d, %v; want the OCSF batch counted", count, err)
+	}
+	if count, err := ocsf.stranded(); err != nil || count != 0 {
+		t.Fatalf("stranded for its own schema = %d, %v; want 0", count, err)
+	}
+}

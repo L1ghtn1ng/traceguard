@@ -93,13 +93,16 @@ func Run(cfg Config, alerts io.Writer) (Summary, error) {
 		}
 		summary.Evaluated++
 		last = event.Timestamp
-		alerts := append(engine.Evaluate(event), matcher.Evaluate(event)...)
-		for index, alert := range alerts {
+		occurrences := map[string]int{}
+		for _, alert := range append(engine.Evaluate(event), matcher.Evaluate(event)...) {
 			summary.Alerts[alert.RuleID]++
 			summary.Severity[alert.RuleID] = alert.Severity
 			// Replaying the same archive gives the same IDs, so outputs can
-			// be diffed across policy changes.
-			alert.ID = replayAlertID(summary.Records, index, alert.RuleID)
+			// be diffed across policy changes. The ID depends on the record
+			// and rule, not the alert's position, so adding or reordering
+			// other rules leaves it unchanged.
+			alert.ID = replayAlertID(summary.Records, occurrences[alert.RuleID], alert.RuleID)
+			occurrences[alert.RuleID]++
 			// Match the envelope a live alert is recorded with, rather than
 			// the archived source record's.
 			record := alert.RecordFields(event.Name)
@@ -229,9 +232,10 @@ func WriteSummary(summary Summary, out io.Writer) error {
 	return writer.Flush()
 }
 
-// replayAlertID derives an alert ID from where the alert came from in the
-// archive, in the same form as a live alert's.
-func replayAlertID(record, index int, ruleID string) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "replay\x00%d\x00%d\x00%s", record, index, ruleID))
+// replayAlertID derives an alert ID from the archive record and rule it came
+// from, and which of that rule's alerts for the record it is, in the same
+// form as a live alert's.
+func replayAlertID(record, occurrence int, ruleID string) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "replay\x00%d\x00%s\x00%d", record, ruleID, occurrence))
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])[:26]
 }

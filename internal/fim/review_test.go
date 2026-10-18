@@ -1,6 +1,7 @@
 package fim
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -240,5 +241,29 @@ func TestCheckDuringPolicyChangeWaitsForRebuild(t *testing.T) {
 	watcher.mu.Unlock()
 	if changes, _ := output.snapshot(); len(changes) != 0 || !requeued {
 		t.Fatalf("changes %+v requeued %t, want the check held for the rebuild", changes, requeued)
+	}
+}
+
+func TestBaselineOfExactlyMaxFilesIsComplete(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "etc/hosts", "127.0.0.1 localhost\n")
+	s := scanner{root: root, policy: watchPolicy("/etc/hosts"), maxSize: 1 << 20}
+	result := newScanResult()
+	for index := range MaxFiles - 1 {
+		result.states[fmt.Sprintf("/other/%d", index)] = State{Type: "file"}
+	}
+	s.record("/etc/hosts", &result)
+	if result.truncated || len(result.states) != MaxFiles {
+		t.Fatalf("truncated %t with %d states, want a complete baseline of exactly MaxFiles", result.truncated, len(result.states))
+	}
+	s.record("/etc/hosts", &result)
+	if result.truncated {
+		t.Fatal("rerecording a known path truncated the baseline")
+	}
+	s.record("/etc/passwd", &result)
+	if !result.truncated {
+		t.Fatal("an entry beyond MaxFiles did not truncate the baseline")
 	}
 }

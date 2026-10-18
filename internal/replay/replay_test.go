@@ -179,3 +179,17 @@ func TestRunMatchesLiveAlertEnvelopeAndRejectsTrailingContent(t *testing.T) {
 		t.Fatalf("alert envelope = message %v level %v, want the live detection-alert envelope", record["message"], record["level"])
 	}
 }
+
+func TestReplayAlertIDIgnoresOtherRules(t *testing.T) {
+	t.Parallel()
+
+	// The ID depends only on the record, rule, and occurrence, so other
+	// rules cannot shift it.
+	id := replayAlertID(4, 0, "baseline.x")
+	if again := replayAlertID(4, 0, "baseline.x"); again != id {
+		t.Fatal("replayAlertID is not deterministic")
+	}
+	if id == replayAlertID(4, 0, "baseline.y") || id == replayAlertID(5, 0, "baseline.x") || id == replayAlertID(4, 1, "baseline.x") {
+		t.Fatal("distinct rules or records share an alert ID")
+	}
+}
