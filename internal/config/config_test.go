@@ -737,6 +737,23 @@ func TestRedactCommandLineProtectsMonitoredProcessCredentials(t *testing.T) {
 	}
 }
 
+func TestRedactCommandLineKeepsArgumentAfterStdinSecretFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{"docker", "login", "--password-stdin", "-u", "alice"},
+		{"docker", "login", "--password-stdin", "registry.example"},
+	} {
+		if got := RedactCommandLine(args); !slices.Equal(got, args) {
+			t.Errorf("RedactCommandLine(%q) = %q, want unchanged", args, got)
+		}
+	}
+	got := RedactCommandLine([]string{"docker", "login", "--password-stdin", "--password", "secret"})
+	if want := []string{"docker", "login", "--password-stdin", "--password", redactedValue}; !slices.Equal(got, want) {
+		t.Fatalf("RedactCommandLine() = %q, want %q", got, want)
+	}
+}
+
 func TestRedactCommandLineProtectsShellStringCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -751,6 +768,8 @@ func TestRedactCommandLineProtectsShellStringCredentials(t *testing.T) {
 		{script: "mysql -u app --db-password 'quoted secret' app", want: "mysql -u app --db-password " + redactedValue + " app"},
 		{script: "tool --token\tsecret|cat", want: "tool --token\t" + redactedValue + "|cat"},
 		{script: "docker login --password-stdin -u app", want: "docker login --password-stdin -u app"},
+		{script: "docker login --password-stdin registry.example", want: "docker login --password-stdin registry.example"},
+		{script: "docker login --password-stdin registry.example --token secret", want: "docker login --password-stdin registry.example --token " + redactedValue},
 	} {
 		got := RedactCommandLine([]string{"sh", "-c", test.script})
 		if got[2] != test.want {

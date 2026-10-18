@@ -73,7 +73,7 @@ func RedactCommandLine(args []string) []string {
 				redacted = append(redacted, arg[:len(arg)-len(value)]+redactedValue)
 			} else {
 				redacted = append(redacted, arg)
-				redactNext = true
+				redactNext = !readsSecretFromStdin(name)
 			}
 			continue
 		}
@@ -97,8 +97,21 @@ func redactCommandLineValue(arg string) string {
 	}
 	arg = urlUserinfo.ReplaceAllString(arg, "${1}"+redactedValue+"@")
 	arg = sensitiveHeader.ReplaceAllString(arg, "${1}"+redactedValue)
-	arg = sensitiveShellFlag.ReplaceAllString(arg, "${1}"+redactedValue)
+	arg = sensitiveShellFlag.ReplaceAllStringFunc(arg, func(match string) string {
+		prefix := sensitiveShellFlag.FindStringSubmatch(match)[1]
+		if readsSecretFromStdin(strings.TrimLeft(strings.TrimSpace(prefix), "-")) {
+			return match
+		}
+		return prefix + redactedValue
+	})
 	return sensitiveAssignment.ReplaceAllString(arg, "${1}"+redactedValue)
+}
+
+// readsSecretFromStdin reports whether a sensitive-named flag, such as
+// docker login --password-stdin, takes no value because the secret is read
+// from standard input.
+func readsSecretFromStdin(name string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), "-stdin")
 }
 
 func splitFlag(arg string) (name, value string, hasValue bool) {
