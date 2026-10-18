@@ -262,9 +262,9 @@ func saturatingAdd(left, right uint64) uint64 {
 func parseSample(line string) (string, map[string]string, uint64, error) {
 	var name, rest string
 	labels := map[string]string{}
-	if open := strings.IndexByte(line, '{'); open >= 0 {
-		name = line[:open]
-		parsed, remainder, err := parseLabels(line[open+1:])
+	if before, after, ok := strings.Cut(line, "{"); ok {
+		name = before
+		parsed, remainder, err := parseLabels(after)
 		if err != nil {
 			return "", nil, 0, err
 		}

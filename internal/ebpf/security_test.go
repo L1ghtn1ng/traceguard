@@ -89,10 +89,10 @@ func TestDecodeSecurityEvents(t *testing.T) {
 func ebpfFieldTags(value any) ([]string, error) {
 	typ := reflect.TypeOf(value)
 	tags := make([]string, 0, typ.NumField())
-	for index := range typ.NumField() {
-		tag := typ.Field(index).Tag.Get("ebpf")
+	for field := range typ.Fields() {
+		tag := field.Tag.Get("ebpf")
 		if tag == "" {
-			return nil, fmt.Errorf("field %s has no ebpf tag", typ.Field(index).Name)
+			return nil, fmt.Errorf("field %s has no ebpf tag", field.Name)
 		}
 		tags = append(tags, tag)
 	}
