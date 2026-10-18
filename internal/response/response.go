@@ -125,6 +125,12 @@ type Responder struct {
 	responses []policy.Response
 	active    map[actionKey]*active
 	refused   map[actionKey]refusal
+	// retained holds recorded freezes this run cannot thaw, kept in the
+	// state file for the next start.
+	retained []frozenCgroup
+	// stateHeld stops writes to a state file that could not be read, so
+	// its records survive for the next start.
+	stateHeld bool
 }
 
 // New returns a responder in mode. A nil blocker or freezer makes that

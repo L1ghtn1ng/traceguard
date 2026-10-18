@@ -39,8 +39,10 @@ func BootID(path string) (string, error) {
 
 // Recover undoes what an earlier run left behind: every peer block, and every
 // cgroup freeze its state file records for this boot. Call it once, before
-// the first alert. A freeze that cannot be thawed yet stays tracked, and the
-// expiry check retries it.
+// the first alert. A freeze whose thaw fails stays tracked, and the expiry
+// check retries it. A record is never dropped untried: one this run cannot
+// thaw stays in the state file, and a state file that cannot be read is left
+// as it is, unwritten, for the next start.
 func (r *Responder) Recover() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -51,50 +53,62 @@ func (r *Responder) Recover() {
 			})
 		}
 	}
-	for _, frozen := range r.readStateLocked() {
+	records, err := r.readStateLocked()
+	if err != nil {
+		r.stateHeld = true
+		r.record("response state unreadable", map[string]any{
+			"event": "response", "path": r.options.StatePath, "error": err.Error(),
+			"detail": "the file is left unchanged and not updated this run; cgroups it records stay frozen until it is fixed and TraceGuard restarts",
+		})
+		return
+	}
+	for _, frozen := range records {
 		key := actionKey{action: policy.ResponseFreezeCgroup, target: fmt.Sprint(frozen.CgroupID)}
-		action := &active{owners: map[string]owner{}, until: r.options.Now(), applied: true, cgroupID: frozen.CgroupID, cgroupPath: frozen.Path}
 		if r.freezer == nil {
+			r.retained = append(r.retained, frozen)
 			r.record("response revert failed", map[string]any{
 				"event": "response", "action": key.action, "target": key.target, "mode": r.mode, "reason": "restart",
-				"error": "cgroup freezing is unavailable, so " + frozen.Path + " stays frozen",
+				"error": "cgroup freezing is unavailable, so " + frozen.Path + " stays frozen and stays recorded for the next start",
 			})
 			continue
 		}
+		action := &active{owners: map[string]owner{}, until: r.options.Now(), applied: true, cgroupID: frozen.CgroupID, cgroupPath: frozen.Path}
 		r.active[key] = action
 		r.revertLocked(key, action, "restart")
 	}
 	r.persistLocked()
 }
 
-func (r *Responder) readStateLocked() []frozenCgroup {
+// readStateLocked returns the freezes recorded for this boot. A missing file
+// records none; a file that cannot be read or decoded is an error.
+func (r *Responder) readStateLocked() ([]frozenCgroup, error) {
 	if r.options.StatePath == "" {
-		return nil
+		return nil, nil
 	}
 	payload, err := os.ReadFile(r.options.StatePath)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	var state stateFile
-	if err == nil {
-		err = json.Unmarshal(payload, &state)
+		return nil, nil
 	}
 	if err != nil {
-		r.record("response state unreadable", map[string]any{"event": "response", "path": r.options.StatePath, "error": err.Error()})
-		return nil
+		return nil, err
+	}
+	var state stateFile
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return nil, err
 	}
 	if state.BootID != r.options.BootID {
-		return nil
+		return nil, nil
 	}
-	return state.Frozen
+	return state.Frozen, nil
 }
 
-// persistLocked rewrites the state file with the cgroups that are frozen.
+// persistLocked rewrites the state file with the cgroups that are frozen,
+// including recorded ones this run cannot thaw.
 func (r *Responder) persistLocked() {
-	if r.options.StatePath == "" {
+	if r.options.StatePath == "" || r.stateHeld {
 		return
 	}
-	state := stateFile{BootID: r.options.BootID, Frozen: []frozenCgroup{}}
+	state := stateFile{BootID: r.options.BootID, Frozen: slices.Clone(r.retained)}
 	for key, action := range r.active {
 		if key.action == policy.ResponseFreezeCgroup && action.applied {
 			state.Frozen = append(state.Frozen, frozenCgroup{CgroupID: action.cgroupID, Path: action.cgroupPath, Until: action.until})

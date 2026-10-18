@@ -474,3 +474,46 @@ func TestSelfCgroup(t *testing.T) {
 		t.Fatalf("SelfCgroup = %q, %v", self, err)
 	}
 }
+
+func TestRecoverKeepsRecordsItCannotThaw(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	first := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	first.responder.Handle(alertFor("runtime.process-memory-write", 1, map[string]any{"cgroup_id": uint64(7)}))
+
+	// A start without a freezer keeps the record, also through later writes.
+	output := &records{}
+	noFreezer := New(ModeEnforce, &fakeBlocker{blocked: map[netip.Addr]time.Time{}}, nil, output.record,
+		Options{StatePath: state, BootID: "boot-a", Sleep: func(time.Duration) {}})
+	noFreezer.Recover()
+	noFreezer.Configure(testResponses)
+	noFreezer.Handle(alertFor("baseline.inbound-ssh-bruteforce", 1, map[string]any{"peer_address": "203.0.113.9"}))
+	noFreezer.RevertAll()
+	if noFreezer.Active() != 0 || output.count("response revert failed") != 1 {
+		t.Fatalf("records %v, want the unthawed freeze reported", output.messages)
+	}
+
+	again := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	again.responder.Recover()
+	if !again.freezer.thawedID[7] {
+		t.Fatalf("the record was lost: thawed %v", again.freezer.thawedID)
+	}
+}
+
+func TestRecoverLeavesAnUnreadableStateFile(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	if err := os.WriteFile(state, []byte(`{"boot_id": "boot-a", "frozen": [`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "boot-a"})
+	h.responder.Recover()
+	h.responder.Handle(alertFor("runtime.process-memory-write", 1, map[string]any{"cgroup_id": uint64(8)}))
+	h.responder.RevertAll()
+	payload, err := os.ReadFile(state) //nolint:gosec // test path
+	if err != nil || string(payload) != `{"boot_id": "boot-a", "frozen": [` || h.output.count("response state unreadable") != 1 {
+		t.Fatalf("state = %q, %v; records %v; want the file left as it was and the failure reported", payload, err, h.output.messages)
+	}
+}

@@ -1322,7 +1322,10 @@ removed from the policy or changed, or when TraceGuard stops. An undo that
 fails stays tracked, and the expiry check, which runs every five seconds,
 retries it once its deadline has passed; shutdown retries it twice more. After
 a crash, the next start clears every peer block and thaws the cgroups recorded
-in `-response-state-path` for the same boot. A thaw checks that the path still
+in `-response-state-path` for the same boot. A recorded cgroup that start
+cannot thaw, because freezing is unavailable, stays in the file for the next
+start; a file that cannot be read is left unchanged and reported as
+`response state unreadable`, and is not updated until it is fixed. A thaw checks that the path still
 names the frozen cgroup, so a replacement at the same path is left alone.
 Every step is recorded as an `event=response` record: `response applied` or
 `response would apply`, `response extended`, `response reverted` with its
