@@ -267,3 +267,21 @@ func TestBaselineOfExactlyMaxFilesIsComplete(t *testing.T) {
 		t.Fatal("an entry beyond MaxFiles did not truncate the baseline")
 	}
 }
+
+func TestPathsForFileFindsEveryHardLink(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "etc/sudoers", "root ALL=(ALL) ALL\n")
+	if err := os.Link(filepath.Join(root, "etc", "sudoers"), filepath.Join(root, "etc", "sudoers.link")); err != nil {
+		t.Fatal(err)
+	}
+	watcher, _ := newTestWatcher(t, root, watchPolicy("/etc/**"))
+	state := watcher.baseline["/etc/sudoers"]
+	if state.inode == 0 {
+		t.Fatal("baseline recorded no inode")
+	}
+	if paths := watcher.PathsForFile(state.device, state.inode); !slices.Equal(slices.Sorted(slices.Values(paths)), []string{"/etc/sudoers", "/etc/sudoers.link"}) {
+		t.Fatalf("PathsForFile = %v, want both names", paths)
+	}
+}

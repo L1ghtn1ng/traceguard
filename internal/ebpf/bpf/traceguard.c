@@ -210,9 +210,28 @@ struct path {
 	struct dentry *dentry;
 } __attribute__((preserve_access_index));
 
+struct super_block {
+	__u32 s_dev;
+} __attribute__((preserve_access_index));
+
+struct inode {
+	unsigned long i_ino;
+	struct super_block *i_sb;
+} __attribute__((preserve_access_index));
+
 struct file {
 	struct path f_path;
 	__u32 f_flags;
+	struct inode *f_inode;
+} __attribute__((preserve_access_index));
+
+struct fdtable {
+	unsigned int max_fds;
+	struct file **fd;
+} __attribute__((preserve_access_index));
+
+struct files_struct {
+	struct fdtable *fdt;
 } __attribute__((preserve_access_index));
 
 struct linux_binprm {
@@ -321,6 +340,7 @@ struct task_struct {
 	struct task_struct *group_leader;
 	__u64 start_boottime;
 	struct nsproxy *nsproxy;
+	struct files_struct *files;
 } __attribute__((preserve_access_index));
 
 struct domain_key {
@@ -1243,6 +1263,38 @@ static __always_inline void set_event_mnt_ns(struct event *event)
 	__u32 inum = current_mnt_ns();
 
 	__builtin_memcpy(event->addr, &inum, sizeof(inum));
+}
+
+/* fd_file_identity reads the device and inode of the file the calling task
+ * has open as fd, so a descriptor-based change can be matched to the file
+ * even if the descriptor is closed or reused before userspace reads /proc.
+ * It returns 0 when they cannot be read.
+ */
+static __always_inline int fd_file_identity(__u64 fd, __u32 *dev, __u64 *ino)
+{
+	struct task_struct *task = bpf_get_current_task();
+	struct files_struct *files = 0;
+	struct fdtable *fdt = 0;
+	struct file **table = 0;
+	struct file *file = 0;
+	struct inode *inode = 0;
+	struct super_block *sb = 0;
+	unsigned int max_fds = 0;
+	unsigned long number = 0;
+
+	if (!task || bpf_probe_read_kernel(&files, sizeof(files), __builtin_preserve_access_index(&task->files)) < 0 || !files ||
+		bpf_probe_read_kernel(&fdt, sizeof(fdt), __builtin_preserve_access_index(&files->fdt)) < 0 || !fdt ||
+		bpf_probe_read_kernel(&max_fds, sizeof(max_fds), __builtin_preserve_access_index(&fdt->max_fds)) < 0 || fd >= max_fds ||
+		bpf_probe_read_kernel(&table, sizeof(table), __builtin_preserve_access_index(&fdt->fd)) < 0 || !table ||
+		bpf_probe_read_kernel(&file, sizeof(file), &table[fd]) < 0 || !file ||
+		bpf_probe_read_kernel(&inode, sizeof(inode), __builtin_preserve_access_index(&file->f_inode)) < 0 || !inode ||
+		bpf_probe_read_kernel(&number, sizeof(number), __builtin_preserve_access_index(&inode->i_ino)) < 0 ||
+		bpf_probe_read_kernel(&sb, sizeof(sb), __builtin_preserve_access_index(&inode->i_sb)) < 0 || !sb ||
+		bpf_probe_read_kernel(dev, sizeof(*dev), __builtin_preserve_access_index(&sb->s_dev)) < 0) {
+		return 0;
+	}
+	*ino = number;
+	return 1;
 }
 
 static __always_inline int daemon_is_exempt(const struct settings *cfg)
@@ -4419,16 +4471,42 @@ static __always_inline __u64 owner_value(__u64 uid, __u64 gid)
 	return (uid & 0xffffffffULL) | ((gid & 0xffffffffULL) << 32);
 }
 
+/* emit_fd_change reports a descriptor-based change with the open file's
+ * device in local_addr[0..3] and inode in local_addr[8..15], captured now.
+ */
+static __always_inline int emit_fd_change(__u32 operation, __u64 fd, __u64 value)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+	__u32 dev = 0;
+	__u64 ino = 0;
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	event->file_mode = (__u32)fd;
+	event->socket_cookie = value;
+	set_event_mnt_ns(event);
+	if (fd_file_identity(fd, &dev, &ino)) {
+		__builtin_memcpy(&event->local_addr[0], &dev, sizeof(dev));
+		__builtin_memcpy(&event->local_addr[8], &ino, sizeof(ino));
+	}
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
 SEC("tracepoint/syscalls/sys_enter_fchmod")
 int trace_fchmod(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], 0, 0, ctx->args[1]);
+	return emit_fd_change(FILE_CHANGE_CHMOD, ctx->args[0], ctx->args[1]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_fchown")
 int trace_fchown(struct trace_event_raw_sys_enter *ctx)
 {
-	return emit_file_change(FILE_CHANGE_CHOWN, ctx->args[0], 0, 0, owner_value(ctx->args[1], ctx->args[2]));
+	return emit_fd_change(FILE_CHANGE_CHOWN, ctx->args[0], owner_value(ctx->args[1], ctx->args[2]));
 }
 
 SEC("tracepoint/syscalls/sys_enter_chown")

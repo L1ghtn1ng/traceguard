@@ -622,3 +622,25 @@ func TestRawEventSizeMatchesBPFEvent(t *testing.T) {
 		t.Fatalf("rawEvent size = %d, want BPF struct event size %d", got, want)
 	}
 }
+
+func TestDecodeDescriptorFileChangeIdentity(t *testing.T) {
+	t.Parallel()
+
+	var raw rawEvent
+	raw.Kind = EventFileChange
+	raw.RuleID = 2
+	raw.FileMode = 4
+	binary.NativeEndian.PutUint32(raw.LocalAddr[:4], 8<<20|1)
+	binary.NativeEndian.PutUint64(raw.LocalAddr[8:], 1234)
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.NativeEndian, raw); err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.FileDevice != 8<<20|1 || event.FileInode != 1234 || event.LocalAddress != "" {
+		t.Fatalf("FileDevice = %#x FileInode = %d LocalAddress = %q", event.FileDevice, event.FileInode, event.LocalAddress)
+	}
+}

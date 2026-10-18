@@ -1148,8 +1148,10 @@ existing file and `new_path` the new link; for `symlink`, `requested_path` is
 the link's target text and `new_path` the symlink created. A repeat of the same
 request by the same process is recorded once per five minutes, like file
 audit. Like `file_access`, the path is as requested and may be relative. `fchmod` and `fchown` are observed too: they have an empty
-`requested_path` and the descriptor in `requested_dirfd`, which file integrity
-monitoring resolves through `/proc` to the file it has open. `ftruncate`, like
+`requested_path` and the descriptor in `requested_dirfd`. The kernel also
+records the open file's device and inode, so file integrity monitoring checks
+every watched name for that file, including other hard links, even if the
+descriptor is closed, reused, or its name removed before the event is handled. `ftruncate`, like
 writes through an open descriptor, is not observed; the rescan covers it. TraceGuard's own file activity is excluded
 from file audit and file change events, because hashing would otherwise audit
 itself.
