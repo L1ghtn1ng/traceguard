@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -36,6 +37,10 @@ type exportSink struct {
 	wg            sync.WaitGroup
 	spool         *spoolStore
 	encode        recordEncoder
+	// drainTimeout bounds reading a reply body after its headers arrive,
+	// and replayBudget bounds one replay tick, requests included.
+	drainTimeout time.Duration
+	replayBudget time.Duration
 }
 
 func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry) (*exportSink, error) {
@@ -101,6 +106,8 @@ func newExportSink(ctx context.Context, cfg Config, metrics *telemetry.Registry)
 		cancel:        cancel,
 		spool:         spool,
 		encode:        encode,
+		drainTimeout:  exportDrainTimeout,
+		replayBudget:  exportReplayBudget,
 	}
 	sink.updateQueueDepth()
 	sink.updateSpoolFiles()
@@ -204,22 +211,41 @@ func (e *exportSink) run(ctx context.Context) {
 		case <-flushTicker.C:
 			flush(ctx)
 		case <-replayTicker.C:
-			if e.spool == nil {
-				continue
-			}
-			_ = e.spool.Replay(func(payload []byte) error {
-				if err := e.sendPayload(ctx, payload); err != nil {
-					e.metrics.IncEventExport("replay_error")
-					e.metrics.SetEventExportLastError()
-					return err
-				}
-				e.metrics.IncEventExport("replayed")
-				e.metrics.SetEventExportLastSuccess()
-				return nil
-			})
-			e.updateSpoolFiles()
+			e.replay(ctx)
 		}
 	}
+}
+
+// replay sends spooled batches for at most replayBudget, so live events keep
+// draining from the queue while a large spool is sent. The budget bounds the
+// requests too, so a stalled collector cannot hold the worker past it.
+func (e *exportSink) replay(ctx context.Context) {
+	if e.spool == nil {
+		return
+	}
+	deadline := time.Now().Add(e.replayBudget)
+	replayCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	sendFailed := false
+	err := e.spool.ReplayUntil(deadline, func(payload []byte) error {
+		if err := e.sendPayload(replayCtx, payload); err != nil {
+			sendFailed = true
+			e.metrics.IncEventExport("replay_error")
+			e.metrics.SetEventExportLastError()
+			return err
+		}
+		e.metrics.IncEventExport("replayed")
+		e.metrics.SetEventExportLastSuccess()
+		return nil
+	})
+	// A failed send was counted above; unreadable entries and listing
+	// failures are spool errors.
+	var readErr *spoolReadError
+	if err != nil && (!sendFailed || errors.As(err, &readErr)) {
+		e.metrics.IncEventExport("spool_error")
+		e.metrics.SetEventExportLastError()
+	}
+	e.updateSpoolFiles()
 }
 
 func (e *exportSink) updateQueueDepth() {
@@ -251,6 +277,8 @@ func (e *exportSink) sendBatch(ctx context.Context, batch []json.RawMessage) err
 }
 
 func (e *exportSink) sendPayload(ctx context.Context, payload []byte) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.target, bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -264,6 +292,11 @@ func (e *exportSink) sendPayload(ctx context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	// Drain a short reply so the connection returns to the keep-alive pool,
+	// but cancel the request rather than wait on a body that stalls.
+	stop := time.AfterFunc(e.drainTimeout, cancel)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainedResponseBytes))
+	stop.Stop()
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("unexpected status %s", resp.Status)
@@ -442,6 +475,16 @@ func (s *spoolStore) Write(batch []json.RawMessage) error {
 	return unix.Fsync(int(s.dir.Fd()))
 }
 
+// spoolReadError reports a spool entry that could not be read for replay.
+type spoolReadError struct {
+	file string
+	err  error
+}
+
+func (e *spoolReadError) Error() string { return fmt.Sprintf("read spool entry %q: %v", e.file, e.err) }
+
+func (e *spoolReadError) Unwrap() error { return e.err }
+
 func (s *spoolStore) usage(files []string) (int64, error) {
 	var total int64
 	for _, file := range files {
@@ -466,6 +509,14 @@ func (s *spoolStore) usage(files []string) (int64, error) {
 }
 
 func (s *spoolStore) Replay(send func([]byte) error) error {
+	return s.ReplayUntil(time.Time{}, send)
+}
+
+// ReplayUntil sends spooled batches oldest first until one fails to send or,
+// with a non-zero deadline, the deadline passes; the rest wait for the next
+// call. A file that cannot be read is left in place and skipped, so it does
+// not hold back the files after it.
+func (s *spoolStore) ReplayUntil(deadline time.Time, send func([]byte) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -473,19 +524,24 @@ func (s *spoolStore) Replay(send func([]byte) error) error {
 	if err != nil {
 		return err
 	}
+	var unreadable error
 	for _, file := range files {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			break
+		}
 		payload, err := safefile.ReadFileBeneath(int(s.dir.Fd()), file, maxSpoolPayloadBytes)
 		if err != nil {
-			return err
+			unreadable = errors.Join(unreadable, &spoolReadError{file: file, err: err})
+			continue
 		}
 		if err := send(payload); err != nil {
-			return err
+			return errors.Join(unreadable, err)
 		}
 		if err := unix.Unlinkat(int(s.dir.Fd()), file, 0); err != nil {
-			return err
+			return errors.Join(unreadable, err)
 		}
 	}
-	return nil
+	return unreadable
 }
 
 func (s *spoolStore) files() (files []string, listErr error) {

@@ -17,17 +17,23 @@ import (
 const (
 	exportQueueSize      = 1024
 	exportReplayInterval = 15 * time.Second
-	exportShutdownFlush  = 10 * time.Second
-	exportBatchSize      = 50
-	exportFlushEvery     = 5 * time.Second
-	syslogQueueSize      = 1024
-	syslogShutdownFlush  = 10 * time.Second
-	dedupePruneInterval  = time.Minute
-	maxDedupeStates      = 65536
-	maxRememberedDomains = 65536
-	maxSpoolFiles        = 10000
-	maxSpoolBytes        = 256 * 1024 * 1024
-	maxSpoolPayloadBytes = 1024 * 1024
+	// exportReplayBudget bounds how long one replay tick sends spooled
+	// batches before the worker returns to the live queue.
+	exportReplayBudget = 5 * time.Second
+	// exportDrainTimeout bounds reading an export reply body.
+	exportDrainTimeout      = time.Second
+	maxDrainedResponseBytes = 64 << 10
+	exportShutdownFlush     = 10 * time.Second
+	exportBatchSize         = 50
+	exportFlushEvery        = 5 * time.Second
+	syslogQueueSize         = 1024
+	syslogShutdownFlush     = 10 * time.Second
+	dedupePruneInterval     = time.Minute
+	maxDedupeStates         = 65536
+	maxRememberedDomains    = 65536
+	maxSpoolFiles           = 10000
+	maxSpoolBytes           = 256 * 1024 * 1024
+	maxSpoolPayloadBytes    = 1024 * 1024
 )
 
 var exportSpoolPath = "/var/lib/traceguard/export-spool"

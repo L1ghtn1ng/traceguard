@@ -231,3 +231,41 @@ func TestReadSecretRejectsSymlinksAndNonRegularFiles(t *testing.T) {
 		t.Fatal("ReadSecret accepted relative path")
 	}
 }
+
+func TestOpenBeneathFallbackCreatesAndRejectsSymlinks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "sub"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(dir) //nolint:gosec // test path
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	file, err := openBeneathAt(int(root.Fd()), "sub/new.txt", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("openBeneathAt create: %v", err)
+	}
+	if _, err := file.WriteString("ok"); err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	if payload, err := os.ReadFile(filepath.Join(dir, "sub", "new.txt")); err != nil || string(payload) != "ok" { //nolint:gosec // test path
+		t.Fatalf("created file = %q, %v; want %q", payload, err, "ok")
+	}
+	if file, err := openBeneathAt(int(root.Fd()), "link/new.txt", unix.O_RDONLY, 0); err == nil {
+		_ = file.Close()
+		t.Fatal("openBeneathAt followed a symlinked directory")
+	}
+	if dirFile, err := openBeneathAt(int(root.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY, 0); err != nil {
+		t.Fatalf("openBeneathAt(\".\"): %v", err)
+	} else {
+		_ = dirFile.Close()
+	}
+}

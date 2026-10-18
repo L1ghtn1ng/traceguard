@@ -104,12 +104,43 @@ func OpenBeneath(dirfd int, name string, flags int, mode os.FileMode) (*os.File,
 		Mode:    uint64(mode.Perm()),
 		Resolve: noSymlinks | unix.RESOLVE_BENEATH,
 	})
+	if errors.Is(err, unix.ENOSYS) {
+		return openBeneathAt(dirfd, name, flags, mode)
+	}
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), name)
 	if file == nil {
 		_ = unix.Close(fd)
+		return nil, os.ErrInvalid
+	}
+	return file, nil
+}
+
+// openBeneathAt gives OpenBeneath's guarantees without openat2: the local
+// name is cleaned, so it has no ".." components, and each component is opened
+// with O_NOFOLLOW relative to the one before it.
+func openBeneathAt(dirfd int, name string, flags int, mode os.FileMode) (*os.File, error) {
+	components := strings.Split(filepath.Clean(name), string(filepath.Separator))
+	current := dirfd
+	for index, component := range components {
+		componentFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		if index == len(components)-1 {
+			componentFlags = flags | unix.O_CLOEXEC | unix.O_NOFOLLOW
+		}
+		nextfd, openErr := unix.Openat(current, component, componentFlags, uint32(mode.Perm()))
+		if current != dirfd {
+			_ = unix.Close(current)
+		}
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = nextfd
+	}
+	file := os.NewFile(uintptr(current), name)
+	if file == nil {
+		_ = unix.Close(current)
 		return nil, os.ErrInvalid
 	}
 	return file, nil
