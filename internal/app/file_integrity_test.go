@@ -96,6 +96,7 @@ func TestResolveRequestedPath(t *testing.T) {
 		"unknown dirfd":  {42, 9, "job", "", false},
 		"gone process":   {43, atFDCWD, "x", "", false},
 		"empty":          {42, atFDCWD, "", "", false},
+		"descriptor":     {42, 7, "", "/etc/cron.d", true},
 	} {
 		if got, ok := resolveRequestedPath(procRoot, test.pid, test.dirfd, test.path); got != test.want || ok != test.ok {
 			t.Errorf("%s: resolveRequestedPath = %q, %t; want %q, %t", name, got, ok, test.want, test.ok)
@@ -264,5 +265,24 @@ func TestLinkAndSymlinkChangesReportTheCreatedPath(t *testing.T) {
 		Filename: "/tmp/payload", NewPath: "/etc/cron.d/job", FileMode: atFDCWD, Value: atFDCWD}, map[string]any{})
 	if pending := watcher.PendingPaths(); !slices.Equal(pending, []string{"/etc/cron.d/job"}) {
 		t.Fatalf("queued %v, want only the created symlink", pending)
+	}
+}
+
+func TestDescriptorChmodChecksTheOpenFile(t *testing.T) {
+	t.Parallel()
+
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "1", "fd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/sudoers", filepath.Join(procRoot, "1", "fd", "4")); err != nil {
+		t.Fatal(err)
+	}
+	watcher := fim.NewWatcher(t.TempDir())
+	watcher.Configure(policyconfig.FileIntegrityPolicy{Paths: []string{"/etc/sudoers"}})
+	// fchmod(4, 0777) carries no path, only the descriptor.
+	notifyIntegrity(watcher, procRoot, ebpf.Event{Kind: ebpf.EventFileChange, Operation: 2, PID: 1, FileMode: 4, Value: 0o777}, map[string]any{})
+	if pending := watcher.PendingPaths(); !slices.Equal(pending, []string{"/etc/sudoers"}) {
+		t.Fatalf("queued %v, want the file the descriptor has open", pending)
 	}
 }
