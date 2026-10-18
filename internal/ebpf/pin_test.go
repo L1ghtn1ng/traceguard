@@ -158,7 +158,7 @@ func TestReplacePinnedMapSwapsOnlyAfterPinning(t *testing.T) {
 		t.Fatalf("failed replacement changed the old pin: %q, %v", got, err)
 	}
 
-	if err := os.WriteFile(path+".new", []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(stagedPinPath(path), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := replacePinnedMap(path, filePinner{content: "new"}); err != nil {
@@ -167,7 +167,16 @@ func TestReplacePinnedMapSwapsOnlyAfterPinning(t *testing.T) {
 	if got, err := os.ReadFile(path); err != nil || string(got) != "new" { //nolint:gosec // path is rooted in t.TempDir
 		t.Fatalf("pin after replacement = %q, %v; want new", got, err)
 	}
-	if _, err := os.Stat(path + ".new"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(stagedPinPath(path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staged pin left behind: %v", err)
+	}
+}
+
+func TestStagedPinPathIsAValidBPFFSName(t *testing.T) {
+	t.Parallel()
+
+	// bpffs refuses to create any name containing a dot.
+	if name := filepath.Base(stagedPinPath("/sys/fs/bpf/traceguard/maps/events")); strings.Contains(name, ".") {
+		t.Fatalf("staged pin name %q contains a dot", name)
 	}
 }

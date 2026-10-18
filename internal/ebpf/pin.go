@@ -244,7 +244,7 @@ func discardResizedRingBuffer(pinned map[string]*ebpf.Map, size uint32) ([]strin
 // replacePinnedMap pins target beside the existing pin and renames it over
 // that pin, so the path names the old map until the new one is pinned.
 func replacePinnedMap(path string, target interface{ Pin(string) error }) error {
-	staging := path + ".new"
+	staging := stagedPinPath(path)
 	if err := os.Remove(staging); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale staged pin %s: %w", staging, err)
 	}
@@ -261,6 +261,12 @@ func replacePinnedMap(path string, target interface{ Pin(string) error }) error 
 // must be replaced to honour a requested size, where zero keeps any size.
 func ringBufferResized(pinnedSize, requested uint32) bool {
 	return requested != 0 && pinnedSize != requested
+}
+
+// stagedPinPath names the temporary pin a replacement is staged at. bpffs
+// rejects names containing a dot, so the suffix uses an underscore.
+func stagedPinPath(path string) string {
+	return path + "_staged"
 }
 
 func pinExists(path string) bool {
