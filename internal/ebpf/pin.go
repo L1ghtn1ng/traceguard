@@ -345,7 +345,7 @@ func monitorProgramHandles(o monitorObjects, optional optionalPrograms) map[stri
 		"trace_recvmsg_unix": optional.UnixRecvmsg, "trace_setsockopt": optional.Sockopt,
 		"trace_sockops": optional.SockOps,
 	}
-	for _, tracepoint := range o.tracepoints() {
+	for _, tracepoint := range o.observeTracepoints() {
 		handles[tracepoint.program] = tracepoint.handle
 	}
 	return handles

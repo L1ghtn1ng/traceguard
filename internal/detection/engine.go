@@ -439,7 +439,8 @@ func matches(match policy.DetectionMatch, cidrs []netip.Prefix, context *eventMa
 		matchStrings(match.Operations, stringField(fields, "operation")) &&
 		matchStrings(match.ExecSources, stringField(fields, "exec_source")) &&
 		matchStrings(match.MountFSTypes, stringField(fields, "mount_fstype")) &&
-		matchAnyListed(match.Capabilities, fields["requested_capabilities"])
+		matchAnyListed(match.Capabilities, fields["requested_capabilities"]) &&
+		matchStrings(match.Changes, stringField(fields, "change"))
 }
 
 // matchAnyListed reports whether any of values appears in a list field, as a

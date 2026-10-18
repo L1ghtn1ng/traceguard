@@ -11,7 +11,8 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - detect configured DNS-over-HTTPS resolver connections
 - trace `execve` and `execveat` activity so newly spawned programs are visible
 - observe memfd creation, ptrace and cross-process memory access, kernel module and BPF program loads, io_uring setup, mounts, namespace changes, and privilege changes
-- audit file access through open-style syscall tracepoints when enabled
+- audit file access through open-style syscall tracepoints when enabled, and path-based unlink, rename, chmod, chown, and truncate requests
+- monitor file integrity for policy-selected paths: SHA-256 and attribute baselines, change attribution to the acting process, and periodic rescans
 - optionally block DNS lookups defined by local or remote YAML policy
 - enforce exact and suffix DNS policies, with allow rules taking precedence
 - enforce UID- and cgroup-aware outbound TCP/UDP CIDR and port policy

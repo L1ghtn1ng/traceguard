@@ -14,23 +14,28 @@ import (
 )
 
 const (
-	Version                         = 1
-	MaxDocumentBytes          int64 = 4 << 20
-	MaxEgressRules                  = 1024
-	MaxEnforcementRules             = 1024
-	MaxDetectionRules               = 256
-	MaxDetectionExceptions          = 256
-	MaxExceptionReasonBytes         = 512
-	MaxDetectionGroups              = 16384
-	MaxThresholdWindow              = time.Hour
-	MaxThresholdCount               = 10000
-	MaxRuleListValues               = 256
-	MaxDetectionMessageBytes        = 4096
-	MaxDetectionPathStemBytes       = 247
-	MaxDetectionSamples             = 65536
-	MaxPolicySelectors              = 4096
-	MaxDNSRules                     = 4096
-	MaxResolverHostnames            = 256
+	Version                             = 1
+	MaxDocumentBytes              int64 = 4 << 20
+	MaxEgressRules                      = 1024
+	MaxEnforcementRules                 = 1024
+	MaxDetectionRules                   = 256
+	MaxDetectionExceptions              = 256
+	MaxExceptionReasonBytes             = 512
+	MaxFileIntegrityPaths               = 256
+	DefaultFileIntegrityHashBytes       = 16 << 20
+	MaxFileIntegrityHashBytes           = 1 << 30
+	DefaultFileIntegrityRescan          = time.Hour
+	MinFileIntegrityRescan              = time.Minute
+	MaxDetectionGroups                  = 16384
+	MaxThresholdWindow                  = time.Hour
+	MaxThresholdCount                   = 10000
+	MaxRuleListValues                   = 256
+	MaxDetectionMessageBytes            = 4096
+	MaxDetectionPathStemBytes           = 247
+	MaxDetectionSamples                 = 65536
+	MaxPolicySelectors                  = 4096
+	MaxDNSRules                         = 4096
+	MaxResolverHostnames                = 256
 )
 
 var (
@@ -89,6 +94,69 @@ type Document struct {
 	Sockopt             SockoptPolicy        `yaml:"sockopt,omitempty"`
 	DetectionRules      []DetectionRule      `yaml:"detections,omitempty"`
 	DetectionExceptions []DetectionException `yaml:"detection_exceptions,omitempty"`
+	FileIntegrity       FileIntegrityPolicy  `yaml:"file_integrity,omitempty"`
+}
+
+// FileIntegrityPolicy selects the files whose content and attributes are
+// baselined and compared after change events and on a periodic rescan.
+type FileIntegrityPolicy struct {
+	Paths   []string `yaml:"paths,omitempty"`
+	Exclude []string `yaml:"exclude,omitempty"`
+	// Hash enables SHA-256 content hashing; it defaults to true.
+	Hash *bool `yaml:"hash,omitempty"`
+	// MaxHashBytes caps the size of a hashed file; larger files are compared
+	// by metadata only.
+	MaxHashBytes int64 `yaml:"max_hash_bytes,omitempty"`
+	// RescanInterval is the full rescan period; 0 disables periodic rescans.
+	RescanInterval *Duration `yaml:"rescan_interval,omitempty"`
+}
+
+// Enabled reports whether any path is watched.
+func (f FileIntegrityPolicy) Enabled() bool { return len(f.Paths) > 0 }
+
+// HashEnabled reports whether content hashing is on.
+func (f FileIntegrityPolicy) HashEnabled() bool { return f.Hash == nil || *f.Hash }
+
+// HashLimit returns the largest file size that is hashed.
+func (f FileIntegrityPolicy) HashLimit() int64 {
+	if f.MaxHashBytes == 0 {
+		return DefaultFileIntegrityHashBytes
+	}
+	return f.MaxHashBytes
+}
+
+// Rescan returns the periodic rescan interval, 0 when disabled.
+func (f FileIntegrityPolicy) Rescan() time.Duration {
+	if f.RescanInterval == nil {
+		return DefaultFileIntegrityRescan
+	}
+	return f.RescanInterval.Duration
+}
+
+func (f FileIntegrityPolicy) validate() error {
+	if count := len(f.Paths) + len(f.Exclude); count > MaxFileIntegrityPaths {
+		return fmt.Errorf("path and exclude count %d exceeds %d", count, MaxFileIntegrityPaths)
+	}
+	if len(f.Exclude) > 0 && len(f.Paths) == 0 {
+		return fmt.Errorf("exclude requires paths")
+	}
+	for _, list := range [][]string{f.Paths, f.Exclude} {
+		if err := validateUnique(list, "file integrity path"); err != nil {
+			return err
+		}
+		for _, pattern := range list {
+			if err := validateDetectionPathPattern(pattern); err != nil {
+				return err
+			}
+		}
+	}
+	if f.MaxHashBytes < 0 || f.MaxHashBytes > MaxFileIntegrityHashBytes {
+		return fmt.Errorf("max_hash_bytes must be between 0 and %d", MaxFileIntegrityHashBytes)
+	}
+	if f.RescanInterval != nil && f.RescanInterval.Duration != 0 && f.RescanInterval.Duration < MinFileIntegrityRescan {
+		return fmt.Errorf("rescan_interval must be 0 or at least %s", MinFileIntegrityRescan)
+	}
+	return nil
 }
 
 type DNSPolicy struct {
@@ -252,6 +320,7 @@ type DetectionMatch struct {
 	ExecSources         []string `yaml:"exec_sources,omitempty"`
 	MountFSTypes        []string `yaml:"mount_fstypes,omitempty"`
 	Capabilities        []string `yaml:"capabilities,omitempty"`
+	Changes             []string `yaml:"changes,omitempty"`
 }
 
 // DetectionException suppresses alerts from the listed rules for events that
@@ -286,6 +355,7 @@ type Bundle struct {
 	Sockopt             SockoptPolicy
 	DetectionRules      []DetectionRule
 	DetectionExceptions []DetectionException
+	FileIntegrity       FileIntegrityPolicy
 	BuiltinProfiles     []string
 	DisabledRuleIDs     []string
 }
@@ -407,6 +477,9 @@ func (d Document) Validate() error {
 		if err := rule.validate(); err != nil {
 			return fmt.Errorf("detection rule %q: %w", rule.ID, err)
 		}
+	}
+	if err := d.FileIntegrity.validate(); err != nil {
+		return fmt.Errorf("file_integrity: %w", err)
 	}
 	exceptionIDs := make(map[string]struct{}, len(d.DetectionExceptions))
 	for index, exception := range d.DetectionExceptions {
@@ -657,6 +730,7 @@ func (m DetectionMatch) validate() error {
 		"exec sources":          len(m.ExecSources),
 		"mount fstypes":         len(m.MountFSTypes),
 		"capabilities":          len(m.Capabilities),
+		"changes":               len(m.Changes),
 	} {
 		if count > MaxRuleListValues {
 			return fmt.Errorf("%s count %d exceeds %d", name, count, MaxRuleListValues)
@@ -739,7 +813,7 @@ func (m DetectionMatch) Empty() bool {
 		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
 		len(m.KubernetesAccounts)+len(m.KubernetesOwners)+len(m.KubernetesApps)+
 		len(m.LSMSources)+len(m.LSMLabels)+len(m.Operations)+len(m.ExecSources)+
-		len(m.MountFSTypes)+len(m.Capabilities) == 0
+		len(m.MountFSTypes)+len(m.Capabilities)+len(m.Changes) == 0
 }
 
 func validateDetectionPathPattern(pattern string) error {
@@ -776,8 +850,8 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 	}
 	if len(match.FilePathGlobs) > 0 {
 		for _, event := range events {
-			if event != "file_blocked" && event != "file_would_block" {
-				return fmt.Errorf("file_path_globs require only file_blocked or file_would_block events with kernel-resolved paths; %q is unsupported", event)
+			if event != "file_blocked" && event != "file_would_block" && event != "file_integrity" {
+				return fmt.Errorf("file_path_globs require only file_blocked, file_would_block, or file_integrity events with resolved paths; %q is unsupported", event)
 			}
 		}
 	}
@@ -803,6 +877,7 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 		{"exec_sources", "exec", "whose executable source is captured at syscall entry", len(match.ExecSources)},
 		{"mount_fstypes", "mount", "which carry the requested filesystem type", len(match.MountFSTypes)},
 		{"capabilities", "privilege_change", "whose capset requests carry capabilities", len(match.Capabilities)},
+		{"changes", "file_integrity", "which carry the change kind", len(match.Changes)},
 	} {
 		if selector.count == 0 {
 			continue
@@ -811,6 +886,11 @@ func validateDetectionEventFields(events []string, match DetectionMatch, identit
 			if event != selector.event {
 				return fmt.Errorf("%s require %s events, %s; %q is unsupported", selector.name, selector.event, selector.reason, event)
 			}
+		}
+	}
+	for _, change := range match.Changes {
+		if !slices.Contains([]string{"created", "modified", "deleted", "attributes"}, change) {
+			return fmt.Errorf("unsupported change %q", change)
 		}
 	}
 	for _, capability := range match.Capabilities {
@@ -891,6 +971,7 @@ var supportedDetectionEvents = []string{
 	"sockopt_blocked", "sockopt_would_block", "tcp_sockops",
 	"memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load",
 	"io_uring_setup", "mount", "namespace_change", "privilege_change",
+	"file_change", "file_integrity",
 }
 
 // CapabilityNames lists the capabilities a capset event can report: the low
@@ -910,6 +991,7 @@ var SecurityEventOperations = map[string][]string{
 	"module_load":      {"init_module", "finit_module"},
 	"namespace_change": {"setns", "unshare"},
 	"privilege_change": {"setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"},
+	"file_change":      {"unlink", "rmdir", "rename", "chmod", "chown", "truncate"},
 }
 
 var supportedGroupFields = []string{
@@ -921,7 +1003,7 @@ var processIdentityGroupFields = []string{
 }
 
 var eventsWithoutProcessIdentity = []string{
-	"dns", "blocked", "tcp_sockops",
+	"dns", "blocked", "tcp_sockops", "file_integrity",
 }
 
 var localPortDetectionEvents = []string{
@@ -931,5 +1013,5 @@ var localPortDetectionEvents = []string{
 
 var resolvedPathDetectionEvents = []string{
 	"exec_blocked", "exec_would_block", "file_blocked", "file_would_block",
-	"unix_blocked", "unix_would_block",
+	"unix_blocked", "unix_would_block", "file_integrity",
 }

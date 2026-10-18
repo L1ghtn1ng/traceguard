@@ -63,6 +63,8 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 	registry.SetPolicyDigest("abc123")
 	registry.SetDetectionExceptions(1, 0, map[string]uint64{"removed": 4})
 	registry.SetDetectionExceptions(2, 1, map[string]uint64{"agent-imds": 3})
+	registry.IncFileIntegrityChange("modified")
+	registry.SetFileIntegrityStats(42, true, 2)
 
 	rendered := registry.Render()
 	checks := []string{
@@ -81,6 +83,10 @@ func TestRenderIncludesCountersAndGauges(t *testing.T) {
 		`traceguard_detection_exceptions{state="active"} 2`,
 		`traceguard_detection_exceptions{state="expired"} 1`,
 		`traceguard_detection_suppressed_total{exception="agent-imds"} 3`,
+		`traceguard_file_integrity_changes_total{change="modified"} 1`,
+		`traceguard_file_integrity_files 42`,
+		`traceguard_file_integrity_truncated 1`,
+		`traceguard_file_integrity_dropped_checks_total 2`,
 		`traceguard_kernel_feature_enabled{feature="bpf_lsm"} 1`,
 		`traceguard_kernel_feature_enabled{feature="btf"} 0`,
 		`traceguard_kernel_feature_enabled{feature="enhanced_telemetry"} 1`,

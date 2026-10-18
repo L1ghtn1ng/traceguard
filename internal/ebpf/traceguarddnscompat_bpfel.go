@@ -263,6 +263,8 @@ const (
 	traceguardDNSCompatProgTraceBind6              = "trace_bind6"
 	traceguardDNSCompatProgTraceBpf                = "trace_bpf"
 	traceguardDNSCompatProgTraceCapset             = "trace_capset"
+	traceguardDNSCompatProgTraceChmod              = "trace_chmod"
+	traceguardDNSCompatProgTraceChown              = "trace_chown"
 	traceguardDNSCompatProgTraceConnect4           = "trace_connect4"
 	traceguardDNSCompatProgTraceConnect6           = "trace_connect6"
 	traceguardDNSCompatProgTraceConnectUnix        = "trace_connect_unix"
@@ -271,9 +273,13 @@ const (
 	traceguardDNSCompatProgTraceDns                = "trace_dns"
 	traceguardDNSCompatProgTraceExecve             = "trace_execve"
 	traceguardDNSCompatProgTraceExecveat           = "trace_execveat"
+	traceguardDNSCompatProgTraceFchmodat           = "trace_fchmodat"
+	traceguardDNSCompatProgTraceFchmodat2          = "trace_fchmodat2"
+	traceguardDNSCompatProgTraceFchownat           = "trace_fchownat"
 	traceguardDNSCompatProgTraceFinitModule        = "trace_finit_module"
 	traceguardDNSCompatProgTraceInitModule         = "trace_init_module"
 	traceguardDNSCompatProgTraceIoUringSetup       = "trace_io_uring_setup"
+	traceguardDNSCompatProgTraceLchown             = "trace_lchown"
 	traceguardDNSCompatProgTraceMemfdCreate        = "trace_memfd_create"
 	traceguardDNSCompatProgTraceMount              = "trace_mount"
 	traceguardDNSCompatProgTraceOpen               = "trace_open"
@@ -287,6 +293,10 @@ const (
 	traceguardDNSCompatProgTraceRecvmsg4           = "trace_recvmsg4"
 	traceguardDNSCompatProgTraceRecvmsg6           = "trace_recvmsg6"
 	traceguardDNSCompatProgTraceRecvmsgUnix        = "trace_recvmsg_unix"
+	traceguardDNSCompatProgTraceRename             = "trace_rename"
+	traceguardDNSCompatProgTraceRenameat           = "trace_renameat"
+	traceguardDNSCompatProgTraceRenameat2          = "trace_renameat2"
+	traceguardDNSCompatProgTraceRmdir              = "trace_rmdir"
 	traceguardDNSCompatProgTraceSendmsg4           = "trace_sendmsg4"
 	traceguardDNSCompatProgTraceSendmsg6           = "trace_sendmsg6"
 	traceguardDNSCompatProgTraceSendmsgUnix        = "trace_sendmsg_unix"
@@ -299,6 +309,9 @@ const (
 	traceguardDNSCompatProgTraceSetsockopt         = "trace_setsockopt"
 	traceguardDNSCompatProgTraceSetuid             = "trace_setuid"
 	traceguardDNSCompatProgTraceSockops            = "trace_sockops"
+	traceguardDNSCompatProgTraceTruncate           = "trace_truncate"
+	traceguardDNSCompatProgTraceUnlink             = "trace_unlink"
+	traceguardDNSCompatProgTraceUnlinkat           = "trace_unlinkat"
 	traceguardDNSCompatProgTraceUnshare            = "trace_unshare"
 	traceguardDNSCompatVarConnectionDedupeWindowNs = "connection_dedupe_window_ns"
 )
@@ -351,6 +364,8 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceBind6             *ebpf.ProgramSpec `ebpf:"trace_bind6"`
 	TraceBpf               *ebpf.ProgramSpec `ebpf:"trace_bpf"`
 	TraceCapset            *ebpf.ProgramSpec `ebpf:"trace_capset"`
+	TraceChmod             *ebpf.ProgramSpec `ebpf:"trace_chmod"`
+	TraceChown             *ebpf.ProgramSpec `ebpf:"trace_chown"`
 	TraceConnect4          *ebpf.ProgramSpec `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.ProgramSpec `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.ProgramSpec `ebpf:"trace_connect_unix"`
@@ -359,9 +374,13 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceFchmodat          *ebpf.ProgramSpec `ebpf:"trace_fchmodat"`
+	TraceFchmodat2         *ebpf.ProgramSpec `ebpf:"trace_fchmodat2"`
+	TraceFchownat          *ebpf.ProgramSpec `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.ProgramSpec `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
 	TraceIoUringSetup      *ebpf.ProgramSpec `ebpf:"trace_io_uring_setup"`
+	TraceLchown            *ebpf.ProgramSpec `ebpf:"trace_lchown"`
 	TraceMemfdCreate       *ebpf.ProgramSpec `ebpf:"trace_memfd_create"`
 	TraceMount             *ebpf.ProgramSpec `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.ProgramSpec `ebpf:"trace_open"`
@@ -375,6 +394,10 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceRecvmsg4          *ebpf.ProgramSpec `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.ProgramSpec `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_recvmsg_unix"`
+	TraceRename            *ebpf.ProgramSpec `ebpf:"trace_rename"`
+	TraceRenameat          *ebpf.ProgramSpec `ebpf:"trace_renameat"`
+	TraceRenameat2         *ebpf.ProgramSpec `ebpf:"trace_renameat2"`
+	TraceRmdir             *ebpf.ProgramSpec `ebpf:"trace_rmdir"`
 	TraceSendmsg4          *ebpf.ProgramSpec `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.ProgramSpec `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.ProgramSpec `ebpf:"trace_sendmsg_unix"`
@@ -387,6 +410,9 @@ type traceguardDNSCompatProgramSpecs struct {
 	TraceSetsockopt        *ebpf.ProgramSpec `ebpf:"trace_setsockopt"`
 	TraceSetuid            *ebpf.ProgramSpec `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.ProgramSpec `ebpf:"trace_sockops"`
+	TraceTruncate          *ebpf.ProgramSpec `ebpf:"trace_truncate"`
+	TraceUnlink            *ebpf.ProgramSpec `ebpf:"trace_unlink"`
+	TraceUnlinkat          *ebpf.ProgramSpec `ebpf:"trace_unlinkat"`
 	TraceUnshare           *ebpf.ProgramSpec `ebpf:"trace_unshare"`
 }
 
@@ -570,6 +596,8 @@ type traceguardDNSCompatPrograms struct {
 	TraceBind6             *ebpf.Program `ebpf:"trace_bind6"`
 	TraceBpf               *ebpf.Program `ebpf:"trace_bpf"`
 	TraceCapset            *ebpf.Program `ebpf:"trace_capset"`
+	TraceChmod             *ebpf.Program `ebpf:"trace_chmod"`
+	TraceChown             *ebpf.Program `ebpf:"trace_chown"`
 	TraceConnect4          *ebpf.Program `ebpf:"trace_connect4"`
 	TraceConnect6          *ebpf.Program `ebpf:"trace_connect6"`
 	TraceConnectUnix       *ebpf.Program `ebpf:"trace_connect_unix"`
@@ -578,9 +606,13 @@ type traceguardDNSCompatPrograms struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceFchmodat          *ebpf.Program `ebpf:"trace_fchmodat"`
+	TraceFchmodat2         *ebpf.Program `ebpf:"trace_fchmodat2"`
+	TraceFchownat          *ebpf.Program `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.Program `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
 	TraceIoUringSetup      *ebpf.Program `ebpf:"trace_io_uring_setup"`
+	TraceLchown            *ebpf.Program `ebpf:"trace_lchown"`
 	TraceMemfdCreate       *ebpf.Program `ebpf:"trace_memfd_create"`
 	TraceMount             *ebpf.Program `ebpf:"trace_mount"`
 	TraceOpen              *ebpf.Program `ebpf:"trace_open"`
@@ -594,6 +626,10 @@ type traceguardDNSCompatPrograms struct {
 	TraceRecvmsg4          *ebpf.Program `ebpf:"trace_recvmsg4"`
 	TraceRecvmsg6          *ebpf.Program `ebpf:"trace_recvmsg6"`
 	TraceRecvmsgUnix       *ebpf.Program `ebpf:"trace_recvmsg_unix"`
+	TraceRename            *ebpf.Program `ebpf:"trace_rename"`
+	TraceRenameat          *ebpf.Program `ebpf:"trace_renameat"`
+	TraceRenameat2         *ebpf.Program `ebpf:"trace_renameat2"`
+	TraceRmdir             *ebpf.Program `ebpf:"trace_rmdir"`
 	TraceSendmsg4          *ebpf.Program `ebpf:"trace_sendmsg4"`
 	TraceSendmsg6          *ebpf.Program `ebpf:"trace_sendmsg6"`
 	TraceSendmsgUnix       *ebpf.Program `ebpf:"trace_sendmsg_unix"`
@@ -606,6 +642,9 @@ type traceguardDNSCompatPrograms struct {
 	TraceSetsockopt        *ebpf.Program `ebpf:"trace_setsockopt"`
 	TraceSetuid            *ebpf.Program `ebpf:"trace_setuid"`
 	TraceSockops           *ebpf.Program `ebpf:"trace_sockops"`
+	TraceTruncate          *ebpf.Program `ebpf:"trace_truncate"`
+	TraceUnlink            *ebpf.Program `ebpf:"trace_unlink"`
+	TraceUnlinkat          *ebpf.Program `ebpf:"trace_unlinkat"`
 	TraceUnshare           *ebpf.Program `ebpf:"trace_unshare"`
 }
 
@@ -617,6 +656,8 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceBind6,
 		p.TraceBpf,
 		p.TraceCapset,
+		p.TraceChmod,
+		p.TraceChown,
 		p.TraceConnect4,
 		p.TraceConnect6,
 		p.TraceConnectUnix,
@@ -625,9 +666,13 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceFchmodat,
+		p.TraceFchmodat2,
+		p.TraceFchownat,
 		p.TraceFinitModule,
 		p.TraceInitModule,
 		p.TraceIoUringSetup,
+		p.TraceLchown,
 		p.TraceMemfdCreate,
 		p.TraceMount,
 		p.TraceOpen,
@@ -641,6 +686,10 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceRecvmsg4,
 		p.TraceRecvmsg6,
 		p.TraceRecvmsgUnix,
+		p.TraceRename,
+		p.TraceRenameat,
+		p.TraceRenameat2,
+		p.TraceRmdir,
 		p.TraceSendmsg4,
 		p.TraceSendmsg6,
 		p.TraceSendmsgUnix,
@@ -653,6 +702,9 @@ func (p *traceguardDNSCompatPrograms) Close() error {
 		p.TraceSetsockopt,
 		p.TraceSetuid,
 		p.TraceSockops,
+		p.TraceTruncate,
+		p.TraceUnlink,
+		p.TraceUnlinkat,
 		p.TraceUnshare,
 	)
 }

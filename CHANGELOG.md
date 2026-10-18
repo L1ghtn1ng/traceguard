@@ -23,10 +23,13 @@ All notable changes to TraceGuard are documented in this file.
 - Added `mitre` (`tactics`, `techniques`) and `compliance` fields to detection rules, carried on alerts as `mitre_tactics`, `mitre_techniques`, and `compliance`. Baseline rules now carry ATT&CK mappings.
 - Added the opt-in `runtime` detection profile, enabled with `builtin_profiles: [runtime]`, with eight rules over security and exec events: kernel module load, BPF program load, ptrace attach or write, process memory write, fileless exec, namespace join, sensitive filesystem mount, and sensitive capability request. It is off by default so upgrades do not change existing alerting.
 - Added the `mount_fstypes` and `capabilities` detection selectors for `mount` and `privilege_change` events.
+- Added file integrity monitoring configured by a `file_integrity` policy section: watched paths and exclusions, SHA-256 hashing of regular files up to `max_hash_bytes` (default 16 MiB), and a periodic `rescan_interval` (default `1h`). Changes are reported as `file_integrity` events with the previous and current state and, when a kernel event triggered the check, the acting process as `actor_*` fields. The runtime profile adds `runtime.persistence-file-change` for watched cron, systemd, sudoers, PAM, account, and SSH files, and the `changes` selector matches the change kind.
+- Added `file_change` events for path-based unlink, rmdir, rename, chmod, chown, and truncate requests, attached with file auditing.
 
 ### Changed
 
 - Clarified that the `ports` and `destination_cidrs` detection selectors match the peer, which is the remote source on inbound connections.
+- File audit no longer reports TraceGuard's own file opens, which file integrity hashing would otherwise flood it with.
 - The ring buffer reader now starts before the initial YAML policy is loaded and applied, so events from the already-attached programs are consumed while a remote policy fetch is in progress instead of accumulating until the buffer fills. Events in that window are evaluated against the baseline detections.
 - Bumped the eBPF pin layout to version 6 for the new drop-counter map. With `-pin-ebpf`, the first start after upgrading discards the previous pins and attaches fresh programs.
 - Updated `docs/policy.md` to document pin layout version 6.

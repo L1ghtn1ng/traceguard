@@ -58,6 +58,30 @@ func RuntimeRules() []policy.DetectionRule {
 			time.Hour, "a process mounted a kernel debugging or security filesystem",
 			[]string{"container", "escape"},
 			policy.MITRE{Tactics: []string{"TA0004"}, Techniques: []string{"T1611"}}),
+		{
+			// File integrity changes may come from a rescan with no acting
+			// process, so this rule groups by path. It only fires for paths
+			// the policy's file_integrity section watches.
+			ID: "runtime.persistence-file-change", Enabled: &enabled, Severity: "warning",
+			Events: []string{"file_integrity"},
+			Match: policy.DetectionMatch{
+				Changes: []string{"created", "modified", "attributes"},
+				FilePathGlobs: []string{
+					"/etc/crontab", "/etc/cron.d/**", "/etc/cron.hourly/**", "/etc/cron.daily/**", "/var/spool/cron/**",
+					"/etc/systemd/system/**", "/etc/init.d/**", "/etc/rc.local",
+					"/etc/sudoers", "/etc/sudoers.d/**", "/etc/pam.d/**", "/etc/ld.so.preload",
+					"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/ssh/sshd_config", "/root/.ssh/**",
+				},
+			},
+			Threshold: policy.Threshold{Count: 1, GroupBy: []string{"path"}},
+			Cooldown:  policy.Duration{Duration: 10 * time.Minute},
+			Message:   "a persistence or account configuration file changed",
+			Tags:      []string{"runtime", "persistence", "file-integrity"},
+			MITRE: policy.MITRE{
+				Tactics:    []string{"TA0003", "TA0004"},
+				Techniques: []string{"T1053.003", "T1543.002", "T1548.003", "T1556.003", "T1574.006", "T1136.001", "T1098.004"},
+			},
+		},
 		rule("runtime.sensitive-capability-request", "notice", []string{"privilege_change"},
 			policy.DetectionMatch{Operations: []string{"capset"}, Capabilities: []string{"sys_admin", "sys_module", "sys_ptrace", "sys_rawio"}},
 			time.Hour, "a process requested a sensitive capability",

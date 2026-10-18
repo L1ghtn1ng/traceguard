@@ -48,7 +48,8 @@
 #define EVENT_MOUNT 27
 #define EVENT_NAMESPACE_CHANGE 28
 #define EVENT_PRIVILEGE_CHANGE 29
-#define EVENT_KIND_MAX EVENT_PRIVILEGE_CHANGE
+#define EVENT_FILE_CHANGE 30
+#define EVENT_KIND_MAX EVENT_FILE_CHANGE
 
 /* Security events reuse generic event fields: rule_id carries the
  * operation, file_flags the flags argument, file_mode the target PID or
@@ -69,6 +70,19 @@
 #define PRIVILEGE_SETRESUID 4
 #define PRIVILEGE_SETRESGID 5
 #define PRIVILEGE_CAPSET 6
+
+/* File change events carry the operation in rule_id, the path in filename,
+ * the dirfd in file_mode, AT_* flags in file_flags, and the operation's value
+ * in socket_cookie: the mode for chmod, uid | gid << 32 for chown, the length
+ * for truncate, and the new dirfd for rename, whose new path is in domain.
+ */
+#define FILE_CHANGE_UNLINK 0
+#define FILE_CHANGE_RENAME 1
+#define FILE_CHANGE_CHMOD 2
+#define FILE_CHANGE_CHOWN 3
+#define FILE_CHANGE_TRUNCATE 4
+#define TRACEGUARD_AT_REMOVEDIR 0x200
+#define TRACEGUARD_AT_SYMLINK_NOFOLLOW 0x100
 #define MOUNT_SOURCE_LEN 192
 #define MOUNT_FSTYPE_OFFSET MOUNT_SOURCE_LEN
 #define TRACEGUARD_BPF_PROG_LOAD 5
@@ -4141,6 +4155,130 @@ int trace_capset(struct trace_event_raw_sys_enter *ctx)
 
 	bpf_probe_read_user(&effective, sizeof(effective), (const void *)ctx->args[1]);
 	return emit_security_ids(EVENT_PRIVILEGE_CHANGE, PRIVILEGE_CAPSET, effective, 0);
+}
+
+static __always_inline int emit_file_change(__u32 operation, __u64 dirfd, const char *path, __u64 flags, __u64 value)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = operation;
+	event->file_mode = (__u32)dirfd;
+	event->file_flags = (__u32)flags;
+	event->socket_cookie = value;
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), path);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+static __always_inline int emit_file_rename(__u64 old_dirfd, const char *old_path, __u64 new_dirfd, const char *new_path, __u64 flags)
+{
+	struct event *event = reserve_event(EVENT_FILE_CHANGE);
+
+	if (!event) {
+		return 0;
+	}
+	__builtin_memset(event, 0, sizeof(*event));
+	init_event(event, EVENT_FILE_CHANGE, 0, EVENT_SOURCE_SYSCALL_TRACEPOINT);
+	event->rule_id = FILE_CHANGE_RENAME;
+	event->file_mode = (__u32)old_dirfd;
+	event->file_flags = (__u32)flags;
+	event->socket_cookie = (__u32)new_dirfd;
+	bpf_probe_read_user_str(event->filename, sizeof(event->filename), old_path);
+	bpf_probe_read_user_str(event->domain, sizeof(event->domain), new_path);
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+#define AT_FDCWD_ARG ((__u64)(__s64)TRACEGUARD_AT_FDCWD)
+
+SEC("tracepoint/syscalls/sys_enter_unlink")
+int trace_unlink(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_unlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, ctx->args[0], (const char *)ctx->args[1], ctx->args[2], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_rmdir")
+int trace_rmdir(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_UNLINK, AT_FDCWD_ARG, (const char *)ctx->args[0], TRACEGUARD_AT_REMOVEDIR, 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_rename")
+int trace_rename(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_rename(AT_FDCWD_ARG, (const char *)ctx->args[0], AT_FDCWD_ARG, (const char *)ctx->args[1], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat")
+int trace_renameat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_rename(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], (const char *)ctx->args[3], 0);
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat2")
+int trace_renameat2(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_rename(ctx->args[0], (const char *)ctx->args[1], ctx->args[2], (const char *)ctx->args[3], ctx->args[4]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_chmod")
+int trace_chmod(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, ctx->args[1]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmodat")
+int trace_fchmodat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], (const char *)ctx->args[1], 0, ctx->args[2]);
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchmodat2")
+int trace_fchmodat2(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHMOD, ctx->args[0], (const char *)ctx->args[1], ctx->args[3], ctx->args[2]);
+}
+
+static __always_inline __u64 owner_value(__u64 uid, __u64 gid)
+{
+	return (uid & 0xffffffffULL) | ((gid & 0xffffffffULL) << 32);
+}
+
+SEC("tracepoint/syscalls/sys_enter_chown")
+int trace_chown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, owner_value(ctx->args[1], ctx->args[2]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_lchown")
+int trace_lchown(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, AT_FDCWD_ARG, (const char *)ctx->args[0], TRACEGUARD_AT_SYMLINK_NOFOLLOW,
+		owner_value(ctx->args[1], ctx->args[2]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_fchownat")
+int trace_fchownat(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_CHOWN, ctx->args[0], (const char *)ctx->args[1], ctx->args[4],
+		owner_value(ctx->args[2], ctx->args[3]));
+}
+
+SEC("tracepoint/syscalls/sys_enter_truncate")
+int trace_truncate(struct trace_event_raw_sys_enter *ctx)
+{
+	return emit_file_change(FILE_CHANGE_TRUNCATE, AT_FDCWD_ARG, (const char *)ctx->args[0], 0, ctx->args[1]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")

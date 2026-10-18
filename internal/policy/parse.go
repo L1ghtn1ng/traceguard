@@ -152,6 +152,7 @@ func Merge(base, overlay Document) (Bundle, error) {
 		},
 		DetectionRules:      mergeDetectionByID(base.DetectionRules, overlay.DetectionRules),
 		DetectionExceptions: mergeExceptionsByID(base.DetectionExceptions, overlay.DetectionExceptions),
+		FileIntegrity:       mergeFileIntegrity(base.FileIntegrity, overlay.FileIntegrity),
 		BuiltinProfiles:     profiles,
 		DisabledRuleIDs:     disabledIDs,
 	}
@@ -170,6 +171,7 @@ func (b Bundle) Validate() error {
 		Exec: b.Exec, File: b.File, Bind: b.Bind, Unix: b.Unix,
 		Sockopt: b.Sockopt, DetectionRules: slices.Clone(b.DetectionRules),
 		DetectionExceptions: slices.Clone(b.DetectionExceptions),
+		FileIntegrity:       b.FileIntegrity,
 	}
 	if err := document.Validate(); err != nil {
 		return err
@@ -284,4 +286,28 @@ func mergeExceptionsByID(base, overlay []DetectionException) []DetectionExceptio
 	}
 	slices.SortFunc(out, func(left, right DetectionException) int { return strings.Compare(left.ID, right.ID) })
 	return out
+}
+
+// mergeFileIntegrity watches the union of both sources' paths and exclusions;
+// settings the overlay sets replace the base's.
+func mergeFileIntegrity(base, overlay FileIntegrityPolicy) FileIntegrityPolicy {
+	union := func(left, right []string) []string {
+		merged := append(slices.Clone(left), right...)
+		slices.Sort(merged)
+		return slices.Compact(merged)
+	}
+	merged := FileIntegrityPolicy{
+		Paths: union(base.Paths, overlay.Paths), Exclude: union(base.Exclude, overlay.Exclude),
+		Hash: base.Hash, MaxHashBytes: base.MaxHashBytes, RescanInterval: base.RescanInterval,
+	}
+	if overlay.Hash != nil {
+		merged.Hash = overlay.Hash
+	}
+	if overlay.MaxHashBytes != 0 {
+		merged.MaxHashBytes = overlay.MaxHashBytes
+	}
+	if overlay.RescanInterval != nil {
+		merged.RescanInterval = overlay.RescanInterval
+	}
+	return merged
 }

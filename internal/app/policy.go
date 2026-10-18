@@ -14,6 +14,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/eventsink"
+	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	"github.com/L1ghtn1ng/traceguard/internal/netprefix"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
@@ -26,6 +27,7 @@ type policyController struct {
 	recorder      *eventsink.Recorder
 	metrics       *telemetry.Registry
 	detector      *detection.Engine
+	integrity     *fim.Watcher
 	mu            sync.Mutex
 	bundle        policyconfig.Bundle
 	cgroups       []cgroupinfo.Entry
@@ -34,8 +36,8 @@ type policyController struct {
 	digest        string
 }
 
-func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine) *policyController {
-	return &policyController{ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics, detector: detector}
+func newPolicyController(ctx context.Context, cfg config.Config, monitor *ebpf.Monitor, recorder *eventsink.Recorder, metrics *telemetry.Registry, detector *detection.Engine, integrity *fim.Watcher) *policyController {
+	return &policyController{ctx: ctx, cfg: cfg, monitor: monitor, recorder: recorder, metrics: metrics, detector: detector, integrity: integrity}
 }
 
 func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
@@ -71,6 +73,7 @@ func (p *policyController) ApplyBundle(bundle policyconfig.Bundle) error {
 		return err
 	}
 	if bundleChanged {
+		p.integrity.Configure(bundle.FileIntegrity)
 		p.detector.Install(detections)
 		p.metrics.SetDetectionRules(p.detector.RuleCount())
 		p.recorder.InfoIfChanged("detection policy loaded", map[string]any{
@@ -170,6 +173,7 @@ func (p *policyController) RecordApplied(bundle policyconfig.Bundle) error {
 		return err
 	}
 	p.setDigestLocked(digest)
+	p.integrity.Configure(bundle.FileIntegrity)
 	return nil
 }
 

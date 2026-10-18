@@ -33,6 +33,17 @@
       "type": "array",
       "maxItems": 256,
       "items": {"$ref": "#/$defs/detection_exception"}
+    },
+    "file_integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "exclude": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^/"}},
+        "hash": {"type": "boolean"},
+        "max_hash_bytes": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+        "rescan_interval": {"$ref": "#/$defs/duration"}
+      }
     }
   },
   "$defs": {
@@ -318,7 +329,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops", "memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load", "io_uring_setup", "mount", "namespace_change", "privilege_change"]
+            "enum": ["dns", "blocked", "exec", "resolver", "resolver_blocked", "connection", "file_access", "file_created", "egress_blocked", "egress_would_block", "exec_blocked", "exec_would_block", "file_blocked", "file_would_block", "bind_blocked", "bind_would_block", "unix_blocked", "unix_would_block", "sockopt_blocked", "sockopt_would_block", "tcp_sockops", "memfd_create", "ptrace", "process_vm", "module_load", "bpf_prog_load", "io_uring_setup", "mount", "namespace_change", "privilege_change", "file_change", "file_integrity"]
           }
         },
         "match": {"$ref": "#/$defs/detection_match"},
@@ -424,6 +435,7 @@
           "description": "Globs over the redacted exec command line joined with spaces; valid only with exec events."
         },
         "exec_sources": {"type": "array", "items": {"enum": ["path", "fd"]}, "description": "Valid only with exec events."},
+        "changes": {"type": "array", "items": {"enum": ["created", "modified", "deleted", "attributes"]}, "description": "Valid only with file_integrity events."},
         "mount_fstypes": {"$ref": "#/$defs/string_list", "description": "Requested filesystem type; valid only with mount events."},
         "capabilities": {
           "type": "array",
@@ -433,8 +445,8 @@
         "operations": {
           "type": "array",
           "maxItems": 256,
-          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset"]},
-          "description": "Security event operation; valid only with ptrace, process_vm, module_load, namespace_change, and privilege_change events."
+          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset", "unlink", "rmdir", "rename", "chmod", "chown", "truncate"]},
+          "description": "Event operation; valid only with ptrace, process_vm, module_load, namespace_change, privilege_change, and file_change events."
         }
       }
     }

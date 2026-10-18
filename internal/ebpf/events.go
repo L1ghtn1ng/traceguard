@@ -68,6 +68,7 @@ const (
 	EventMount
 	EventNamespaceChange
 	EventPrivilegeChange
+	EventFileChange
 )
 
 type rawEvent struct {
@@ -139,6 +140,11 @@ type Event struct {
 	// ArgsTruncated reports that arguments or bytes beyond it were dropped.
 	Args          []string
 	ArgsTruncated bool
+	// NewPath is a rename's destination, and Value a file change's argument:
+	// the mode for chmod, uid | gid << 32 for chown, the length for truncate,
+	// or the destination dirfd for rename.
+	NewPath string
+	Value   uint64
 }
 
 func decodeEvent(record []byte) (Event, error) {
@@ -191,6 +197,13 @@ func decodeEventWithByteOrder(record []byte, byteOrder binary.ByteOrder) (Event,
 		event.ArgsTruncated = raw.FileFlags&execArgvTruncated != 0
 		event.FileFlags &^= execArgvTruncated
 		event.Port = 0
+		return event, nil
+	}
+	if raw.Kind == EventFileChange {
+		event.Operation = raw.RuleID
+		event.NewPath = zeroTerminated(raw.Domain[:])
+		event.Value = raw.SocketCookie
+		event.SocketCookie = 0
 		return event, nil
 	}
 	if IsSecurityEvent(raw.Kind) {

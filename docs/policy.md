@@ -22,6 +22,7 @@ editor.
 - [Unix policy](#unix-policy)
 - [Sockopt policy](#sockopt-policy)
 - [Detection rules](#detection-rules)
+- [File integrity monitoring](#file-integrity-monitoring)
 - [Local and remote policy configuration](#local-and-remote-policy-configuration)
 - [Operational controls](#operational-controls)
 - [Validation rules and limits](#validation-rules-and-limits)
@@ -81,6 +82,7 @@ Every document requires `version: 1`. All other top-level fields are optional.
 | `sockopt` | Selected `setsockopt` level/name policy. |
 | `detections` | Alert-only rules evaluated against enriched TraceGuard events. |
 | `detection_exceptions` | Scoped, expiring suppressions for named detection rules. |
+| `file_integrity` | Files whose content and attributes are baselined and compared after changes. |
 
 A minimal document is:
 
@@ -661,8 +663,10 @@ excluded.
 | `mount` | `mount` request. |
 | `namespace_change` | `setns` or `unshare` request. |
 | `privilege_change` | `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`, or `capset` request. |
+| `file_change` | Path-based unlink, rmdir, rename, chmod, chown, or truncate request, observed with file auditing. |
+| `file_integrity` | A watched file was created, modified, deleted, or changed attributes. See [file integrity monitoring](#file-integrity-monitoring). |
 
-The last nine are [security events](#security-events).
+`memfd_create` through `privilege_change` are [security events](#security-events).
 
 ### Match and exclude conditions
 
@@ -683,10 +687,11 @@ The last nine are [security events](#security-events).
 | `exec_sources` | `path`, or `fd` for an executable named by file descriptor; valid only with `exec`. |
 | `mount_fstypes` | Requested filesystem type, such as `debugfs`; valid only with `mount`. |
 | `capabilities` | Matches when any listed capability is in a `capset` request's `requested_capabilities`; valid only with `privilege_change`. Names are lowercase without the `cap_` prefix, such as `sys_admin`. |
-| `file_path_globs` | Kernel-resolved file path globs; valid only with `file_blocked` and `file_would_block`. |
+| `file_path_globs` | Resolved file path globs; valid only with `file_blocked`, `file_would_block`, and `file_integrity`. |
 | `unix_path_globs` | AF_UNIX socket paths; valid only with `unix_blocked` and `unix_would_block`. |
 | `file_access` | `read`, `write`, or `unknown`. |
-| `operations` | Security event operation; valid only with `ptrace`, `process_vm`, `module_load`, `namespace_change`, and `privilege_change`, and each value must be one those events carry. See [security events](#security-events). |
+| `operations` | Event operation; valid only with `ptrace`, `process_vm`, `module_load`, `namespace_change`, `privilege_change`, and `file_change`, and each value must be one those events carry. See [security events](#security-events) and [file changes](#file-change-events). |
+| `changes` | `created`, `modified`, `deleted`, or `attributes`; valid only with `file_integrity`. |
 
 Detection path patterns must be either a clean absolute exact path or a clean
 absolute literal stem ending in `/**`. The stem is limited to 247 bytes so it
@@ -746,7 +751,7 @@ Process-identity availability is validated when policy is loaded:
 | `exec`, `resolver`, `resolver_blocked`, `file_access`, `file_created`, security events, and enforcement decisions | Contemporaneous kernel snapshot. |
 | Outbound `connection`, or UDP `connection` in either direction | Contemporaneous kernel snapshot. |
 | Inbound TCP `connection` | Listener-cache telemetry only; UID matching and process-identity grouping require the rule to exclude this scope. |
-| `dns`, `blocked`, `tcp_sockops` | Unavailable or cache-only; UID matching and process-identity grouping are rejected. |
+| `dns`, `blocked`, `tcp_sockops`, `file_integrity` | Unavailable or cache-only; UID matching and process-identity grouping are rejected. A `file_integrity` change carries its triggering process as `actor_*` fields, but rescan findings have none. |
 
 For `connection`, a UID selector or `group_by` value of `cgroup`, `executable`,
 `program`, or `uid` must restrict the effective rule to `directions: [outbound]`
@@ -915,8 +920,9 @@ version: 1
 builtin_profiles: [runtime]
 ```
 
-Every runtime rule groups by the acting cgroup and executable with a cooldown,
-so one noisy process cannot hide another's first occurrence.
+Every runtime rule except `runtime.persistence-file-change` groups by the
+acting cgroup and executable with a cooldown, so one noisy process cannot hide
+another's first occurrence.
 
 | Rule ID | Severity | Detects | ATT&CK |
 | --- | --- | --- | --- |
@@ -927,6 +933,7 @@ so one noisy process cannot hide another's first occurrence.
 | `runtime.fileless-exec` | warning | An exec of a file descriptor instead of a path, as from a memfd. runc re-executes itself this way when it starts a container. | `TA0005` / `T1620` |
 | `runtime.namespace-join` | notice | `setns` into another namespace, as `nsenter` does. Container runtimes do this routinely. | `TA0004` / `T1611` |
 | `runtime.sensitive-filesystem-mount` | warning | A `debugfs`, `tracefs`, or `securityfs` mount. systemd mounts these once at boot. | `TA0004` / `T1611` |
+| `runtime.persistence-file-change` | warning | A created, modified, or attribute-changed cron, systemd, init, sudoers, PAM, `ld.so.preload`, account, `sshd_config`, or root SSH file. Fires only for paths `file_integrity` watches; groups by path. | `TA0003`, `TA0004` / `T1053.003`, `T1543.002`, `T1548.003`, `T1556.003`, `T1574.006`, `T1136.001`, `T1098.004` |
 | `runtime.sensitive-capability-request` | notice | A `capset` request for `sys_admin`, `sys_module`, `sys_ptrace`, or `sys_rawio`. | `TA0004` / `T1548` |
 
 Tune them with [exceptions](#detection-exceptions), for example for runc on a
@@ -1026,6 +1033,96 @@ strings are limited to 4 KiB, records to 128 fields and 32 KiB serialized,
 HTTPS export batches to 1 MiB, and UDP syslog datagrams to 8 KiB. When content
 must be reduced, the record includes `telemetry_truncated=true` and a truncated
 field count.
+
+## File integrity monitoring
+
+`file_integrity` names files whose content and attributes TraceGuard records
+and compares when they change:
+
+```yaml
+version: 1
+file_integrity:
+  paths:
+    - /etc/**
+    - /root/.ssh/**
+    - /usr/bin/sudo
+  exclude:
+    - /etc/mtab
+  hash: true
+  max_hash_bytes: 16777216
+  rescan_interval: 1h
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `paths` | — | Exact clean absolute paths, or subtrees ending in `/**`. Watching starts when at least one is set. |
+| `exclude` | — | Paths or subtrees within `paths` to skip. |
+| `hash` | `true` | Record a SHA-256 of each regular file. |
+| `max_hash_bytes` | 16 MiB | Larger files are compared by size and modification time instead; at most 1 GiB. |
+| `rescan_interval` | `1h` | Period of the full rescan; `0` disables it, otherwise at least `1m`. |
+
+A remote base and local overlay watch the union of their `paths` and
+`exclude` lists; the overlay's `hash`, `max_hash_bytes`, and
+`rescan_interval` win when set. `paths` and `exclude` together are limited to
+256 entries.
+
+### How changes are found
+
+When policy is applied, TraceGuard scans the watched paths into a baseline
+without reporting anything. Symlinks are recorded, never followed, and only
+regular files are hashed, through a non-blocking, no-follow open, so a path
+swapped for a FIFO or symlink cannot stall or redirect the scan. The baseline
+holds at most 100,000 entries; beyond that `traceguard_file_integrity_truncated`
+is `1` and a `file integrity baseline truncated` error is recorded.
+
+Changes are then found two ways:
+
+- With file auditing on, a write or create open and a
+  [file change event](#file-change-events) on a watched path, or on a directory
+  above one, such as a renamed parent, queue that path. One second later
+  TraceGuard rechecks it and compares it with the baseline, so a burst of writes
+  produces one report. Relative paths are resolved through the process's
+  `/proc` working directory or descriptor, which needs ptrace access to the
+  process; paths that cannot be resolved wait for the rescan.
+- Every `rescan_interval`, a full rescan reports any difference events missed,
+  such as writes through a descriptor opened earlier.
+
+Each difference is recorded as a `file_integrity` event and evaluated by
+detection rules:
+
+| Field | Meaning |
+| --- | --- |
+| `path` | The watched path. |
+| `change` | `created`, `modified` (content or file type), `deleted`, or `attributes` (mode, owner, or group). |
+| `changed` | Which of `content`, `type`, `mode`, `owner`, and `group` differ. |
+| `detection_source` | `event` for a queued check, `rescan` for a periodic finding. |
+| `file_type`, `mode`, `owner_uid`, `owner_gid`, `size`, `mtime`, `link_target` | The current state. |
+| `sha256`, or `hash_skipped` | The digest, or why there is none: `disabled`, `size`, `not_regular`, or `unreadable`. |
+| `previous_*` | The same fields from the baseline. |
+| `actor_*` | The triggering event's `event`, `operation`, `pid`, `program`, `kernel_uid`, `cgroup_id`, `process_start_ticks`, and `current_*` enrichment, for `detection_source=event`. |
+
+Content comparison uses digests when both states were hashed and falls back to
+size and modification time otherwise. Metrics are
+`traceguard_file_integrity_files`, `traceguard_file_integrity_truncated`,
+`traceguard_file_integrity_changes_total{change}`, and
+`traceguard_file_integrity_dropped_checks_total`; when more than 4,096 paths are
+queued at once, the overflow is dropped and a full rescan runs instead.
+
+File integrity monitoring only observes; it never restores or blocks a file.
+Hashing reads every watched file at each policy change and rescan, so prefer
+specific subtrees to `/**`.
+
+### File change events
+
+With file auditing, `file_change` events report path-based unlink, rmdir,
+rename, chmod, chown, and truncate requests at syscall entry, with
+`requested_path`, `operation`, and as relevant `new_path`, `requested_mode`,
+`requested_uid`, `requested_gid`, `truncate_length`, `requested_dirfd`, and
+`requested_flags`. Like `file_access`, the path is as requested and may be
+relative. Descriptor-based variants such as `fchmod` and `ftruncate` are not
+observed; the rescan covers them. TraceGuard's own file activity is excluded
+from file audit and file change events, because hashing would otherwise audit
+itself.
 
 ## Local and remote policy configuration
 
@@ -1312,6 +1409,8 @@ Important limits:
 | Detection rules | 256 |
 | Detection exceptions | 256 |
 | Detection exception reason | 512 bytes |
+| File integrity paths and excludes | 256 |
+| File integrity baseline | 100,000 entries |
 | Values in one rule list | 256 |
 | Detection tags | 16 |
 | Detection message | 4,096 bytes |

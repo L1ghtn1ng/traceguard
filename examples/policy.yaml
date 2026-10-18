@@ -351,3 +351,15 @@ detection_exceptions:
     match:
       uids:
         - 0
+
+# File integrity monitoring baselines these files and reports how they change,
+# with the process that changed them when an event names it.
+file_integrity:
+  paths:
+    - /etc/cron.d/**
+    - /etc/ssh/sshd_config
+    - /etc/sudoers.d/**
+    - /root/.ssh/**
+  hash: true
+  max_hash_bytes: 16777216
+  rescan_interval: 1h

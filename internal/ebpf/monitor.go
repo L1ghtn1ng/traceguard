@@ -293,6 +293,7 @@ type monitorObjects struct {
 	TraceOpenat2           *ebpf.Program `ebpf:"trace_openat2"`
 	TraceCreat             *ebpf.Program `ebpf:"trace_creat"`
 	securityPrograms
+	fileChangePrograms
 
 	Allowlist               *ebpf.Map `ebpf:"allowlist"`
 	AllowSuffixes           *ebpf.Map `ebpf:"allow_suffixes"`
@@ -400,7 +401,7 @@ func (o *monitorObjects) Close() error {
 			errs = append(errs, closer.Close())
 		}
 	}
-	errs = append(errs, o.securityPrograms.Close())
+	errs = append(errs, o.securityPrograms.Close(), o.fileChangePrograms.Close())
 	return errors.Join(errs...)
 }
 
@@ -755,7 +756,7 @@ func (m *Monitor) ProgramStats() (map[string]ebpf.ProgramStats, error) {
 		"unix_recvmsg": m.optional.UnixRecvmsg, "setsockopt": m.optional.Sockopt,
 		"sockops": m.optional.SockOps,
 	}
-	for _, tracepoint := range m.objects.tracepoints() {
+	for _, tracepoint := range m.objects.observeTracepoints() {
 		programs[strings.TrimPrefix(tracepoint.program, "trace_")] = tracepoint.handle
 	}
 	result := make(map[string]ebpf.ProgramStats, len(programs))

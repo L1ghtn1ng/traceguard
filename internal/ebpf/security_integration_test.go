@@ -137,3 +137,66 @@ func TestExecTracepointCapturesCommandLineForIntegration(t *testing.T) {
 		return
 	}
 }
+
+func TestUnlinkatTracepointEmitsFileChangeForIntegration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	retainIntegrationProgram(spec, "trace_unlinkat")
+	var objects struct {
+		TraceUnlinkat *ebpf.Program `ebpf:"trace_unlinkat"`
+		Events        *ebpf.Map     `ebpf:"events"`
+	}
+	if err := spec.LoadAndAssign(&objects, newCollectionOptions()); err != nil {
+		fatalVerifierError(t, "LoadAndAssign", err)
+	}
+	defer objects.TraceUnlinkat.Close()
+	defer objects.Events.Close()
+	tracepoint, err := link.Tracepoint("syscalls", "sys_enter_unlinkat", objects.TraceUnlinkat, nil)
+	if err != nil {
+		t.Fatalf("attach tracepoint: %v", err)
+	}
+	defer tracepoint.Close()
+	reader, err := ringbuf.NewReader(objects.Events)
+	if err != nil {
+		t.Fatalf("NewReader returned error: %v", err)
+	}
+	defer reader.Close()
+
+	path := t.TempDir() + "/traceguard-unlink"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Unlinkat(unix.AT_FDCWD, path, 0); err != nil {
+		t.Fatalf("unlinkat: %v", err)
+	}
+
+	reader.SetDeadline(time.Now().Add(2 * time.Second))
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatal("no file change event read before the deadline")
+			}
+			t.Fatalf("Read returned error: %v", err)
+		}
+		event, err := decodeEvent(record.RawSample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != EventFileChange || event.Filename != path {
+			continue
+		}
+		if event.Operation != 0 || int32(event.FileMode) != unix.AT_FDCWD { //nolint:gosec // dirfd is signed
+			t.Fatalf("file change event = %+v", event)
+		}
+		return
+	}
+}

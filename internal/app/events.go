@@ -228,6 +228,8 @@ func eventKindName(kind uint32) string {
 		return "namespace_change"
 	case ebpf.EventPrivilegeChange:
 		return "privilege_change"
+	case ebpf.EventFileChange:
+		return "file_change"
 	default:
 		return "unknown"
 	}

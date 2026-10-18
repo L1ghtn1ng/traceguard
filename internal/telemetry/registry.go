@@ -181,6 +181,24 @@ func (r *Registry) SetDetectionExceptions(active, expired int, suppressed map[st
 	}
 }
 
+// IncFileIntegrityChange counts one reported file integrity change by kind.
+func (r *Registry) IncFileIntegrityChange(kind string) {
+	r.incCounter(metricKey1("traceguard_file_integrity_changes_total", "change", kind))
+}
+
+// SetFileIntegrityStats publishes the baseline size, whether it was cut at
+// its file limit, and how many change checks were dropped for a rescan.
+func (r *Registry) SetFileIntegrityStats(files int, truncated bool, dropped uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges["traceguard_file_integrity_files"] = int64(files)
+	r.gauges["traceguard_file_integrity_truncated"] = 0
+	if truncated {
+		r.gauges["traceguard_file_integrity_truncated"] = 1
+	}
+	r.counters["traceguard_file_integrity_dropped_checks_total"] = boundedMetricUint64(dropped)
+}
+
 func (r *Registry) IncDetectionAlert(ruleID, severity string) {
 	r.incCounter(metricKey2("traceguard_detection_alerts_total", "rule_id", ruleID, "severity", severity))
 }

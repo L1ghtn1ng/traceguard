@@ -133,3 +133,49 @@ func TestSplitArgsHandlesCutFinalArgument(t *testing.T) {
 		t.Fatalf("splitArgs with count 0 = %q", got)
 	}
 }
+
+func TestEveryObjectCarriesFileChangeTracepoints(t *testing.T) {
+	t.Parallel()
+
+	var programs fileChangePrograms
+	tags, err := ebpfFieldTags(fileChangePrograms{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := programs.fileChangeTracepoints()
+	if len(table) != len(tags) {
+		t.Fatalf("file change table has %d programs, struct has %d", len(table), len(tags))
+	}
+	spec, err := loadTraceguardLinux71()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, tracepoint := range table {
+		if tracepoint.program != tags[index] {
+			t.Fatalf("table entry %d = %s, struct tag = %s", index, tracepoint.program, tags[index])
+		}
+		program := spec.Programs[tracepoint.program]
+		if want := "tracepoint/syscalls/" + tracepoint.tracepoint; program == nil || program.SectionName != want {
+			t.Fatalf("program %s = %v, want section %s", tracepoint.program, program, want)
+		}
+	}
+}
+
+func TestDecodeFileChangeEvent(t *testing.T) {
+	t.Parallel()
+
+	raw := rawEvent{Kind: EventFileChange, RuleID: 1, FileMode: 0xffffff9c, SocketCookie: 7}
+	copy(raw.Filename[:], "/etc/passwd+")
+	copy(raw.Domain[:], "/etc/passwd")
+	var encoded bytes.Buffer
+	if err := binary.Write(&encoded, binary.NativeEndian, raw); err != nil {
+		t.Fatal(err)
+	}
+	event, err := decodeEvent(encoded.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Operation != 1 || event.Filename != "/etc/passwd+" || event.NewPath != "/etc/passwd" || event.Value != 7 || event.SocketCookie != 0 || event.Domain != "" {
+		t.Fatalf("file change event = %+v", event)
+	}
+}
