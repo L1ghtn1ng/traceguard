@@ -146,8 +146,13 @@ func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
 	// The cgroup may have been removed and its path reused since the scan;
 	// freeze only the cgroup the alert named.
 	directory, same, err := f.openCgroup(path, id)
-	if err != nil || !same {
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || (err == nil && !same):
+		// Gone, or replaced at the same path: retrying cannot succeed.
 		return "", false, &RefusedError{Reason: fmt.Sprintf("cgroup %d no longer exists", id)}
+	case err != nil:
+		// Any other failure may be transient, so the next alert retries.
+		return "", false, fmt.Errorf("open cgroup %s: %w", path, err)
 	}
 	defer func() { _ = directory.Close() }()
 	if state, err := readFreeze(directory); err == nil && state == "1" {

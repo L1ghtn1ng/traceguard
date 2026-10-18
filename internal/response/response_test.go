@@ -666,3 +666,24 @@ func TestOpenCgroupIDMatchesThePathID(t *testing.T) {
 		t.Fatalf("openCgroupID = %d, %v; want %d", got, err, want)
 	}
 }
+
+func TestTransientCgroupErrorIsNotARefusal(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "kubepods.slice", "pod-a"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	freezer := &CgroupFreezer{
+		Root: root, self: func() (string, error) { return "/system.slice/traceguard.service", nil },
+		scan: func(context.Context, string) ([]cgroupinfo.Entry, error) {
+			return []cgroupinfo.Entry{{ID: 1, Path: "/", Level: 0}, {ID: 5, Path: "/kubepods.slice/pod-a", Level: 2}}, nil
+		},
+		idOf: func(*os.File) (uint64, error) { return 0, errors.New("resource temporarily unavailable") },
+	}
+	_, _, err := freezer.Freeze(5)
+	var refused *RefusedError
+	if err == nil || errors.As(err, &refused) {
+		t.Fatalf("Freeze with a transient error = %v, want a plain error so the next alert retries", err)
+	}
+}
