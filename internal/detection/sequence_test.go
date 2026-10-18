@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -39,9 +40,7 @@ func sequenceEngine(t *testing.T, sequence policy.DetectionSequence, exceptions 
 
 func sequenceEvent(at int64, name string, pid uint32, cgroup uint64, extra map[string]any) Event {
 	fields := map[string]any{"pid": pid, "process_start_ticks": uint64(pid) * 10, "cgroup_id": cgroup, "kernel_uid": uint32(33)}
-	for key, value := range extra {
-		fields[key] = value
-	}
+	maps.Copy(fields, extra)
 	return Event{Timestamp: time.Unix(at, 0), Name: name, Fields: fields}
 }
 

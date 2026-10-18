@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -201,9 +202,7 @@ func integrityRecordFields(change fim.Change, actor fim.Actor) map[string]any {
 	if actor == nil {
 		fields["detection_source"] = "rescan"
 	}
-	for key, value := range actor {
-		fields[key] = value
-	}
+	maps.Copy(fields, actor)
 	addIntegrityState(fields, "", change.Current)
 	addIntegrityState(fields, "previous_", change.Previous)
 	return fields
