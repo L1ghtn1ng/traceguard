@@ -55,6 +55,9 @@ type State struct {
 	// verifiedSHA256 is the last digest of a file that has since become
 	// unreadable, so its content is checked again once it can be read.
 	verifiedSHA256 string
+	// device and inode identify the file, so a change made through an open
+	// descriptor finds every watched name for it.
+	device, inode uint64
 }
 
 // Change describes how a watched path differs from its baseline.
@@ -253,6 +256,7 @@ func (s scanner) stat(path string) (State, error) {
 		Size: info.Size(), ModTime: info.ModTime().UTC()}
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		state.UID, state.GID = stat.Uid, stat.Gid
+		state.device, state.inode = stat.Dev, stat.Ino
 	}
 	switch {
 	case info.Mode()&fs.ModeSymlink != 0:

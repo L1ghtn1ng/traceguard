@@ -16,6 +16,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
 	"github.com/L1ghtn1ng/traceguard/internal/fim"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
+	"golang.org/x/sys/unix"
 )
 
 func TestFileChangeOperationNamesMatchPolicyValidation(t *testing.T) {
@@ -284,5 +285,59 @@ func TestDescriptorChmodChecksTheOpenFile(t *testing.T) {
 	notifyIntegrity(watcher, procRoot, ebpf.Event{Kind: ebpf.EventFileChange, Operation: 2, PID: 1, FileMode: 4, Value: 0o777}, map[string]any{})
 	if pending := watcher.PendingPaths(); !slices.Equal(pending, []string{"/etc/sudoers"}) {
 		t.Fatalf("queued %v, want the file the descriptor has open", pending)
+	}
+}
+
+func TestDescriptorChangeFindsTheFileByIdentity(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "etc"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "etc", "sudoers"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	watcher := fim.NewWatcher(root)
+	watcher.Configure(policyconfig.FileIntegrityPolicy{Paths: []string{"/etc/sudoers"}})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		watcher.Run(ctx, func(fim.Change, fim.Actor) {})
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitUntil(t, func() bool { return watcher.Stats().Files == 1 })
+
+	var stat unix.Stat_t
+	if err := unix.Stat(filepath.Join(root, "etc", "sudoers"), &stat); err != nil {
+		t.Fatal(err)
+	}
+	// The descriptor is already gone from /proc, as after a quick close.
+	event := ebpf.Event{
+		Kind: ebpf.EventFileChange, Operation: 3, PID: 1, FileMode: 4,
+		FileDevice: unix.Major(stat.Dev)<<20 | unix.Minor(stat.Dev), FileInode: stat.Ino,
+	}
+	notifyIntegrity(watcher, t.TempDir(), event, map[string]any{})
+	if pending := watcher.PendingPaths(); !slices.Equal(pending, []string{"/etc/sudoers"}) {
+		t.Fatalf("queued %v, want the file found by its identity", pending)
+	}
+}
+
+func TestDeletedDescriptorTargetIsNotUsed(t *testing.T) {
+	t.Parallel()
+
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "1", "fd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/sudoers (deleted)", filepath.Join(procRoot, "1", "fd", "4")); err != nil {
+		t.Fatal(err)
+	}
+	if path, ok := resolveRequestedPath(procRoot, 1, 4, ""); ok {
+		t.Fatalf("resolveRequestedPath = %q, want an unlinked file's name rejected", path)
 	}
 }

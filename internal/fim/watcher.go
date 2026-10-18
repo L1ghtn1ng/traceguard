@@ -49,16 +49,18 @@ type Watcher struct {
 	baselinePolicy policy.FileIntegrityPolicy
 	rebuild        bool
 	baseline       map[string]State
-	pending        map[string]pendingCheck
-	overflow       bool
-	stats          Stats
+	// files indexes baseline paths by device and inode.
+	files    map[fileID][]string
+	pending  map[string]pendingCheck
+	overflow bool
+	stats    Stats
 }
 
 // NewWatcher returns a watcher over root, "/" outside tests.
 func NewWatcher(root string) *Watcher {
 	return &Watcher{
 		root: root, now: time.Now, wake: make(chan struct{}, 1),
-		baseline: make(map[string]State), pending: make(map[string]pendingCheck),
+		baseline: make(map[string]State), files: make(map[fileID][]string), pending: make(map[string]pendingCheck),
 	}
 }
 
@@ -128,6 +130,37 @@ func (w *Watcher) Notify(path string, actor Actor) {
 	}
 	w.pending[path] = pendingCheck{actor: actor, due: w.now().Add(settleDelay)}
 	w.mu.Unlock()
+}
+
+type fileID struct{ device, inode uint64 }
+
+// PathsForFile returns the watched paths whose baseline file has the given
+// device and inode, as stat reports them: every hard link to it.
+func (w *Watcher) PathsForFile(device, inode uint64) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.files[fileID{device, inode}])
+}
+
+// setBaselineLocked stores or, with a nil state, removes a baseline entry and
+// keeps the file index in step.
+func (w *Watcher) setBaselineLocked(path string, state *State) {
+	if previous, ok := w.baseline[path]; ok && previous.inode != 0 {
+		id := fileID{previous.device, previous.inode}
+		w.files[id] = slices.DeleteFunc(w.files[id], func(other string) bool { return other == path })
+		if len(w.files[id]) == 0 {
+			delete(w.files, id)
+		}
+	}
+	if state == nil {
+		delete(w.baseline, path)
+		return
+	}
+	w.baseline[path] = *state
+	if state.inode != 0 {
+		id := fileID{state.device, state.inode}
+		w.files[id] = append(w.files[id], path)
+	}
 }
 
 // PendingPaths lists the paths waiting for a check, sorted.
@@ -231,13 +264,13 @@ func (w *Watcher) install(rebuild bool, emit func(Change, Actor)) bool {
 		report = func(key string) bool { return old.watched(key) && s.watched(key) }
 	}
 	changes, final := reconcile(slices.Sorted(maps.Keys(keys)), w.baseline, result, report)
-	baseline := make(map[string]State, len(final))
+	w.baseline, w.files = make(map[string]State, len(final)), make(map[fileID][]string)
 	for key, state := range final {
 		if state != nil && s.watched(key) {
-			baseline[key] = *state
+			w.setBaselineLocked(key, state)
 		}
 	}
-	w.baseline = baseline
+	baseline := w.baseline
 	w.baselinePolicy = s.policy
 	w.stats.Files, w.stats.Truncated = len(baseline), result.truncated
 	w.mu.Unlock()
@@ -275,11 +308,7 @@ func (w *Watcher) checkDue(now time.Time, emit func(Change, Actor)) {
 		}
 		changes, final := reconcile(affectedKeys(path, w.baseline, result), w.baseline, result, func(string) bool { return true })
 		for key, state := range final {
-			if state != nil {
-				w.baseline[key] = *state
-			} else {
-				delete(w.baseline, key)
-			}
+			w.setBaselineLocked(key, state)
 		}
 		w.stats.Files = len(w.baseline)
 		w.mu.Unlock()
