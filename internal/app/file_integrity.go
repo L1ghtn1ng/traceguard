@@ -80,14 +80,20 @@ func resolveRequestedPath(procRoot string, pid, dirfd uint32, path string) (stri
 	return filepath.Join(directory, path), true
 }
 
-// sharesMountNamespace reports whether pid is in the daemon's mount
-// namespace. When either namespace cannot be read, it assumes it is.
-func sharesMountNamespace(procRoot string, pid uint32) bool {
-	process, err := os.Readlink(fmt.Sprintf("%s/%d/ns/mnt", procRoot, pid))
+// sharesMountNamespace reports whether the event's process was in the
+// daemon's mount namespace. It uses the namespace the kernel captured with the
+// event, so a process that has since exited is judged correctly, and falls
+// back to /proc when the kernel could not read it. When neither can be read it
+// assumes the process shared the namespace.
+func sharesMountNamespace(procRoot string, event ebpf.Event) bool {
+	daemon, err := os.Readlink(procRoot + "/self/ns/mnt")
 	if err != nil {
 		return true
 	}
-	daemon, err := os.Readlink(procRoot + "/self/ns/mnt")
+	if event.MountNamespace != 0 {
+		return daemon == fmt.Sprintf("mnt:[%d]", event.MountNamespace)
+	}
+	process, err := os.Readlink(fmt.Sprintf("%s/%d/ns/mnt", procRoot, event.PID))
 	return err != nil || process == daemon
 }
 
@@ -146,7 +152,7 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 	}
 	// The paths name files in the process's own mount namespace, such as a
 	// container's /etc, not the host files that are watched.
-	if len(watched) == 0 || !sharesMountNamespace(procRoot, event.PID) {
+	if len(watched) == 0 || !sharesMountNamespace(procRoot, event) {
 		return
 	}
 	actor := fim.Actor{}

@@ -1096,7 +1096,9 @@ Changes are then found two ways:
   the `openat` and `openat2` one, which needs ptrace access to the
   process; paths that cannot be resolved wait for the rescan. Events from
   processes in another mount namespace, such as a container's, are skipped,
-  because their paths name that namespace's files; the rescan covers writes
+  judged by the namespace the kernel records with the event, so even a
+  process that has exited is placed correctly, because their paths name that
+  namespace's files; the rescan covers writes
   they make to host files through bind mounts.
 - Every `rescan_interval`, a full rescan reports any difference events missed,
   such as writes through a descriptor opened earlier.
