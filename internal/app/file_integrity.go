@@ -61,7 +61,16 @@ func appendFileChangeFields(fields map[string]any, event ebpf.Event) {
 // directory, and reading another user's /proc entries needs ptrace access.
 func resolveRequestedPath(procRoot string, pid, dirfd uint32, path string) (string, bool) {
 	if path == "" {
-		return "", false
+		// fchmod, fchown, and AT_EMPTY_PATH requests name the descriptor
+		// itself, which resolves to the file it has open.
+		if dirfd == atFDCWD || pid == 0 {
+			return "", false
+		}
+		target, err := os.Readlink(fmt.Sprintf("%s/%d/fd/%d", procRoot, pid, dirfd))
+		if err != nil || !filepath.IsAbs(target) {
+			return "", false
+		}
+		return filepath.Clean(target), true
 	}
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path), true
@@ -111,41 +120,37 @@ func notifyIntegrity(watcher *fim.Watcher, procRoot string, event ebpf.Event, fi
 	if !watcher.Enabled() {
 		return
 	}
-	var paths []string
+	// Each requested path is resolved against its own directory descriptor.
+	type request struct {
+		path  string
+		dirfd uint32
+	}
+	var requests []request
 	switch event.Kind {
 	case ebpf.EventFileAccess:
 		if fileAccessName(event.FileFlags) != "write" {
 			return
 		}
-		paths = append(paths, event.Filename)
+		// Open audit events carry the mode in FileMode and the dirfd in
+		// Value.
+		requests = append(requests, request{event.Filename, uint32(event.Value)}) //nolint:gosec // the low word is the dirfd
 	case ebpf.EventFileChange:
 		// A link or symlink changes only the path it creates; a symlink's
-		// first path is just its target text.
+		// first path is just its target text. An empty path with a
+		// descriptor, as fchmod and fchown send, names the open file.
 		if operation := fileChangeOperations[event.Operation]; operation != "link" && operation != "symlink" {
-			paths = append(paths, event.Filename)
-		} else {
-			paths = append(paths, "")
+			requests = append(requests, request{event.Filename, event.FileMode})
 		}
 		if event.NewPath != "" {
-			paths = append(paths, event.NewPath)
+			// The created path is relative to the new dirfd.
+			requests = append(requests, request{event.NewPath, uint32(event.Value)}) //nolint:gosec // the low word is the dirfd
 		}
 	default:
 		return
 	}
 	var watched []string
-	for index, requested := range paths {
-		dirfd := event.FileMode
-		if index == 1 {
-			// The created path of a rename, link, or symlink is relative
-			// to its new dirfd.
-			dirfd = uint32(event.Value) //nolint:gosec // the low word is the dirfd
-		}
-		if event.Kind == ebpf.EventFileAccess {
-			// Open audit events carry the mode in FileMode and the dirfd
-			// in Value.
-			dirfd = uint32(event.Value) //nolint:gosec // the low word is the dirfd
-		}
-		path, ok := resolveRequestedPath(procRoot, event.PID, dirfd, requested)
+	for _, requested := range requests {
+		path, ok := resolveRequestedPath(procRoot, event.PID, requested.dirfd, requested.path)
 		if ok && watcher.Watched(path) {
 			watched = append(watched, path)
 		}

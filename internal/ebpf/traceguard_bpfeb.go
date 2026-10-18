@@ -273,8 +273,10 @@ const (
 	traceguardProgTraceDns                = "trace_dns"
 	traceguardProgTraceExecve             = "trace_execve"
 	traceguardProgTraceExecveat           = "trace_execveat"
+	traceguardProgTraceFchmod             = "trace_fchmod"
 	traceguardProgTraceFchmodat           = "trace_fchmodat"
 	traceguardProgTraceFchmodat2          = "trace_fchmodat2"
+	traceguardProgTraceFchown             = "trace_fchown"
 	traceguardProgTraceFchownat           = "trace_fchownat"
 	traceguardProgTraceFinitModule        = "trace_finit_module"
 	traceguardProgTraceInitModule         = "trace_init_module"
@@ -378,8 +380,10 @@ type traceguardProgramSpecs struct {
 	TraceDns               *ebpf.ProgramSpec `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.ProgramSpec `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.ProgramSpec `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.ProgramSpec `ebpf:"trace_fchmod"`
 	TraceFchmodat          *ebpf.ProgramSpec `ebpf:"trace_fchmodat"`
 	TraceFchmodat2         *ebpf.ProgramSpec `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.ProgramSpec `ebpf:"trace_fchown"`
 	TraceFchownat          *ebpf.ProgramSpec `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.ProgramSpec `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.ProgramSpec `ebpf:"trace_init_module"`
@@ -614,8 +618,10 @@ type traceguardPrograms struct {
 	TraceDns               *ebpf.Program `ebpf:"trace_dns"`
 	TraceExecve            *ebpf.Program `ebpf:"trace_execve"`
 	TraceExecveat          *ebpf.Program `ebpf:"trace_execveat"`
+	TraceFchmod            *ebpf.Program `ebpf:"trace_fchmod"`
 	TraceFchmodat          *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceFchmodat2         *ebpf.Program `ebpf:"trace_fchmodat2"`
+	TraceFchown            *ebpf.Program `ebpf:"trace_fchown"`
 	TraceFchownat          *ebpf.Program `ebpf:"trace_fchownat"`
 	TraceFinitModule       *ebpf.Program `ebpf:"trace_finit_module"`
 	TraceInitModule        *ebpf.Program `ebpf:"trace_init_module"`
@@ -678,8 +684,10 @@ func (p *traceguardPrograms) Close() error {
 		p.TraceDns,
 		p.TraceExecve,
 		p.TraceExecveat,
+		p.TraceFchmod,
 		p.TraceFchmodat,
 		p.TraceFchmodat2,
+		p.TraceFchown,
 		p.TraceFchownat,
 		p.TraceFinitModule,
 		p.TraceInitModule,

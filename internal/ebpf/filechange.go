@@ -23,6 +23,8 @@ type fileChangePrograms struct {
 	TraceChmod     *ebpf.Program `ebpf:"trace_chmod"`
 	TraceFchmodat  *ebpf.Program `ebpf:"trace_fchmodat"`
 	TraceFchmodat2 *ebpf.Program `ebpf:"trace_fchmodat2"`
+	TraceFchmod    *ebpf.Program `ebpf:"trace_fchmod"`
+	TraceFchown    *ebpf.Program `ebpf:"trace_fchown"`
 	TraceChown     *ebpf.Program `ebpf:"trace_chown"`
 	TraceLchown    *ebpf.Program `ebpf:"trace_lchown"`
 	TraceFchownat  *ebpf.Program `ebpf:"trace_fchownat"`
@@ -44,6 +46,8 @@ func (p *fileChangePrograms) fileChangeTracepoints() []securityTracepoint {
 		{"trace_chmod", "sys_enter_chmod", p.TraceChmod},
 		{"trace_fchmodat", "sys_enter_fchmodat", p.TraceFchmodat},
 		{"trace_fchmodat2", "sys_enter_fchmodat2", p.TraceFchmodat2},
+		{"trace_fchmod", "sys_enter_fchmod", p.TraceFchmod},
+		{"trace_fchown", "sys_enter_fchown", p.TraceFchown},
 		{"trace_chown", "sys_enter_chown", p.TraceChown},
 		{"trace_lchown", "sys_enter_lchown", p.TraceLchown},
 		{"trace_fchownat", "sys_enter_fchownat", p.TraceFchownat},
