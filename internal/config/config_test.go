@@ -728,9 +728,34 @@ func TestRedactCommandLineProtectsMonitoredProcessCredentials(t *testing.T) {
 		}
 	}
 
-	plain := []string{"/usr/bin/dig", "-p", "53", "--timeout=5", "example.com", "https://example.com/path?q=1", "/etc/passwd", "PATH=/usr/bin"}
+	plain := []string{
+		"/usr/bin/dig", "-p", "53", "--timeout=5", "example.com", "https://example.com/path?q=1", "/etc/passwd", "PATH=/usr/bin",
+		"sh", "-c", "dig -p 53 --timeout 5 example.com && echo done",
+	}
 	if got := RedactCommandLine(plain); !slices.Equal(got, plain) {
 		t.Fatalf("RedactCommandLine(%q) = %q, want unchanged", plain, got)
+	}
+}
+
+func TestRedactCommandLineProtectsShellStringCredentials(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		script string
+		want   string
+	}{
+		{script: "PASSWORD='quoted secret' sleep 60", want: "PASSWORD=" + redactedValue + " sleep 60"},
+		{script: `TOKEN="double \"quoted\" secret"; run`, want: "TOKEN=" + redactedValue + "; run"},
+		{script: `API_KEY=mixed'quoted secret'tail run`, want: "API_KEY=" + redactedValue + " run"},
+		{script: "curl --password secret https://example.com", want: "curl --password " + redactedValue + " https://example.com"},
+		{script: "mysql -u app --db-password 'quoted secret' app", want: "mysql -u app --db-password " + redactedValue + " app"},
+		{script: "tool --token\tsecret|cat", want: "tool --token\t" + redactedValue + "|cat"},
+		{script: "docker login --password-stdin -u app", want: "docker login --password-stdin -u app"},
+	} {
+		got := RedactCommandLine([]string{"sh", "-c", test.script})
+		if got[2] != test.want {
+			t.Errorf("RedactCommandLine(sh -c %q) = %q, want %q", test.script, got[2], test.want)
+		}
 	}
 }
 
