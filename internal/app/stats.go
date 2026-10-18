@@ -51,14 +51,12 @@ func collectRingBufferStats(source ringBufferStatsSource, metrics *telemetry.Reg
 	if err != nil {
 		recorder.ErrorDedup("collect eBPF ring buffer statistics", err, nil, time.Minute)
 	}
-	byName := make(map[string]uint64, len(stats.Drops))
 	next := make(map[uint32]uint64, len(stats.Drops))
 	maps.Copy(next, previous)
 	fields := make(map[string]any)
 	var total uint64
 	for kind, dropped := range stats.Drops {
 		name := eventKindName(kind)
-		byName[name] = dropped
 		next[kind] = dropped
 		if baseline, seen := previous[kind]; seen && dropped > baseline {
 			delta := dropped - baseline
@@ -66,6 +64,12 @@ func collectRingBufferStats(source ringBufferStatsSource, metrics *telemetry.Reg
 			fields["dropped_"+name] = delta
 			total += delta
 		}
+	}
+	// Report every kind's latest good reading, so a kind whose lookup failed
+	// this time keeps its series instead of vanishing.
+	byName := make(map[string]uint64, len(next))
+	for kind, dropped := range next {
+		byName[eventKindName(kind)] = dropped
 	}
 	metrics.SetRingBufferStats(stats.SizeBytes, stats.UnreadBytes, byName)
 	if total > 0 {

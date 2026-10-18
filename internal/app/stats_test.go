@@ -93,9 +93,13 @@ func TestCollectRingBufferStatsKeepsBaselineForUnreadableKinds(t *testing.T) {
 		err:   errors.New("lookup failed"),
 	}
 	previous := map[uint32]uint64{ebpfmonitor.EventDNS: 1, ebpfmonitor.EventExec: 9}
-	next := collectRingBufferStats(source, telemetry.NewRegistry(), recorder, previous)
+	metrics := telemetry.NewRegistry()
+	next := collectRingBufferStats(source, metrics, recorder, previous)
 	if got := next[ebpfmonitor.EventExec]; got != 9 {
 		t.Fatalf("baseline exec = %d, want previous value 9 kept", got)
+	}
+	if rendered := metrics.Render(); !strings.Contains(rendered, `traceguard_ringbuf_dropped_total{kind="exec"} 9`) {
+		t.Fatalf("an unreadable kind lost its drop series:\n%s", rendered)
 	}
 	if !strings.Contains(output.String(), "collect eBPF ring buffer statistics") {
 		t.Fatalf("collection error not recorded: %s", output.String())
@@ -115,12 +119,17 @@ func TestRunStartsEventReaderBeforePolicyLoad(t *testing.T) {
 	}
 	calls := map[string]token.Pos{}
 	last := map[string]token.Pos{}
+	// idents records each worker identifier's last use.
+	idents := map[string]token.Pos{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Name.Name != "Run" {
 			continue
 		}
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok {
+				idents[ident.Name] = ident.Pos()
+			}
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -156,6 +165,18 @@ func TestRunStartsEventReaderBeforePolicyLoad(t *testing.T) {
 		// Detection must stay held until every startup policy path has run.
 		if armed, ok := calls["detections.arm"]; !ok || armed < last[policyCall] {
 			t.Errorf("detections.arm must follow %s at %s", policyCall, fset.Position(last[policyCall]))
+		}
+	}
+	// Workers that can replace the policy start only after held events are
+	// evaluated, so a refresh cannot split them across two policies.
+	armed := calls["detections.arm"]
+	for _, worker := range []string{"runPolicyReloads", "runCgroupReconciliation", "watchRemote"} {
+		pos, ok := idents[worker]
+		if !ok {
+			t.Fatalf("Run no longer uses %s; update this ordering test", worker)
+		}
+		if pos < armed {
+			t.Errorf("%s at %s starts before detections.arm at %s", worker, fset.Position(pos), fset.Position(armed))
 		}
 	}
 }
