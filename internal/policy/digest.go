@@ -7,6 +7,13 @@ import (
 	"fmt"
 )
 
+// EmptyBundle returns the effective policy without any source, normalized as
+// Merge normalizes a loaded document, so running without a policy reports the
+// same digest as an empty policy file.
+func EmptyBundle() (Bundle, error) {
+	return Merge(Document{Version: Version}, Document{Version: Version})
+}
+
 // Digest returns the hex SHA-256 of the bundle's JSON encoding. It identifies
 // the effective merged policy, so hosts running the same rules report the same
 // digest whatever the source documents' formatting or overlay split.

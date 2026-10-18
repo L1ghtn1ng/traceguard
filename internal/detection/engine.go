@@ -103,9 +103,12 @@ func Compile(custom []policy.DetectionRule, disabled []string, exceptions []poli
 	if err != nil {
 		return CompiledRules{}, err
 	}
-	known := make(map[string]struct{}, len(custom)+len(BaselineRules()))
+	// definitions holds every rule an exception may name, enabled or not, so
+	// an exception is validated against its rule even while that rule is
+	// disabled and cannot fail later when the rule is re-enabled.
+	definitions := make(map[string]policy.DetectionRule, len(custom)+len(BaselineRules()))
 	for _, rule := range append(BaselineRules(), custom...) {
-		known[rule.ID] = struct{}{}
+		definitions[rule.ID] = rule
 	}
 	active := make(map[string]*compiledRule, len(rules))
 	for index := range rules {
@@ -117,15 +120,16 @@ func Compile(custom []policy.DetectionRule, disabled []string, exceptions []poli
 			return CompiledRules{}, fmt.Errorf("compile detection exception %q: %w", exception.ID, err)
 		}
 		for _, id := range exception.Rules {
-			if _, ok := known[id]; !ok {
+			definition, ok := definitions[id]
+			if !ok {
 				return CompiledRules{}, fmt.Errorf("detection exception %q references unknown rule %q", exception.ID, id)
+			}
+			if err := policy.ValidateExceptionFor(definition, exception); err != nil {
+				return CompiledRules{}, err
 			}
 			rule, ok := active[id]
 			if !ok {
 				continue
-			}
-			if err := policy.ValidateExceptionFor(rule.rule, exception); err != nil {
-				return CompiledRules{}, err
 			}
 			rule.exceptions = append(rule.exceptions, compiledException{exception: exception, cidrs: cidrs})
 		}

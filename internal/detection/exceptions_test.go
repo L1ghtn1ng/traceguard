@@ -156,3 +156,27 @@ func TestCompileRejectsInvalidExceptionReferences(t *testing.T) {
 		t.Fatalf("identity exception on DNS rule error = %v", err)
 	}
 }
+
+func TestCompileValidatesExceptionsForDisabledRules(t *testing.T) {
+	t.Parallel()
+
+	// DNS events carry no event-time process identity, so this exception
+	// could never be valid for the rule, enabled or not.
+	enabled := false
+	dnsRule := policy.DetectionRule{
+		ID: "dns-watch", Enabled: &enabled, Severity: "notice", Events: []string{"dns"}, Message: "dns",
+	}
+	byUID := policy.DetectionException{
+		ID: "dns-root", Rules: []string{"dns-watch"}, Reason: "root lookups",
+		Match: policy.DetectionMatch{UIDs: []uint32{0}},
+	}
+	if _, err := Compile([]policy.DetectionRule{dnsRule}, nil, []policy.DetectionException{byUID}); err == nil || !strings.Contains(err.Error(), "event-time process identity") {
+		t.Fatalf("exception for a disabled custom rule error = %v", err)
+	}
+	if _, err := Compile(nil, []string{"baseline.cloud-metadata-access"}, []policy.DetectionException{{
+		ID: "dns-domains", Rules: []string{"baseline.cloud-metadata-access"}, Reason: "x",
+		Match: policy.DetectionMatch{UnixPathGlobs: []string{"/run/x.sock"}},
+	}}); err == nil || !strings.Contains(err.Error(), "unix_path_globs") {
+		t.Fatalf("exception for a disabled baseline rule error = %v", err)
+	}
+}

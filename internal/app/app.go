@@ -207,11 +207,15 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 			})
 		}
 	}
+	emptyPolicy, err := policyconfig.EmptyBundle()
+	if err != nil {
+		return fmt.Errorf("build empty policy: %w", err)
+	}
 	if cfg.EmergencyAllow {
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish emergency allow policy: %w", err)
 		}
-		if err := policyController.RecordApplied(policyconfig.Bundle{}); err != nil {
+		if err := policyController.RecordApplied(emptyPolicy); err != nil {
 			return err
 		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
@@ -224,7 +228,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		if err := monitor.ApplyPolicy(ebpf.PolicyConfig{}); err != nil {
 			return fmt.Errorf("publish empty policy: %w", err)
 		}
-		if err := policyController.RecordApplied(policyconfig.Bundle{}); err != nil {
+		if err := policyController.RecordApplied(emptyPolicy); err != nil {
 			return err
 		}
 		for _, hook := range []string{"lsm-exec", "lsm-file", "bind", "unix", "sockopt"} {
