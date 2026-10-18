@@ -403,7 +403,7 @@ otherwise, with `disposition_id` `2` (Blocked) or, for dry-run, `15`
 TraceGuard operation or event name as `activity_name`. A pathless module load
 and a BPF program load have a driver file named `unknown`. Every other field,
 including the TraceGuard `event` name, is kept under `unmapped`, so nothing is
-lost. An event over the 32 KiB record limit drops `unmapped`, then shortens
+lost. An event over the 32 KiB record limit drops `unmapped`, except the TraceGuard `event` and `source_event` names, then shortens
 mapped strings and lists, and records `unmapped.telemetry_truncated=true`. The
 local event archive and logs keep the TraceGuard format, which `-replay` reads.
 

@@ -417,6 +417,17 @@ func mapFile(event map[string]any, name string, c *converter) {
 	case "file_blocked", "file_would_block":
 		file = fileObject(c.text("path"), 1)
 	default:
+		// A link or symlink creates new_path. A symlink's requested_path
+		// is only its target text, and a link's is the existing file, so
+		// both stay unmapped rather than being presented as the file.
+		switch c.peek("operation") {
+		case "symlink":
+			event["file"] = fileObject(c.text("new_path"), 7)
+			return
+		case "link":
+			event["file"] = fileObject(c.text("new_path"), 1)
+			return
+		}
 		file = fileObject(c.text("requested_path"), 1)
 	}
 	event["file"] = file
