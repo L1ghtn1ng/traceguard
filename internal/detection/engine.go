@@ -1,6 +1,7 @@
 package detection
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -24,6 +25,8 @@ type Event struct {
 }
 
 type Alert struct {
+	// ID is a random identifier unique to this alert.
+	ID         string
 	RuleID     string
 	Severity   string
 	Message    string
@@ -282,6 +285,7 @@ func (a Alert) RecordFields(sourceEvent string) map[string]any {
 	fields := cloneFields(a.Fields)
 	fields["source_event"] = sourceEvent
 	fields["event"] = "detection_alert"
+	fields["alert_id"] = a.ID
 	fields["detection_rule_id"] = a.RuleID
 	fields["severity"] = a.Severity
 	fields["detection_message"] = a.Message
@@ -302,7 +306,7 @@ func (a Alert) RecordFields(sourceEvent string) map[string]any {
 
 func newAlert(rule *compiledRule, event Event, count int) Alert {
 	return Alert{
-		RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
+		ID: rand.Text(), RuleID: rule.rule.ID, Severity: rule.rule.Severity, Message: rule.rule.Message,
 		Tags: slices.Clone(rule.rule.Tags), Tactics: slices.Clone(rule.rule.MITRE.Tactics),
 		Techniques: slices.Clone(rule.rule.MITRE.Techniques), Compliance: slices.Clone(rule.rule.Compliance),
 		Count: count, Window: rule.rule.Threshold.Within.Duration,

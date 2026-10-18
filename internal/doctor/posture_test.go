@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"io/fs"
+	"strings"
 	"testing"
 
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
@@ -32,7 +33,7 @@ func TestHostPostureHardenedHost(t *testing.T) {
 		"/sys/kernel/security/lockdown":              "none [integrity] confidentiality\n",
 		"/sys/module/module/parameters/sig_enforce":  "Y\n",
 		"/proc/sys/kernel/yama/ptrace_scope":         "1\n",
-	}), ebpfmonitor.KernelFeatures{BPFLSMAvailable: true}))
+	}), ebpfmonitor.KernelFeatures{BPFLSMAvailable: true, LSMProgramType: true, TaskStorage: true}))
 	for _, name := range []string{"posture-bpf-lsm", "posture-unprivileged-bpf", "posture-lockdown", "posture-module-signing", "posture-ptrace-scope"} {
 		if levels[name] != "INFO" {
 			t.Errorf("%s = %q, want INFO", name, levels[name])
@@ -72,5 +73,50 @@ func TestHostPostureEdgeCases(t *testing.T) {
 	}
 	if got := selectedOption("none [integrity] confidentiality"); got != "integrity" {
 		t.Fatalf("selectedOption = %q", got)
+	}
+}
+
+func TestHostPostureNeedsLSMProgramsAndTaskStorage(t *testing.T) {
+	t.Parallel()
+
+	for name, features := range map[string]ebpfmonitor.KernelFeatures{
+		"no LSM programs": {BPFLSMAvailable: true, TaskStorage: true},
+		"no task storage": {BPFLSMAvailable: true, LSMProgramType: true},
+	} {
+		if level := postureLevels(hostPosture(fakeFiles(nil), features))["posture-bpf-lsm"]; level != "WARN" {
+			t.Errorf("%s: posture-bpf-lsm = %q, want WARN", name, level)
+		}
+	}
+}
+
+func TestModuleSigningPosture(t *testing.T) {
+	t.Parallel()
+
+	const sigEnforce = "/sys/module/module/parameters/sig_enforce"
+	denied := func(path string) ([]byte, error) {
+		if path == sigEnforce {
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
+		}
+		return nil, fs.ErrNotExist
+	}
+	for name, test := range map[string]struct {
+		readFile func(string) ([]byte, error)
+		lockdown string
+		level    string
+		detail   string
+	}{
+		"lockdown rejects unsigned": {fakeFiles(map[string]string{sigEnforce: "N\n"}), "integrity", "INFO", "rejects unsigned"},
+		"no lockdown":               {fakeFiles(map[string]string{sigEnforce: "N\n"}), "none", "WARN", "not enforced"},
+		"not built in":              {fakeFiles(nil), "integrity", "WARN", "not built into"},
+		"unreadable":                {denied, "none", "WARN", "unreadable"},
+	} {
+		read := func(path string) (string, bool) {
+			raw, err := test.readFile(path)
+			return string(raw), err == nil
+		}
+		finding := moduleSigningPosture(test.readFile, read, test.lockdown)
+		if finding.level != test.level || !strings.Contains(finding.detail, test.detail) {
+			t.Errorf("%s: finding = %+v, want %s containing %q", name, finding, test.level, test.detail)
+		}
 	}
 }

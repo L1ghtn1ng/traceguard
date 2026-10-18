@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
 
 	ebpfmonitor "github.com/L1ghtn1ng/traceguard/internal/ebpf"
@@ -32,9 +34,17 @@ func hostPosture(readFile func(string) ([]byte, error), features ebpfmonitor.Ker
 		}
 	}
 
-	add(features.BPFLSMAvailable, "posture-bpf-lsm",
-		"bpf is in the active LSM list; exec and file enforcement can attach",
-		"bpf is not in /sys/kernel/security/lsm; exec and file enforcement are unavailable, add lsm=...,bpf to the kernel command line")
+	switch {
+	case !features.BPFLSMAvailable:
+		findings = append(findings, postureFinding{"WARN", "posture-bpf-lsm",
+			"bpf is not in /sys/kernel/security/lsm; exec and file enforcement are unavailable, add lsm=...,bpf to the kernel command line"})
+	case !features.LSMProgramType || !features.TaskStorage:
+		findings = append(findings, postureFinding{"WARN", "posture-bpf-lsm",
+			"bpf is in the active LSM list, but the kernel lacks LSM program or task storage support; exec and file enforcement are unavailable"})
+	default:
+		findings = append(findings, postureFinding{"INFO", "posture-bpf-lsm",
+			"bpf is in the active LSM list with LSM program and task storage support; exec and file enforcement can attach"})
+	}
 
 	switch value, ok := read("/proc/sys/kernel/unprivileged_bpf_disabled"); {
 	case !ok:
@@ -45,8 +55,10 @@ func hostPosture(readFile func(string) ([]byte, error), features ebpfmonitor.Ker
 			"kernel.unprivileged_bpf_disabled=0; unprivileged users can load BPF programs")
 	}
 
+	lockdown := ""
 	if value, ok := read("/sys/kernel/security/lockdown"); ok {
 		mode := selectedOption(value)
+		lockdown = mode
 		switch mode {
 		case "none":
 			findings = append(findings, postureFinding{"WARN", "posture-lockdown", "kernel lockdown is none; root can modify the running kernel"})
@@ -60,15 +72,7 @@ func hostPosture(readFile func(string) ([]byte, error), features ebpfmonitor.Ker
 		findings = append(findings, postureFinding{"WARN", "posture-lockdown", "kernel lockdown is not available"})
 	}
 
-	if disabled, ok := read("/proc/sys/kernel/modules_disabled"); ok && disabled == "1" {
-		findings = append(findings, postureFinding{"INFO", "posture-module-signing", "kernel.modules_disabled=1; no further modules can be loaded"})
-	} else if enforce, ok := read("/sys/module/module/parameters/sig_enforce"); ok {
-		add(enforce == "Y", "posture-module-signing",
-			"module signatures are enforced",
-			"module signatures are not enforced; unsigned kernel modules can be loaded")
-	} else {
-		findings = append(findings, postureFinding{"WARN", "posture-module-signing", "module signature enforcement is not built into this kernel"})
-	}
+	findings = append(findings, moduleSigningPosture(readFile, read, lockdown))
 
 	if scope, ok := read("/proc/sys/kernel/yama/ptrace_scope"); ok {
 		add(scope != "0", "posture-ptrace-scope",
@@ -78,6 +82,29 @@ func hostPosture(readFile func(string) ([]byte, error), features ebpfmonitor.Ker
 		findings = append(findings, postureFinding{"WARN", "posture-ptrace-scope", "Yama ptrace restrictions are not available"})
 	}
 	return findings
+}
+
+// moduleSigningPosture reports whether unsigned kernel modules can load.
+// Integrity or confidentiality lockdown rejects them when module signing is
+// built in, even with sig_enforce off.
+func moduleSigningPosture(readFile func(string) ([]byte, error), read func(string) (string, bool), lockdown string) postureFinding {
+	const name = "posture-module-signing"
+	if disabled, ok := read("/proc/sys/kernel/modules_disabled"); ok && disabled == "1" {
+		return postureFinding{"INFO", name, "kernel.modules_disabled=1; no further modules can be loaded"}
+	}
+	raw, err := readFile("/sys/module/module/parameters/sig_enforce")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return postureFinding{"WARN", name, "module signature enforcement is not built into this kernel"}
+	case err != nil:
+		return postureFinding{"WARN", name, "module signature enforcement is unreadable: " + err.Error()}
+	case strings.TrimSpace(string(raw)) == "Y":
+		return postureFinding{"INFO", name, "module signatures are enforced"}
+	case lockdown == "integrity" || lockdown == "confidentiality":
+		return postureFinding{"INFO", name, "kernel lockdown is " + lockdown + ", which rejects unsigned kernel modules"}
+	default:
+		return postureFinding{"WARN", name, "module signatures are not enforced; unsigned kernel modules can be loaded"}
+	}
 }
 
 // selectedOption returns the bracketed choice from a kernel option list such

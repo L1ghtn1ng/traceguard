@@ -1030,6 +1030,7 @@ Replayed alerts are recorded with the live alert envelope,
 Alerts use `event=detection_alert`. They retain the source event fields and add:
 
 - `source_event`;
+- `alert_id`, a random identifier unique to the alert;
 - `detection_rule_id`;
 - `severity`;
 - `detection_message`;

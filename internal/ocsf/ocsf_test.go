@@ -159,6 +159,94 @@ func TestConvertFileIntegrityHashesAndDisposition(t *testing.T) {
 	}
 }
 
+func TestConvertSetsRequiredClassAttributes(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		fields       map[string]any
+		activityName string
+		required     string
+	}{
+		{map[string]any{"event": "dns", "pid": uint32(3), "domain": "example.com"}, "Query", "query"},
+		{map[string]any{"event": "tcp_sockops", "pid": uint32(3)}, "tcp_sockops", "dst_endpoint"},
+		{map[string]any{"event": "privilege_change", "operation": "capset", "pid": uint32(3), "program": "sh"}, "capset", "process"},
+		{map[string]any{"event": "memfd_create", "pid": uint32(3), "program": "sh"}, "memfd_create", "process"},
+		{map[string]any{"event": "bpf_prog_load", "pid": uint32(3), "bpf_prog_type": "kprobe"}, "Load", "driver"},
+		{map[string]any{"event": "module_load", "pid": uint32(3), "operation": "init_module"}, "Load", "driver"},
+		{map[string]any{"event": "file_access", "pid": uint32(3), "requested_path": "/etc/hosts"}, "Open", "file"},
+		{map[string]any{"event": "detection_alert", "source_event": "exec", "pid": uint32(3)}, "Create", "finding_info"},
+	} {
+		event := convert(t, "info", test.fields)
+		if event["activity_name"] != test.activityName {
+			t.Errorf("%v: activity_name = %v, want %q", test.fields, event["activity_name"], test.activityName)
+		}
+		if event["action_id"] != 1 {
+			t.Errorf("%v: action_id = %v, want 1 (Allowed)", test.fields, event["action_id"])
+		}
+		if _, ok := event[test.required]; !ok {
+			t.Errorf("%v: missing required %s in %v", test.fields, test.required, event)
+		}
+		if profiles := object(t, event["metadata"])["profiles"]; !reflect.DeepEqual(profiles, []string{"security_control"}) {
+			t.Errorf("%v: metadata.profiles = %v", test.fields, profiles)
+		}
+	}
+	if file := object(t, object(t, convert(t, "info", map[string]any{"event": "module_load"})["driver"])["file"]); file["name"] != "unknown" {
+		t.Fatalf("pathless module driver file = %v, want a named placeholder", file)
+	}
+	if process := object(t, convert(t, "info", map[string]any{"event": "memfd_create", "pid": uint32(3)})["process"]); process["pid"] != uint32(3) {
+		t.Fatalf("memfd_create process = %v, want the calling process", process)
+	}
+	if base := convert(t, "info", map[string]any{"policy_sha256": "abc"}); base["action_id"] != nil || base["activity_name"] != "Unknown" {
+		t.Fatalf("base event action_id = %v activity_name = %v", base["action_id"], base["activity_name"])
+	}
+}
+
+func TestConvertKeepsRequestedExecPath(t *testing.T) {
+	t.Parallel()
+
+	event := convert(t, "info", map[string]any{"event": "exec", "requested_path": "./run", "exe": "/opt/app/run"})
+	if file := object(t, object(t, event["process"])["file"]); file["path"] != "/opt/app/run" || file["name"] != "run" {
+		t.Fatalf("process.file = %v, want the resolved executable", file)
+	}
+	if object(t, event["unmapped"])["requested_path"] != "./run" {
+		t.Fatalf("unmapped = %v, want the requested path kept", event["unmapped"])
+	}
+}
+
+func TestConvertFileIntegrityActorAndDeletedType(t *testing.T) {
+	t.Parallel()
+
+	event := convert(t, "info", map[string]any{
+		"event": "file_integrity", "change": "deleted", "path": "/etc/cron.d", "previous_file_type": "directory",
+		"actor_pid": uint32(44), "actor_program": "rm", "actor_kernel_uid": uint32(0), "actor_current_exe": "/usr/bin/rm",
+	})
+	if file := object(t, event["file"]); file["type_id"] != 2 || file["name"] != "cron.d" {
+		t.Fatalf("deleted directory file = %v", file)
+	}
+	actor := object(t, event["actor"])
+	process := object(t, actor["process"])
+	if process["pid"] != uint32(44) || process["name"] != "rm" || object(t, actor["user"])["uid"] != "0" {
+		t.Fatalf("actor = %v, want the triggering process", actor)
+	}
+	if unmapped := object(t, event["unmapped"]); unmapped["actor_pid"] != nil || unmapped["actor_program"] != nil {
+		t.Fatalf("unmapped = %v, actor fields were not moved", unmapped)
+	}
+}
+
+func TestConvertFindingUIDIsTheAlertID(t *testing.T) {
+	t.Parallel()
+
+	first := convert(t, "info", map[string]any{"event": "detection_alert", "alert_id": "A1", "detection_rule_id": "r"})
+	second := convert(t, "info", map[string]any{"event": "detection_alert", "alert_id": "B2", "detection_rule_id": "r"})
+	if object(t, first["finding_info"])["uid"] != "A1" || object(t, second["finding_info"])["uid"] != "B2" {
+		t.Fatalf("finding uids = %v, %v", first["finding_info"], second["finding_info"])
+	}
+	blocked := convert(t, "info", map[string]any{"event": "detection_alert", "source_event": "exec_blocked", "detection_rule_id": "r"})
+	if blocked["action_id"] != 2 || blocked["disposition_id"] != 2 {
+		t.Fatalf("finding on a blocked event: action %v disposition %v", blocked["action_id"], blocked["disposition_id"])
+	}
+}
+
 func TestSeverityIDs(t *testing.T) {
 	t.Parallel()
 

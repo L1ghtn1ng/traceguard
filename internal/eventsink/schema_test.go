@@ -2,6 +2,7 @@ package eventsink
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -70,5 +71,57 @@ func TestSyslogUDPBoundsOCSFRecords(t *testing.T) {
 	}
 	if len(payload) > 2048 || !strings.Contains(string(payload), `"class_uid"`) {
 		t.Fatalf("bounded OCSF datagram is %d bytes: %s", len(payload), payload)
+	}
+}
+
+func TestMarshalOCSFRecordShortensOversizedMappedAttributes(t *testing.T) {
+	t.Parallel()
+
+	techniques := make([]any, 0, 600)
+	for index := range 600 {
+		techniques = append(techniques, fmt.Sprintf("T%04d.%03d", 1000+index, index))
+	}
+	fields := map[string]any{
+		"event": "detection_alert", "alert_id": "a1", "detection_rule_id": "custom.noisy", "severity": "error",
+		"detection_message": strings.Repeat("t", 4000), "mitre_techniques": techniques,
+	}
+	payload, err := marshalOCSFRecord(record{Timestamp: "2026-10-18T10:00:00Z", Level: "info", Message: "detection-alert", Fields: fields})
+	if err != nil {
+		t.Fatalf("marshalOCSFRecord returned error: %v", err)
+	}
+	if len(payload) > maxSerializedRecordBytes {
+		t.Fatalf("payload is %d bytes, over the %d limit", len(payload), maxSerializedRecordBytes)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	finding, _ := decoded["finding_info"].(map[string]any)
+	if decoded["class_uid"] != float64(2004) || finding["uid"] != "a1" {
+		t.Fatalf("class_uid = %v finding_info = %v, want the finding kept", decoded["class_uid"], finding)
+	}
+	if unmapped, _ := decoded["unmapped"].(map[string]any); unmapped["telemetry_truncated"] != true {
+		t.Fatalf("unmapped = %v, want a truncation marker", decoded["unmapped"])
+	}
+}
+
+func TestSyslogUDPFallbackKeepsOCSFClassification(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]any{"event": "detection_alert", "detection_rule_id": "custom.big", "severity": "error"}
+	for index := range 60 {
+		fields[fmt.Sprintf("detail_%02d", index)] = strings.Repeat("d", 100)
+	}
+	payload, err := marshalUDPRecord(record{Timestamp: "2026-10-18T10:00:00Z", Level: "info", Message: "detection-alert", Hostname: "h", Fields: fields},
+		700, marshalOCSFRecord)
+	if err != nil {
+		t.Fatalf("marshalUDPRecord returned error: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["class_uid"] != float64(2004) {
+		t.Fatalf("class_uid = %v, want a detection finding: %s", decoded["class_uid"], payload)
 	}
 }
