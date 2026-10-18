@@ -62,11 +62,13 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	}
 
 	monitor, err := ebpf.NewMonitor(cfg.CgroupPath, ebpf.Options{
-		FileAudit:              cfg.FileAudit,
-		SecurityEvents:         cfg.SecurityEvents,
-		PinEBPF:                cfg.PinEBPF,
-		EnableStats:            cfg.EBPFStats,
-		ConnectionDedupeWindow: cfg.ConnectionDedupeWindow,
+		FileAudit:                cfg.FileAudit,
+		SecurityEvents:           cfg.SecurityEvents,
+		PinEBPF:                  cfg.PinEBPF,
+		EnableStats:              cfg.EBPFStats,
+		ConnectionDedupeWindow:   cfg.ConnectionDedupeWindow,
+		RingBufferSize:           uint32(cfg.RingBufferSize), //nolint:gosec // config validates at most 1 GiB
+		ConnectionDedupeMinBytes: cfg.ConnectionDedupeMinBytes,
 	})
 	if err != nil {
 		return err
@@ -148,9 +150,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	// The programs are already attached and producing events. Drain the ring
 	// buffer before loading policy, which can wait on a remote fetch, so a slow
 	// startup does not fill the buffer and drop events.
-	ringBuffer := newRingBufferWatcher(monitor, metrics, recorder)
+	ringBuffer := newRingBufferWatcher(monitor, metrics, recorder, cfg.RingBufferUnhealthyDropRate)
 	ringBuffer.collect()
-	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, func(time.Time) { ringBuffer.collect() }) })
+	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, ringBuffer.collectAt) })
 	alerts := alertSink{recorder: recorder, metrics: metrics, responder: responder}
 	workers.Go(func() { responder.Run(ctx) })
 	workers.Go(func() {
@@ -443,8 +445,10 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			if cfg.DryRun && decision == blocklist.DecisionBlock {
 				fields["mode"] = "dry-run"
 				recorder.InfoAt(event.Timestamp, "would-block", fields)
-			} else {
+			} else if !cfg.DNSFirstSeen {
 				recorder.InfoAt(event.Timestamp, "dns", fields)
+			} else if !recorder.InfoFirstSeenDNSAt(event.Timestamp, "dns", fields) {
+				metrics.IncFirstSeenSuppressed(eventName)
 			}
 		case ebpf.EventBlocked:
 			fields["domain"] = event.Domain
@@ -492,7 +496,7 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			if dirfd := uint32(event.Value); dirfd != atFDCWD { //nolint:gosec // the low word is the dirfd
 				fields["requested_dirfd"] = int32(dirfd) //nolint:gosec // dirfd is a signed descriptor carried unsigned
 			}
-			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
+			recordFileAudit(cfg, recorder, metrics, event.Timestamp, eventName, fields)
 			notifyIntegrity(integrity, "/proc", event, fields)
 		case ebpf.EventFileChange:
 			appendFileChangeFields(fields, event)
@@ -502,7 +506,7 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			}
 			// Like opens, repeats of the same request are suppressed, so
 			// temporary-file churn does not record every syscall.
-			recorder.InfoDedupFileAuditAt(event.Timestamp, eventName, fields, fileAccessDedupeTTL)
+			recordFileAudit(cfg, recorder, metrics, event.Timestamp, eventName, fields)
 		case ebpf.EventEgressBlocked, ebpf.EventEgressWouldBlock:
 			fields["direction"] = event.Direction
 			fields["peer_address"] = event.Address
@@ -574,6 +578,10 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			if event.FileMode != 0 {
 				fields["tcp_state"] = event.FileMode
 			}
+			if ebpf.IsSockOpsClose(event.FileFlags, event.FileMode) {
+				fields["bytes_acked"] = event.BytesAcked
+				fields["bytes_received"] = event.BytesReceived
+			}
 			recorder.InfoAt(event.Timestamp, eventName, fields)
 		default:
 			if ebpf.IsSecurityEvent(event.Kind) {
@@ -585,5 +593,18 @@ func newEventHandler(cfg config.Config, recorder *eventsink.Recorder, metrics *t
 			recorder.InfoAt(event.Timestamp, "event", fields)
 		}
 		detections.submit(event.Timestamp, eventName, fields)
+	}
+}
+
+// recordFileAudit records a file audit event once per request and process
+// context: only the first time with -file-audit-first-seen, otherwise once
+// per fileAccessDedupeTTL with a count of the repeats it suppressed.
+func recordFileAudit(cfg config.Config, recorder *eventsink.Recorder, metrics *telemetry.Registry, timestamp time.Time, eventName string, fields map[string]any) {
+	if !cfg.FileAuditFirstSeen {
+		recorder.InfoDedupFileAuditAt(timestamp, eventName, fields, fileAccessDedupeTTL)
+		return
+	}
+	if !recorder.InfoFirstSeenFileAuditAt(timestamp, eventName, fields) {
+		metrics.IncFirstSeenSuppressed(eventName)
 	}
 }

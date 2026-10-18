@@ -262,6 +262,7 @@ const (
 	traceguardDNSCompatMapRuleNames                = "rule_names"
 	traceguardDNSCompatMapSettings                 = "settings"
 	traceguardDNSCompatMapSocketInfo               = "socket_info"
+	traceguardDNSCompatMapSockopsQuiet             = "sockops_quiet"
 	traceguardDNSCompatMapSockoptAllow             = "sockopt_allow"
 	traceguardDNSCompatMapSockoptBlock             = "sockopt_block"
 	traceguardDNSCompatMapUnixAllowPaths           = "unix_allow_paths"
@@ -328,6 +329,7 @@ const (
 	traceguardDNSCompatProgTraceUnlink             = "trace_unlink"
 	traceguardDNSCompatProgTraceUnlinkat           = "trace_unlinkat"
 	traceguardDNSCompatProgTraceUnshare            = "trace_unshare"
+	traceguardDNSCompatVarConnectionDedupeMinBytes = "connection_dedupe_min_bytes"
 	traceguardDNSCompatVarConnectionDedupeWindowNs = "connection_dedupe_window_ns"
 )
 
@@ -480,6 +482,7 @@ type traceguardDNSCompatMapSpecs struct {
 	RuleNames               *ebpf.MapSpec `ebpf:"rule_names"`
 	Settings                *ebpf.MapSpec `ebpf:"settings"`
 	SocketInfo              *ebpf.MapSpec `ebpf:"socket_info"`
+	SockopsQuiet            *ebpf.MapSpec `ebpf:"sockops_quiet"`
 	SockoptAllow            *ebpf.MapSpec `ebpf:"sockopt_allow"`
 	SockoptBlock            *ebpf.MapSpec `ebpf:"sockopt_block"`
 	UnixAllowPaths          *ebpf.MapSpec `ebpf:"unix_allow_paths"`
@@ -490,6 +493,7 @@ type traceguardDNSCompatMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type traceguardDNSCompatVariableSpecs struct {
+	ConnectionDedupeMinBytes *ebpf.VariableSpec `ebpf:"connection_dedupe_min_bytes"`
 	ConnectionDedupeWindowNs *ebpf.VariableSpec `ebpf:"connection_dedupe_window_ns"`
 }
 
@@ -552,6 +556,7 @@ type traceguardDNSCompatMaps struct {
 	RuleNames               *ebpf.Map `ebpf:"rule_names"`
 	Settings                *ebpf.Map `ebpf:"settings"`
 	SocketInfo              *ebpf.Map `ebpf:"socket_info"`
+	SockopsQuiet            *ebpf.Map `ebpf:"sockops_quiet"`
 	SockoptAllow            *ebpf.Map `ebpf:"sockopt_allow"`
 	SockoptBlock            *ebpf.Map `ebpf:"sockopt_block"`
 	UnixAllowPaths          *ebpf.Map `ebpf:"unix_allow_paths"`
@@ -599,6 +604,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 		m.RuleNames,
 		m.Settings,
 		m.SocketInfo,
+		m.SockopsQuiet,
 		m.SockoptAllow,
 		m.SockoptBlock,
 		m.UnixAllowPaths,
@@ -610,6 +616,7 @@ func (m *traceguardDNSCompatMaps) Close() error {
 //
 // It can be passed to loadTraceguardDNSCompatObjects or ebpf.CollectionSpec.LoadAndAssign.
 type traceguardDNSCompatVariables struct {
+	ConnectionDedupeMinBytes *ebpf.Variable `ebpf:"connection_dedupe_min_bytes"`
 	ConnectionDedupeWindowNs *ebpf.Variable `ebpf:"connection_dedupe_window_ns"`
 }
 

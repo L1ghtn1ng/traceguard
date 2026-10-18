@@ -215,6 +215,33 @@ func writePinMetadata(root, selectedObject string) error {
 	return nil
 }
 
+// discardResizedRingBuffer stops adopting a pinned events ring buffer whose
+// size differs from the requested one, and removes its pin so the new buffer
+// is pinned in its place. Programs still attached keep the old buffer until
+// their links are updated; events queued in it are lost.
+func discardResizedRingBuffer(opts Options, pinned map[string]*ebpf.Map, size uint32) error {
+	events, ok := pinned["events"]
+	if !ok || !ringBufferResized(events.MaxEntries(), size) {
+		return nil
+	}
+	delete(pinned, "events")
+	path := filepath.Join(opts.pinPath(), "maps", "events")
+	removeErr := os.Remove(path)
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	if err := errors.Join(events.Close(), removeErr); err != nil {
+		return fmt.Errorf("replace resized pinned ring buffer: %w", err)
+	}
+	return nil
+}
+
+// ringBufferResized reports whether a pinned ring buffer of pinnedSize bytes
+// must be replaced to honour a requested size, where zero keeps any size.
+func ringBufferResized(pinnedSize, requested uint32) bool {
+	return requested != 0 && pinnedSize != requested
+}
+
 func pinExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -311,7 +338,7 @@ func monitorMapHandles(o monitorObjects, optional optionalPrograms) map[string]*
 	return map[string]*ebpf.Map{
 		"allowlist": o.Allowlist, "allow_suffixes": o.AllowSuffixes, "block_suffixes": o.BlockSuffixes,
 		"blocklist": o.Blocklist, "dns_scratch": o.DnsScratch, "exec_argv_scratch": o.ExecArgvScratch, "socket_info": o.SocketInfo,
-		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe,
+		"listener_info": o.ListenerInfo, "connection_dedupe": o.ConnectionDedupe, "sockops_quiet": o.SockopsQuiet,
 		"endpoint4_allow_rules": o.Endpoint4AllowRules, "endpoint4_cidr_allow_rules": o.Endpoint4CidrAllowRules,
 		"endpoint4_cidr_rules": o.Endpoint4CidrRules, "endpoint4_rules": o.Endpoint4Rules,
 		"endpoint6_allow_rules": o.Endpoint6AllowRules, "endpoint6_cidr_allow_rules": o.Endpoint6CidrAllowRules,

@@ -24,8 +24,12 @@ import (
 const bindPolarityHelperCgroupEnv = "TRACEGUARD_BIND_POLARITY_HELPER_CGROUP"
 
 // integrationConstants uses a non-zero dedupe window so the verifier checks
-// the deduplication path, as production does by default.
-var integrationConstants = loadConstants{connectionDedupeWindow: time.Minute}
+// the deduplication path, as production does by default, and a minimum byte
+// count so it checks TCP lifecycle deduplication too. The non-default ring
+// buffer size checks that a resized buffer loads.
+var integrationConstants = loadConstants{
+	connectionDedupeWindow: time.Minute, connectionDedupeMinBytes: 1 << 20, ringBufferSize: 32 << 20,
+}
 
 func TestTraceDNSProgramLoadsForIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {

@@ -10,7 +10,7 @@
     "builtin_profiles": {
       "type": "array",
       "uniqueItems": true,
-      "items": {"enum": ["baseline", "runtime"]}
+      "items": {"enum": ["baseline", "runtime", "platform"]}
     },
     "disabled_rule_ids": {
       "type": "array",
@@ -508,6 +508,10 @@
         "command_globs": {
           "$ref": "#/$defs/string_list",
           "description": "Globs over the redacted exec command line joined with spaces; valid only with exec events."
+        },
+        "programs": {
+          "$ref": "#/$defs/string_list",
+          "description": "Globs over the event-time kernel comm, at most 15 bytes; valid only in detection exceptions, with events that carry event-time process identity."
         },
         "exec_sources": {"type": "array", "items": {"enum": ["path", "fd"]}, "description": "Valid only with exec events."},
         "changes": {"type": "array", "items": {"enum": ["created", "modified", "deleted", "attributes"]}, "description": "Valid only with file_integrity events."},

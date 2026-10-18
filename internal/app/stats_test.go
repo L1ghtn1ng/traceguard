@@ -76,7 +76,7 @@ func TestRingBufferWatcherReportsOnlyNewDrops(t *testing.T) {
 		SizeBytes: 1 << 24, UnreadBytes: 632,
 		Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 5, ebpfmonitor.EventExec: 0},
 	}}
-	watcher := newRingBufferWatcher(source, metrics, recorder)
+	watcher := newRingBufferWatcher(source, metrics, recorder, 0)
 
 	watcher.collect()
 	if strings.Contains(output.String(), "events dropped") {
@@ -124,7 +124,7 @@ func TestRingBufferWatcherKeepsBaselineForUnreadableKinds(t *testing.T) {
 		Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 1, ebpfmonitor.EventExec: 9},
 	}}
 	metrics := telemetry.NewRegistry()
-	watcher := newRingBufferWatcher(source, metrics, recorder)
+	watcher := newRingBufferWatcher(source, metrics, recorder, 0)
 	watcher.collect()
 
 	// A failed lookup omits the kind; its baseline must survive so a later
@@ -233,7 +233,7 @@ func TestRingBufferWatcherBaselinesKindsFirstSeenLater(t *testing.T) {
 		stats: ebpfmonitor.RingBufferStats{Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 1}},
 		err:   errors.New("lookup failed"),
 	}
-	watcher := newRingBufferWatcher(source, telemetry.NewRegistry(), recorder)
+	watcher := newRingBufferWatcher(source, telemetry.NewRegistry(), recorder, 0)
 	watcher.collect()
 	output.Reset()
 	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 1, ebpfmonitor.EventExec: 400}
@@ -288,5 +288,71 @@ func TestExceptionWatcherPublishesMetricsAndRecordsExpiryOnce(t *testing.T) {
 	}
 	if !strings.Contains(metrics.Render(), `traceguard_detection_exceptions{state="expired"} 1`) {
 		t.Fatalf("expired gauge not updated:\n%s", metrics.Render())
+	}
+}
+
+func TestRingBufferWatcherDegradesHealthAboveDropRate(t *testing.T) {
+	t.Parallel()
+
+	recorder, output := newTestRecorder(t)
+	metrics := telemetry.NewRegistry()
+	source := &fakeRingBufferStats{stats: ebpfmonitor.RingBufferStats{
+		SizeBytes: 1 << 24, Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 100},
+	}}
+	watcher := newRingBufferWatcher(source, metrics, recorder, 10)
+	start := time.Unix(1_700_000_000, 0)
+	if !metrics.Healthy() || !strings.Contains(metrics.Render(), `traceguard_component_healthy{component="ringbuf"} 1`) {
+		t.Fatalf("watcher with a threshold did not start healthy:\n%s", metrics.Render())
+	}
+
+	watcher.collectAt(start)
+	// 40 drops in 5s is 8/s, within the 10/s threshold.
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 140}
+	watcher.collectAt(start.Add(5 * time.Second))
+	if !metrics.Healthy() || watcher.isDegraded() {
+		t.Fatal("8 drops/s marked a 10/s threshold degraded")
+	}
+
+	// 60 drops in 5s is 12/s.
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 200}
+	watcher.collectAt(start.Add(10 * time.Second))
+	if metrics.Healthy() || !watcher.isDegraded() {
+		t.Fatal("12 drops/s did not degrade health")
+	}
+	rendered := metrics.Render()
+	for _, want := range []string{`traceguard_component_healthy{component="ringbuf"} 0`, "traceguard_healthy 0"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("metrics missing %q:\n%s", want, rendered)
+		}
+	}
+	if !strings.Contains(output.String(), "health degraded") {
+		t.Fatalf("degradation not recorded: %s", output.String())
+	}
+
+	watcher.collectAt(start.Add(15 * time.Second))
+	if !metrics.Healthy() || watcher.isDegraded() {
+		t.Fatal("an interval without drops did not restore health")
+	}
+	if !strings.Contains(output.String(), "health restored") || !strings.Contains(metrics.Render(), "traceguard_healthy 1") {
+		t.Fatalf("restoration not reported: %s", output.String())
+	}
+}
+
+func TestRingBufferWatcherWithoutThresholdNeverDegrades(t *testing.T) {
+	t.Parallel()
+
+	recorder, _ := newTestRecorder(t)
+	metrics := telemetry.NewRegistry()
+	source := &fakeRingBufferStats{stats: ebpfmonitor.RingBufferStats{Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 0}}}
+	watcher := newRingBufferWatcher(source, metrics, recorder, 0)
+	start := time.Unix(1_700_000_000, 0)
+	watcher.collectAt(start)
+	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 1_000_000}
+	watcher.collectAt(start.Add(time.Second))
+	if !metrics.Healthy() || watcher.isDegraded() {
+		t.Fatal("a disabled threshold degraded health")
+	}
+	if strings.Contains(metrics.Render(), "traceguard_component_healthy") {
+		t.Fatal("a disabled threshold published a ring buffer health series")
 	}
 }

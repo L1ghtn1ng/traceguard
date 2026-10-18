@@ -4,6 +4,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
+	"math/bits"
 	"net"
 	neturl "net/url"
 	"os"
@@ -32,6 +34,12 @@ const (
 	defaultHeartbeatInterval      = 5 * time.Minute
 	defaultConnectionDedupeWindow = time.Minute
 	maxConnectionDedupeWindow     = time.Hour
+
+	// DefaultRingBufferSize is the events ring buffer's data size: 16 MiB
+	// holds about 26,000 of the 632-byte kernel event records.
+	DefaultRingBufferSize = 16 << 20
+	minRingBufferSize     = 64 << 10
+	maxRingBufferSize     = 1 << 30
 )
 
 type Config struct {
@@ -83,6 +91,13 @@ type Config struct {
 	HeartbeatInterval            time.Duration
 	PolicySigningKey             string
 	ConnectionDedupeWindow       time.Duration
+	ConnectionDedupeMinBytes     uint64
+	RingBufferSize               uint64
+	RingBufferUnhealthyDropRate  float64
+	DNSFirstSeen                 bool
+	FileAuditFirstSeen           bool
+	NoisyRules                   bool
+	NoisyRulesWindow             time.Duration
 	PrintVersion                 bool
 	Doctor                       bool
 	ReplayPath                   string
@@ -154,7 +169,28 @@ func Parse() (Config, error) {
 		return Config{}, err
 	}
 
-	cfg := Config{}
+	connectionDedupeBytesDefault, err := envByteSize("TRACEGUARD_CONNECTION_DEDUPE_MIN_BYTES", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	ringBufferSizeDefault, err := envByteSize("TRACEGUARD_RINGBUF_SIZE", DefaultRingBufferSize)
+	if err != nil {
+		return Config{}, err
+	}
+	ringBufferDropRateDefault, err := envFloat("TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	dnsFirstSeenDefault, err := envBool("TRACEGUARD_DNS_FIRST_SEEN", false)
+	if err != nil {
+		return Config{}, err
+	}
+	fileAuditFirstSeenDefault, err := envBool("TRACEGUARD_FILE_AUDIT_FIRST_SEEN", false)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg := Config{ConnectionDedupeMinBytes: connectionDedupeBytesDefault, RingBufferSize: ringBufferSizeDefault}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.BoolVar(&cfg.Block, "block", blockDefault, "enforce configured DNS and kernel policy block decisions")
@@ -205,6 +241,13 @@ func Parse() (Config, error) {
 	fs.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", heartbeatDefault, "interval between heartbeat events that report policy digest and self-health; 0 disables")
 	fs.StringVar(&cfg.PolicySigningKey, "policy-signing-key", envString("TRACEGUARD_POLICY_SIGNING_KEY", ""), "absolute path to a PEM Ed25519 public key; the remote policy must then carry a valid detached signature at <policy-url>.sig")
 	fs.DurationVar(&cfg.ConnectionDedupeWindow, "connection-dedupe-window", connectionDedupeDefault, "suppress repeated connection events for the same socket within this window; 0 disables")
+	fs.Var(byteSizeFlag{&cfg.ConnectionDedupeMinBytes}, "connection-dedupe-min-bytes", "also deduplicate TCP lifecycle events to the same peer within connection-dedupe-window, but always record a close that moved at least this many bytes, such as 1MiB; 0 disables")
+	fs.Var(byteSizeFlag{&cfg.RingBufferSize}, "ringbuf-size", "kernel event ring buffer size, a power of two from 64KiB to 1GiB such as 16MiB or 64MiB; each event takes 632 bytes")
+	fs.Float64Var(&cfg.RingBufferUnhealthyDropRate, "ringbuf-unhealthy-drop-rate", ringBufferDropRateDefault, "mark health degraded while ring buffer drops exceed this many events per second; 0 disables")
+	fs.BoolVar(&cfg.DNSFirstSeen, "dns-first-seen", dnsFirstSeenDefault, "record a DNS query only the first time a process context queries that domain; detection still sees every query")
+	fs.BoolVar(&cfg.FileAuditFirstSeen, "file-audit-first-seen", fileAuditFirstSeenDefault, "record a file audit event only the first time a process context makes that request, instead of once every 5 minutes; detection still sees every event")
+	fs.BoolVar(&cfg.NoisyRules, "noisy-rules", false, "rank detection rules by alert volume from the running daemon's metrics at -metrics-addr, and exit")
+	fs.DurationVar(&cfg.NoisyRulesWindow, "noisy-rules-window", 0, "with -noisy-rules, rank by alerts raised during this window instead of since the daemon started")
 	fs.BoolVar(&cfg.PrintVersion, "v", false, "print program version and exit")
 	fs.BoolVar(&cfg.Doctor, "doctor", false, "run environment diagnostics and exit")
 	fs.StringVar(&cfg.ReplayPath, "replay", "", "evaluate detection rules over an absolute-path JSONL event archive, print alerts and a per-rule summary, and exit")
@@ -217,6 +260,18 @@ func Parse() (Config, error) {
 	}
 	normalizeKubernetesConfig(&cfg)
 	if cfg.PrintVersion || cfg.Doctor || cfg.Unpin {
+		return cfg, nil
+	}
+	if cfg.NoisyRules {
+		if strings.TrimSpace(cfg.MetricsAddr) == "" {
+			return Config{}, errors.New("noisy-rules requires metrics-addr")
+		}
+		if _, _, err := net.SplitHostPort(cfg.MetricsAddr); err != nil {
+			return Config{}, fmt.Errorf("metrics-addr: %w", err)
+		}
+		if cfg.NoisyRulesWindow < 0 {
+			return Config{}, errors.New("noisy-rules-window must not be negative")
+		}
 		return cfg, nil
 	}
 	if cfg.ReplayPath != "" {
@@ -363,6 +418,15 @@ func Parse() (Config, error) {
 	if cfg.ConnectionDedupeWindow < 0 || cfg.ConnectionDedupeWindow > maxConnectionDedupeWindow {
 		return Config{}, fmt.Errorf("connection-dedupe-window must be between 0 and %s", maxConnectionDedupeWindow)
 	}
+	if err := validateRingBufferSize(cfg.RingBufferSize); err != nil {
+		return Config{}, err
+	}
+	if math.IsNaN(cfg.RingBufferUnhealthyDropRate) || math.IsInf(cfg.RingBufferUnhealthyDropRate, 0) || cfg.RingBufferUnhealthyDropRate < 0 {
+		return Config{}, errors.New("ringbuf-unhealthy-drop-rate must be a non-negative number")
+	}
+	if cfg.ConnectionDedupeMinBytes > 0 && cfg.ConnectionDedupeWindow == 0 {
+		return Config{}, errors.New("connection-dedupe-min-bytes requires a non-zero connection-dedupe-window")
+	}
 	if cfg.PolicySigningKey != "" {
 		if !filepath.IsAbs(cfg.PolicySigningKey) {
 			return Config{}, errors.New("policy-signing-key must be an absolute path")
@@ -397,4 +461,13 @@ func Parse() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateRingBufferSize checks a ring buffer size the kernel accepts: a power
+// of two, and so a whole number of pages for every page size up to 64 KiB.
+func validateRingBufferSize(size uint64) error {
+	if size < minRingBufferSize || size > maxRingBufferSize || bits.OnesCount64(size) != 1 {
+		return fmt.Errorf("ringbuf-size must be a power of two from %d (64KiB) to %d (1GiB) bytes, got %d", minRingBufferSize, maxRingBufferSize, size)
+	}
+	return nil
 }

@@ -566,6 +566,13 @@ struct {
 /* Set by userspace at load time; 0 disables connection event deduplication. */
 volatile const __u64 connection_dedupe_window_ns = 60000000000ULL;
 
+/* Set by userspace at load time. With a dedupe window, a positive value also
+ * deduplicates TCP established events to the same peer, and the closes of the
+ * sockets suppressed that way, except a close that moved at least this many
+ * bytes. 0 leaves TCP lifecycle events undeduplicated.
+ */
+volatile const __u64 connection_dedupe_min_bytes = 0;
+
 /* Addresses a response blocks until the value, a bpf_ktime_get_ns deadline.
  * Userspace adds and removes entries; the deadline also stops a stale entry
  * from blocking if userspace cannot remove it.
@@ -727,6 +734,14 @@ struct {
 	__type(key, struct connection_dedupe_key);
 	__type(value, struct connection_dedupe_value);
 } connection_dedupe SEC(".maps");
+
+/* Socket cookies whose established event deduplication suppressed. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, CONNECTION_DEDUPE_MAX_ENTRIES);
+	__type(key, __u64);
+	__type(value, __u8);
+} sockops_quiet SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -2368,7 +2383,76 @@ static __always_inline int should_emit_sockops_retrans(struct bpf_sock_ops *ctx)
 	return 1;
 }
 
-static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
+/* TCP lifecycle deduplication keys an established socket by its peer: the
+ * remote address and service port, which is the remote port of an active open
+ * and the local port of a passive one.
+ */
+static __always_inline int should_emit_sockops_established(struct bpf_sock_ops *ctx)
+{
+	struct connection_dedupe_key key = {0};
+	struct connection_dedupe_value value = {0};
+	struct connection_dedupe_value *existing;
+	__u64 window = connection_dedupe_window_ns;
+	__u64 cookie;
+	__u64 now;
+	__u8 quiet = 1;
+
+	if (!window || !connection_dedupe_min_bytes) {
+		return 1;
+	}
+	key.direction = (__u8)ctx->op;
+	key.protocol = SOCKET_PROTOCOL_TCP;
+	if (ctx->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB) {
+		key.port = (__u16)bpf_ntohl(ctx->remote_port);
+	} else {
+		key.local_port = (__u16)ctx->local_port;
+	}
+	/* bpf_sock_ops address fields only allow full 4-byte context loads. */
+	if (ctx->family == AF_INET) {
+		__u32 remote4 = ctx->remote_ip4;
+
+		key.family = FAMILY_IPV4;
+		copy_socket_addr(key.addr, FAMILY_IPV4, &remote4);
+	} else if (ctx->family == AF_INET6) {
+		__u32 remote6[4] = {ctx->remote_ip6[0], ctx->remote_ip6[1], ctx->remote_ip6[2], ctx->remote_ip6[3]};
+
+		key.family = FAMILY_IPV6;
+		copy_socket_addr(key.addr, FAMILY_IPV6, remote6);
+	} else {
+		return 1;
+	}
+
+	now = bpf_ktime_get_ns();
+	existing = bpf_map_lookup_elem(&connection_dedupe, &key);
+	if (existing && now >= existing->last_seen_ns && now - existing->last_seen_ns < window) {
+		cookie = bpf_get_socket_cookie(ctx);
+		bpf_map_update_elem(&sockops_quiet, &cookie, &quiet, BPF_ANY);
+		return 0;
+	}
+	value.last_seen_ns = now;
+	bpf_map_update_elem(&connection_dedupe, &key, &value, BPF_ANY);
+	return 1;
+}
+
+/* A close is suppressed only when its established event was, so every
+ * recorded established event keeps its close; a quiet socket's close is still
+ * recorded when it moved connection_dedupe_min_bytes.
+ */
+static __always_inline int should_emit_sockops_close(struct bpf_sock_ops *ctx, __u64 bytes)
+{
+	__u64 cookie = bpf_get_socket_cookie(ctx);
+
+	if (!bpf_map_lookup_elem(&sockops_quiet, &cookie)) {
+		return 1;
+	}
+	bpf_map_delete_elem(&sockops_quiet, &cookie);
+	return bytes >= connection_dedupe_min_bytes;
+}
+
+/* Close events carry the socket's acknowledged sent bytes and received bytes
+ * as two __u64 values at the start of domain.
+ */
+static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx, __u64 bytes_acked, __u64 bytes_received)
 {
 	struct event *event = reserve_event(EVENT_SOCKOPS);
 	__u8 family;
@@ -2382,7 +2466,10 @@ static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
 	set_event_socket_meta(event, family, SOCKET_PROTOCOL_TCP, SOCKET_HOOK_SOCKOPS, 0);
 	event->file_flags = (__u32)ctx->op;
 	if (ctx->op == BPF_SOCK_OPS_STATE_CB) {
+		__u64 bytes[2] = {bytes_acked, bytes_received};
+
 		event->file_mode = ctx->args[1];
+		__builtin_memcpy(event->domain, bytes, sizeof(bytes));
 	}
 	event->socket_cookie = bpf_get_socket_cookie(ctx);
 	/* bpf_sock_ops address fields only allow full 4-byte context loads, so
@@ -2407,23 +2494,36 @@ static __always_inline void emit_sockops_event(struct bpf_sock_ops *ctx)
 SEC("sockops")
 int trace_sockops(struct bpf_sock_ops *ctx)
 {
+	__u64 bytes_acked;
+	__u64 bytes_received;
+
 	switch (ctx->op) {
 	case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
 	case BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB:
-	case BPF_SOCK_OPS_TCP_LISTEN_CB:
 		/* Preserve callbacks another sockops program enabled on this socket. */
 		bpf_sock_ops_cb_flags_set(ctx, (int)(ctx->bpf_sock_ops_cb_flags |
 			BPF_SOCK_OPS_RETRANS_CB_FLAG | BPF_SOCK_OPS_STATE_CB_FLAG));
-		emit_sockops_event(ctx);
+		if (should_emit_sockops_established(ctx)) {
+			emit_sockops_event(ctx, 0, 0);
+		}
+		break;
+	case BPF_SOCK_OPS_TCP_LISTEN_CB:
+		bpf_sock_ops_cb_flags_set(ctx, (int)(ctx->bpf_sock_ops_cb_flags |
+			BPF_SOCK_OPS_RETRANS_CB_FLAG | BPF_SOCK_OPS_STATE_CB_FLAG));
+		emit_sockops_event(ctx, 0, 0);
 		break;
 	case BPF_SOCK_OPS_RETRANS_CB:
 		if (should_emit_sockops_retrans(ctx)) {
-			emit_sockops_event(ctx);
+			emit_sockops_event(ctx, 0, 0);
 		}
 		break;
 	case BPF_SOCK_OPS_STATE_CB:
 		if (ctx->args[1] == BPF_TCP_CLOSE) {
-			emit_sockops_event(ctx);
+			bytes_acked = ctx->bytes_acked;
+			bytes_received = ctx->bytes_received;
+			if (should_emit_sockops_close(ctx, bytes_acked + bytes_received)) {
+				emit_sockops_event(ctx, bytes_acked, bytes_received);
+			}
 		}
 		break;
 	default:

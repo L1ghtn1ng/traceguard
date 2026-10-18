@@ -20,7 +20,7 @@ func newTestHeartbeatStatus(t *testing.T, hooks []string) heartbeatStatus {
 		t.Fatal(err)
 	}
 	source := &fakeRingBufferStats{stats: ebpfmonitor.RingBufferStats{UnreadBytes: 1264, Drops: map[uint32]uint64{ebpfmonitor.EventDNS: 2}}}
-	watcher := newRingBufferWatcher(source, telemetry.NewRegistry(), recorder)
+	watcher := newRingBufferWatcher(source, telemetry.NewRegistry(), recorder, 0)
 	watcher.collect()
 	source.stats.Drops = map[uint32]uint64{ebpfmonitor.EventDNS: 9}
 	watcher.collect()
@@ -46,6 +46,7 @@ func TestHeartbeatFieldsReportSelfHealth(t *testing.T) {
 		"unavailable_hooks":            []string{"lsm-exec", "sockops"},
 		"ringbuf_dropped_events":       uint64(7),
 		"ringbuf_unread_bytes":         1264,
+		"ringbuf_degraded":             false,
 		"detection_rules":              len(detection.BaselineRules()),
 		"detection_state_groups":       0,
 		"detection_exceptions":         0,

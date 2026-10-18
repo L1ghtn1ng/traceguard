@@ -14,28 +14,30 @@ import (
 )
 
 const (
-	Version                             = 1
-	MaxDocumentBytes              int64 = 4 << 20
-	MaxEgressRules                      = 1024
-	MaxEnforcementRules                 = 1024
-	MaxDetectionRules                   = 256
-	MaxDetectionExceptions              = 256
-	MaxExceptionReasonBytes             = 512
-	MaxFileIntegrityPaths               = 256
-	DefaultFileIntegrityHashBytes       = 16 << 20
-	MaxFileIntegrityHashBytes           = 1 << 30
-	DefaultFileIntegrityRescan          = time.Hour
-	MinFileIntegrityRescan              = time.Minute
-	MaxDetectionGroups                  = 16384
-	MaxThresholdWindow                  = time.Hour
-	MaxThresholdCount                   = 10000
-	MaxRuleListValues                   = 256
-	MaxDetectionMessageBytes            = 4096
-	MaxDetectionPathStemBytes           = 247
-	MaxDetectionSamples                 = 65536
-	MaxPolicySelectors                  = 4096
-	MaxDNSRules                         = 4096
-	MaxResolverHostnames                = 256
+	Version                       = 1
+	MaxDocumentBytes        int64 = 4 << 20
+	MaxEgressRules                = 1024
+	MaxEnforcementRules           = 1024
+	MaxDetectionRules             = 256
+	MaxDetectionExceptions        = 256
+	MaxExceptionReasonBytes       = 512
+	// MaxProgramNameBytes is the kernel's comm length without its NUL.
+	MaxProgramNameBytes           = 15
+	MaxFileIntegrityPaths         = 256
+	DefaultFileIntegrityHashBytes = 16 << 20
+	MaxFileIntegrityHashBytes     = 1 << 30
+	DefaultFileIntegrityRescan    = time.Hour
+	MinFileIntegrityRescan        = time.Minute
+	MaxDetectionGroups            = 16384
+	MaxThresholdWindow            = time.Hour
+	MaxThresholdCount             = 10000
+	MaxRuleListValues             = 256
+	MaxDetectionMessageBytes      = 4096
+	MaxDetectionPathStemBytes     = 247
+	MaxDetectionSamples           = 65536
+	MaxPolicySelectors            = 4096
+	MaxDNSRules                   = 4096
+	MaxResolverHostnames          = 256
 )
 
 var (
@@ -49,10 +51,12 @@ const (
 	ProfileBaseline = "baseline"
 	// ProfileRuntime adds runtime threat detections over security events.
 	ProfileRuntime = "runtime"
+	// ProfilePlatform adds exceptions for common platform agents.
+	ProfilePlatform = "platform"
 )
 
 // BuiltinProfiles lists every built-in detection profile.
-var BuiltinProfiles = []string{ProfileBaseline, ProfileRuntime}
+var BuiltinProfiles = []string{ProfileBaseline, ProfileRuntime, ProfilePlatform}
 
 type Duration struct {
 	time.Duration
@@ -293,18 +297,21 @@ type MITRE struct {
 }
 
 type DetectionMatch struct {
-	Actions             []string `yaml:"actions,omitempty"`
-	Directions          []string `yaml:"directions,omitempty"`
-	Transports          []string `yaml:"transports,omitempty"`
-	Protocols           []string `yaml:"protocols,omitempty"`
-	UIDs                []uint32 `yaml:"uids,omitempty"`
-	Domains             []string `yaml:"domains,omitempty"`
-	DomainSuffixes      []string `yaml:"domain_suffixes,omitempty"`
-	DestinationCIDRs    []string `yaml:"destination_cidrs,omitempty"`
-	Ports               []uint16 `yaml:"ports,omitempty"`
-	LocalPorts          []uint16 `yaml:"local_ports,omitempty"`
-	ExecutableGlobs     []string `yaml:"executable_globs,omitempty"`
-	CommandGlobs        []string `yaml:"command_globs,omitempty"`
+	Actions          []string `yaml:"actions,omitempty"`
+	Directions       []string `yaml:"directions,omitempty"`
+	Transports       []string `yaml:"transports,omitempty"`
+	Protocols        []string `yaml:"protocols,omitempty"`
+	UIDs             []uint32 `yaml:"uids,omitempty"`
+	Domains          []string `yaml:"domains,omitempty"`
+	DomainSuffixes   []string `yaml:"domain_suffixes,omitempty"`
+	DestinationCIDRs []string `yaml:"destination_cidrs,omitempty"`
+	Ports            []uint16 `yaml:"ports,omitempty"`
+	LocalPorts       []uint16 `yaml:"local_ports,omitempty"`
+	ExecutableGlobs  []string `yaml:"executable_globs,omitempty"`
+	CommandGlobs     []string `yaml:"command_globs,omitempty"`
+	// Programs are globs over the event-time kernel comm; valid only in
+	// detection exceptions, because any process can set its own comm.
+	Programs            []string `yaml:"programs,omitempty"`
 	FilePathGlobs       []string `yaml:"file_path_globs,omitempty"`
 	UnixPathGlobs       []string `yaml:"unix_path_globs,omitempty"`
 	FileAccess          []string `yaml:"file_access,omitempty"`
@@ -629,6 +636,9 @@ func (r DetectionRule) validate() error {
 	if err := r.Exclude.validate(); err != nil {
 		return fmt.Errorf("exclude: %w", err)
 	}
+	if err := rejectExceptionOnlySelectors(r.Match, r.Exclude); err != nil {
+		return err
+	}
 	if err := validateDetectionEventFields(r.Events, r.Match, r.Match); err != nil {
 		return fmt.Errorf("match: %w", err)
 	}
@@ -756,6 +766,7 @@ func (m DetectionMatch) validate() error {
 		"local ports":           len(m.LocalPorts),
 		"executable globs":      len(m.ExecutableGlobs),
 		"command globs":         len(m.CommandGlobs),
+		"programs":              len(m.Programs),
 		"file path globs":       len(m.FilePathGlobs),
 		"unix path globs":       len(m.UnixPathGlobs),
 		"file access":           len(m.FileAccess),
@@ -792,6 +803,15 @@ func (m DetectionMatch) validate() error {
 	for _, pattern := range m.CommandGlobs {
 		if _, err := filepath.Match(pattern, "probe"); err != nil {
 			return fmt.Errorf("invalid glob %q: %w", pattern, err)
+		}
+	}
+	for _, pattern := range m.Programs {
+		if _, err := filepath.Match(pattern, "probe"); err != nil {
+			return fmt.Errorf("invalid program glob %q: %w", pattern, err)
+		}
+		if !strings.ContainsAny(pattern, `*?[\`) && len(pattern) > MaxProgramNameBytes {
+			return fmt.Errorf("program %q is longer than the kernel's %d-byte comm and can never match; use a glob such as %q",
+				pattern, MaxProgramNameBytes, pattern[:MaxProgramNameBytes]+"*")
 		}
 	}
 	for _, pattern := range append(slices.Clone(m.ExecutableGlobs), m.FilePathGlobs...) {
@@ -847,11 +867,23 @@ func (m DetectionMatch) validate() error {
 	return nil
 }
 
+// rejectExceptionOnlySelectors refuses selectors that may narrow an exception
+// but must not decide whether a rule fires: a process chooses its own comm,
+// so a rule keyed on it would be trivially evaded.
+func rejectExceptionOnlySelectors(matches ...DetectionMatch) error {
+	for _, match := range matches {
+		if len(match.Programs) > 0 {
+			return fmt.Errorf("programs are valid only in detection exceptions")
+		}
+	}
+	return nil
+}
+
 // Empty reports whether the match sets no conditions and so matches every event.
 func (m DetectionMatch) Empty() bool {
 	return len(m.Actions)+len(m.Directions)+len(m.Transports)+len(m.Protocols)+
 		len(m.UIDs)+len(m.Domains)+len(m.DomainSuffixes)+len(m.DestinationCIDRs)+
-		len(m.Ports)+len(m.LocalPorts)+len(m.ExecutableGlobs)+len(m.CommandGlobs)+
+		len(m.Ports)+len(m.LocalPorts)+len(m.ExecutableGlobs)+len(m.CommandGlobs)+len(m.Programs)+
 		len(m.FilePathGlobs)+len(m.UnixPathGlobs)+
 		len(m.FileAccess)+len(m.CgroupPrefixes)+len(m.Services)+len(m.ContainerIDs)+
 		len(m.PodUIDs)+len(m.KubernetesNamespace)+len(m.KubernetesPods)+
@@ -882,6 +914,11 @@ func validateDetectionPathPattern(pattern string) error {
 func validateDetectionEventFields(events []string, match DetectionMatch, identityScopes ...DetectionMatch) error {
 	if len(match.UIDs) > 0 {
 		if err := validateDetectionProcessIdentity(events, "uids", identityScopes...); err != nil {
+			return err
+		}
+	}
+	if len(match.Programs) > 0 {
+		if err := validateDetectionProcessIdentity(events, "programs", identityScopes...); err != nil {
 			return err
 		}
 	}
