@@ -15,7 +15,10 @@ import (
 type attachmentFunctions struct {
 	attachCgroup     func(link.CgroupOptions) (io.Closer, error)
 	attachTracepoint func(string, string, *ebpf.Program) (io.Closer, error)
-	attachLSM        func(link.LSMOptions) (io.Closer, error)
+	// coverTracepointCPUs keeps an attached tracepoint program running on
+	// every CPU; see coverTracepointCPUs.
+	coverTracepointCPUs func(string, string) (io.Closer, error)
+	attachLSM           func(link.LSMOptions) (io.Closer, error)
 }
 
 func defaultAttachmentFunctions() attachmentFunctions {
@@ -25,6 +28,9 @@ func defaultAttachmentFunctions() attachmentFunctions {
 		},
 		attachTracepoint: func(category, name string, program *ebpf.Program) (io.Closer, error) {
 			return link.Tracepoint(category, name, program, nil)
+		},
+		coverTracepointCPUs: func(category, name string) (io.Closer, error) {
+			return coverTracepointCPUs(category, name)
 		},
 		attachLSM: func(opts link.LSMOptions) (io.Closer, error) {
 			return link.AttachLSM(opts)
@@ -162,6 +168,16 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 			return false, fmt.Errorf("attach %s tracepoint: %w", name, err)
 		}
 		links = append(links, lnk)
+		// Without this, Linux 7.0 kernels run the program only for syscalls
+		// made on the CPU that holds the link's perf event.
+		cover, err := functions.coverTracepointCPUs("syscalls", name)
+		if err != nil {
+			if isPermissionDenied(err) {
+				return false, fmt.Errorf("%w: open %s tracepoint perf events on every CPU requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %w", ErrInsufficientPrivileges, name, err)
+			}
+			return false, fmt.Errorf("open %s tracepoint perf events on every CPU: %w", name, err)
+		}
+		links = append(links, cover)
 		return true, nil
 	}
 	for _, spec := range []struct {

@@ -7,16 +7,121 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
 )
+
+// attachSyscallTracepointForIntegration attaches program the way the monitor
+// does, including the per-CPU perf events that keep it running on every CPU.
+func attachSyscallTracepointForIntegration(t *testing.T, name string, program *ebpf.Program) {
+	t.Helper()
+	functions := defaultAttachmentFunctions()
+	tracepoint, err := functions.attachTracepoint("syscalls", name, program)
+	if err != nil {
+		t.Fatalf("attach %s tracepoint: %v", name, err)
+	}
+	t.Cleanup(func() { _ = tracepoint.Close() })
+	cover, err := functions.coverTracepointCPUs("syscalls", name)
+	if err != nil {
+		t.Fatalf("cover %s tracepoint on every CPU: %v", name, err)
+	}
+	t.Cleanup(func() { _ = cover.Close() })
+}
+
+// TestSyscallTracepointRunsOnEveryCPUForIntegration makes the syscall on each
+// online CPU in turn. Linux 7.0 kernels skip syscall tracepoint programs on
+// CPUs without a perf event for the tracepoint, which a single tracepoint link
+// does not provide.
+func TestSyscallTracepointRunsOnEveryCPUForIntegration(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatalf("RemoveMemlock returned error: %v", err)
+	}
+	raw, err := os.ReadFile("/sys/devices/system/cpu/online")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpus, err := parseCPUList(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := loadTraceguard()
+	if err != nil {
+		t.Fatalf("loadTraceguard returned error: %v", err)
+	}
+	retainIntegrationProgram(spec, "trace_memfd_create")
+	var objects struct {
+		TraceMemfdCreate *ebpf.Program `ebpf:"trace_memfd_create"`
+		Events           *ebpf.Map     `ebpf:"events"`
+	}
+	if err := spec.LoadAndAssign(&objects, newCollectionOptions()); err != nil {
+		fatalVerifierError(t, "LoadAndAssign", err)
+	}
+	defer objects.TraceMemfdCreate.Close()
+	defer objects.Events.Close()
+	attachSyscallTracepointForIntegration(t, "sys_enter_memfd_create", objects.TraceMemfdCreate)
+	reader, err := ringbuf.NewReader(objects.Events)
+	if err != nil {
+		t.Fatalf("NewReader returned error: %v", err)
+	}
+	defer reader.Close()
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var original unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &original); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.SchedSetaffinity(0, &original) }()
+	want := make(map[string]int, len(cpus))
+	for _, cpu := range cpus {
+		if !original.IsSet(cpu) {
+			continue
+		}
+		var set unix.CPUSet
+		set.Set(cpu)
+		if err := unix.SchedSetaffinity(0, &set); err != nil {
+			t.Fatalf("pin to CPU %d: %v", cpu, err)
+		}
+		name := "traceguard-cpu-" + strconv.Itoa(cpu)
+		fd, err := unix.MemfdCreate(name, unix.MFD_CLOEXEC)
+		if err != nil {
+			t.Fatalf("memfd_create on CPU %d: %v", cpu, err)
+		}
+		_ = unix.Close(fd)
+		want[name] = cpu
+	}
+	if len(want) == 0 {
+		t.Skip("no online CPU is in this process's affinity mask")
+	}
+
+	reader.SetDeadline(time.Now().Add(2 * time.Second))
+	for len(want) > 0 {
+		record, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("no memfd_create event from CPUs %v before the deadline", want)
+			}
+			t.Fatalf("Read returned error: %v", err)
+		}
+		event, err := decodeEvent(record.RawSample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventMemfdCreate && event.PID == uint32(os.Getpid()) {
+			delete(want, event.Filename)
+		}
+	}
+}
 
 func TestMemfdCreateTracepointEmitsSecurityEventForIntegration(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -39,11 +144,7 @@ func TestMemfdCreateTracepointEmitsSecurityEventForIntegration(t *testing.T) {
 	}
 	defer objects.TraceMemfdCreate.Close()
 	defer objects.Events.Close()
-	tracepoint, err := link.Tracepoint("syscalls", "sys_enter_memfd_create", objects.TraceMemfdCreate, nil)
-	if err != nil {
-		t.Fatalf("attach tracepoint: %v", err)
-	}
-	defer tracepoint.Close()
+	attachSyscallTracepointForIntegration(t, "sys_enter_memfd_create", objects.TraceMemfdCreate)
 	reader, err := ringbuf.NewReader(objects.Events)
 	if err != nil {
 		t.Fatalf("NewReader returned error: %v", err)
@@ -100,11 +201,7 @@ func TestExecTracepointCapturesCommandLineForIntegration(t *testing.T) {
 	}
 	defer objects.TraceExecve.Close()
 	defer objects.Events.Close()
-	tracepoint, err := link.Tracepoint("syscalls", "sys_enter_execve", objects.TraceExecve, nil)
-	if err != nil {
-		t.Fatalf("attach tracepoint: %v", err)
-	}
-	defer tracepoint.Close()
+	attachSyscallTracepointForIntegration(t, "sys_enter_execve", objects.TraceExecve)
 	reader, err := ringbuf.NewReader(objects.Events)
 	if err != nil {
 		t.Fatalf("NewReader returned error: %v", err)
@@ -160,11 +257,7 @@ func TestUnlinkatTracepointEmitsFileChangeForIntegration(t *testing.T) {
 	}
 	defer objects.TraceUnlinkat.Close()
 	defer objects.Events.Close()
-	tracepoint, err := link.Tracepoint("syscalls", "sys_enter_unlinkat", objects.TraceUnlinkat, nil)
-	if err != nil {
-		t.Fatalf("attach tracepoint: %v", err)
-	}
-	defer tracepoint.Close()
+	attachSyscallTracepointForIntegration(t, "sys_enter_unlinkat", objects.TraceUnlinkat)
 	reader, err := ringbuf.NewReader(objects.Events)
 	if err != nil {
 		t.Fatalf("NewReader returned error: %v", err)
