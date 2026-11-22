@@ -528,12 +528,12 @@ func TestAttachMonitorProgramsRollsBackInReverseOrder(t *testing.T) {
 		},
 	}
 
-	links, err := attachMonitorPrograms("/sys/fs/cgroup", Options{}, monitorObjects{}, functions)
+	attached, err := attachMonitorPrograms("/sys/fs/cgroup", Options{}, monitorObjects{}, functions)
 	if err == nil || !strings.Contains(err.Error(), "attach failed") {
 		t.Fatalf("attachMonitorPrograms error = %v, want attach failure", err)
 	}
-	if links != nil {
-		t.Fatalf("links = %v, want nil", links)
+	if attached.links != nil || attached.cpuEvents != nil {
+		t.Fatalf("attachments = %+v, want none", attached)
 	}
 	if !slices.Equal(closed, []int{3, 2, 1}) {
 		t.Fatalf("close order = %v, want [3 2 1]", closed)

@@ -32,7 +32,9 @@ func attachSyscallTracepointForIntegration(t *testing.T, name string, program *e
 	if err != nil {
 		t.Fatalf("cover %s tracepoint on every CPU: %v", name, err)
 	}
-	t.Cleanup(func() { _ = cover.Close() })
+	if cover != nil {
+		t.Cleanup(func() { _ = cover.Close() })
+	}
 }
 
 // TestSyscallTracepointRunsOnEveryCPUForIntegration makes the syscall on each

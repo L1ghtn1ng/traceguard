@@ -7,26 +7,30 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-// Linux 7.0 kernels carrying the stable backport of "tracing: perf: Fix stale
-// head for perf syscall tracing" (upstream 2c2b322acdcc) return from
-// perf_syscall_enter when the current CPU has no perf event on the syscall
-// tracepoint, before the attached BPF program runs. That check only applies to
-// syscalls that read user memory, such as execve, openat, unlinkat and
-// memfd_create. A tracepoint link opens its perf event on a single CPU (cilium
-// uses CPU 0), so on those kernels the program sees only syscalls made on that
-// CPU. Mainline 7.1 and later run the BPF program before the check.
+// Kernels from 6.19 (which added copying of syscall user arguments to syscall
+// trace events) up to, but not including, 7.2 can carry the stable backport of
+// "tracing: perf: Fix stale head for perf syscall tracing" (upstream
+// 2c2b322acdcc). Ubuntu's 7.0 kernels do. With it, perf_syscall_enter returns
+// when the current CPU has no perf event on the syscall tracepoint, before the
+// attached BPF program runs. That check only applies to syscalls that read user
+// memory, such as execve, openat, unlinkat and memfd_create. A tracepoint link
+// opens its perf event on a single CPU (cilium uses CPU 0), so on those kernels
+// the program sees only syscalls made on that CPU. From 7.2 the kernel runs
+// the BPF program before the check.
 //
 // coverTracepointCPUs opens a counting perf event for the tracepoint on every
 // online CPU, so every CPU's list is non-empty and the program runs wherever
 // the syscall is made. The events never sample. TraceGuard's syscall programs
 // return 0, which makes the kernel skip perf output, so they cost no work per
-// syscall on any kernel. A CPU that comes online after the agent starts is not
-// covered until the next start.
+// syscall. They cost one descriptor per syscall tracepoint per online CPU. A
+// CPU that comes online after the agent starts is not covered until the next
+// start.
 func coverTracepointCPUs(category, name string) (tracepointCPUEvents, error) {
 	id, err := tracepointID(category, name)
 	if err != nil {
@@ -59,6 +63,21 @@ func coverTracepointCPUs(category, name string) (tracepointCPUEvents, error) {
 		events = append(events, fd)
 	}
 	return events, nil
+}
+
+// needsTracepointCPUCoverage reports whether the running kernel may skip
+// syscall tracepoint programs on CPUs without a perf event for the tracepoint.
+// A release that cannot be read or parsed is treated as affected.
+var needsTracepointCPUCoverage = sync.OnceValue(func() bool {
+	release, err := kernelRelease()
+	return err != nil || kernelMaySkipSyscallTracepointPrograms(release)
+})
+
+func kernelMaySkipSyscallTracepointPrograms(release string) bool {
+	if _, _, ok := parseKernelRelease(release); !ok {
+		return true
+	}
+	return isKernelAtLeast(release, 6, 19) && !isKernelAtLeast(release, 7, 2)
 }
 
 // tracepointCPUEvents holds the perf event descriptors coverTracepointCPUs opened.

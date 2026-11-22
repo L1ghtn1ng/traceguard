@@ -16,7 +16,8 @@ type attachmentFunctions struct {
 	attachCgroup     func(link.CgroupOptions) (io.Closer, error)
 	attachTracepoint func(string, string, *ebpf.Program) (io.Closer, error)
 	// coverTracepointCPUs keeps an attached tracepoint program running on
-	// every CPU; see coverTracepointCPUs.
+	// every CPU; see coverTracepointCPUs. It returns a nil closer when the
+	// kernel does not need it.
 	coverTracepointCPUs func(string, string) (io.Closer, error)
 	attachLSM           func(link.LSMOptions) (io.Closer, error)
 }
@@ -30,6 +31,9 @@ func defaultAttachmentFunctions() attachmentFunctions {
 			return link.Tracepoint(category, name, program, nil)
 		},
 		coverTracepointCPUs: func(category, name string) (io.Closer, error) {
+			if !needsTracepointCPUCoverage() {
+				return nil, nil
+			}
 			return coverTracepointCPUs(category, name)
 		},
 		attachLSM: func(opts link.LSMOptions) (io.Closer, error) {
@@ -105,11 +109,22 @@ func attachOptionalPrograms(cgroupPath string, opts Options, programs optionalPr
 	return links, state
 }
 
-func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjects, functions attachmentFunctions) ([]io.Closer, error) {
+// monitorAttachments holds what attachMonitorPrograms opened: a closer for
+// each attached program, and the perf events that keep syscall tracepoint
+// programs running on every CPU. The perf events attach no program.
+type monitorAttachments struct {
+	links     []io.Closer
+	cpuEvents []io.Closer
+}
+
+func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjects, functions attachmentFunctions) (monitorAttachments, error) {
 	links := make([]io.Closer, 0, 16)
+	var cpuEvents []io.Closer
+	// opened records every closer in the order it was opened, for rollback.
+	opened := make([]io.Closer, 0, 16)
 	rollback := func(cause error) error {
 		errs := []error{cause}
-		for _, link := range slices.Backward(links) {
+		for _, link := range slices.Backward(opened) {
 			if link != nil {
 				errs = append(errs, link.Close())
 			}
@@ -127,6 +142,7 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 			return fmt.Errorf("attach %s program: %w", name, err)
 		}
 		links = append(links, lnk)
+		opened = append(opened, lnk)
 		return nil
 	}
 
@@ -147,7 +163,7 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 		{objects.TracePostBind6, ebpf.AttachCGroupInet6PostBind, "post_bind6"},
 	} {
 		if err := attachCgroup(spec.program, spec.attach, spec.name); err != nil {
-			return nil, rollback(err)
+			return monitorAttachments{}, rollback(err)
 		}
 	}
 
@@ -168,16 +184,23 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 			return false, fmt.Errorf("attach %s tracepoint: %w", name, err)
 		}
 		links = append(links, lnk)
-		// Without this, Linux 7.0 kernels run the program only for syscalls
-		// made on the CPU that holds the link's perf event.
+		opened = append(opened, lnk)
+		// Without this, some 6.19 to 7.1 kernels run the program only for
+		// syscalls made on the CPU that holds the link's perf event.
 		cover, err := functions.coverTracepointCPUs("syscalls", name)
 		if err != nil {
 			if isPermissionDenied(err) {
 				return false, fmt.Errorf("%w: open %s tracepoint perf events on every CPU requires tracepoint perf-event access; grant CAP_PERFMON (or CAP_SYS_ADMIN on older kernels) or lower kernel.perf_event_paranoid: %w", ErrInsufficientPrivileges, name, err)
 			}
+			if errors.Is(err, unix.EMFILE) {
+				return false, fmt.Errorf("open %s tracepoint perf events on every CPU: this kernel needs one descriptor per syscall tracepoint per online CPU; raise the open file limit (LimitNOFILE): %w", name, err)
+			}
 			return false, fmt.Errorf("open %s tracepoint perf events on every CPU: %w", name, err)
 		}
-		links = append(links, cover)
+		if cover != nil {
+			cpuEvents = append(cpuEvents, cover)
+			opened = append(opened, cover)
+		}
 		return true, nil
 	}
 	for _, spec := range []struct {
@@ -188,21 +211,21 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 		{"sys_enter_execveat", objects.TraceExecveat},
 	} {
 		if _, err := attachTracepoint(spec.name, spec.program, false); err != nil {
-			return nil, rollback(err)
+			return monitorAttachments{}, rollback(err)
 		}
 	}
 
 	for _, tracepoint := range objects.tracepoints() {
 		if !opts.SecurityEvents {
 			if err := removePinnedLink(opts, tracepoint.tracepoint); err != nil {
-				return nil, rollback(err)
+				return monitorAttachments{}, rollback(err)
 			}
 			continue
 		}
 		// Each syscall is optional: some architectures lack one, and the
 		// others still attach.
 		if _, err := attachTracepoint(tracepoint.tracepoint, tracepoint.handle, true); err != nil {
-			return nil, rollback(err)
+			return monitorAttachments{}, rollback(err)
 		}
 	}
 
@@ -219,19 +242,19 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 		} {
 			ok, err := attachTracepoint(spec.name, spec.program, true)
 			if err != nil {
-				return nil, rollback(err)
+				return monitorAttachments{}, rollback(err)
 			}
 			if ok {
 				attached++
 			}
 		}
 		if attached == 0 {
-			return nil, rollback(errors.New("file audit enabled but no open-style syscall tracepoints could be attached"))
+			return monitorAttachments{}, rollback(errors.New("file audit enabled but no open-style syscall tracepoints could be attached"))
 		}
 	} else {
 		for _, name := range []string{"sys_enter_open", "sys_enter_openat", "sys_enter_openat2", "sys_enter_creat"} {
 			if err := removePinnedLink(opts, name); err != nil {
-				return nil, rollback(err)
+				return monitorAttachments{}, rollback(err)
 			}
 		}
 	}
@@ -239,9 +262,9 @@ func attachMonitorPrograms(cgroupPath string, opts Options, objects monitorObjec
 	// with open auditing off.
 	for _, tracepoint := range objects.fileChangeTracepoints() {
 		if _, err := attachTracepoint(tracepoint.tracepoint, tracepoint.handle, true); err != nil {
-			return nil, rollback(err)
+			return monitorAttachments{}, rollback(err)
 		}
 	}
 
-	return links, nil
+	return monitorAttachments{links: links, cpuEvents: cpuEvents}, nil
 }
