@@ -138,7 +138,7 @@ func (f *CgroupFreezer) Check(id uint64) (string, error) {
 // Freeze freezes the cgroup with the given ID and returns its path, and
 // whether this call froze it. A cgroup that something else had already
 // frozen is left as it is, so thawing later cannot undo that freeze.
-func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
+func (f *CgroupFreezer) Freeze(id uint64, record func(path string) error) (string, bool, error) {
 	path, err := f.Check(id)
 	if err != nil {
 		return "", false, err
@@ -157,6 +157,11 @@ func (f *CgroupFreezer) Freeze(id uint64) (string, bool, error) {
 	defer func() { _ = directory.Close() }()
 	if state, err := readFreeze(directory); err == nil && state == "1" {
 		return path, false, nil
+	}
+	if record != nil {
+		if err := record(path); err != nil {
+			return "", false, err
+		}
 	}
 	if err := writeFreeze(directory, "1"); err != nil {
 		return "", false, fmt.Errorf("freeze cgroup %s: %w", path, err)
@@ -181,7 +186,6 @@ func freezeRefusal(target cgroupinfo.Entry, self string) string {
 // Thaw unfreezes the cgroup at path if it is still the cgroup with id. A
 // cgroup that no longer exists, or whose path now names a different cgroup,
 // was thawed when it was removed.
-
 func (f *CgroupFreezer) Thaw(id uint64, path string) error {
 	directory, same, err := f.openCgroup(path, id)
 	if errors.Is(err, fs.ErrNotExist) {

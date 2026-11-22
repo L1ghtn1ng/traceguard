@@ -57,8 +57,10 @@ type Freezer interface {
 	// succeed.
 	Check(id uint64) (string, error)
 	// Freeze freezes the cgroup and returns its path, and false when it was
-	// already frozen, in which case it must not be thawed.
-	Freeze(id uint64) (string, bool, error)
+	// already frozen, in which case it must not be thawed. When record is not
+	// nil, Freeze calls it with the path once it has found the cgroup not
+	// frozen and before freezing it; an error from record stops the freeze.
+	Freeze(id uint64, record func(path string) error) (string, bool, error)
 	// Thaw unfreezes the cgroup at path if it is still the cgroup with id.
 	Thaw(id uint64, path string) error
 }
@@ -372,17 +374,16 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 	)
 	froze := false
 	if r.mode == ModeEnforce {
+		var record func(string) error
 		if r.durableFreeze {
-			if err := r.recordBeforeFreezeLocked(id, until); err != nil {
-				return r.failed(response, alert, target, err)
-			}
+			record = r.recordBeforeFreeze(id, until)
 		}
+		path, froze, err = r.freezer.Freeze(id, record)
 		recorded := r.pending != nil
-		path, froze, err = r.freezer.Freeze(id)
 		r.pending = nil
-		if recorded && (err != nil || !froze) {
-			// No freeze of TraceGuard's: drop the intent from disk too, so a
-			// later restart cannot thaw a freeze someone else made.
+		if recorded && err != nil {
+			// The freeze failed after its record was saved: drop the record too,
+			// so a later restart cannot thaw a freeze someone else makes.
 			_ = r.persistLocked()
 		}
 	} else {
@@ -578,23 +579,20 @@ func cgroupID(fields map[string]any) (uint64, bool) {
 	return 0, false
 }
 
-// recordBeforeFreezeLocked saves a recovery record for a cgroup about to be
-// frozen, so a crash between freezing and saving can never leave it frozen
-// with nothing to thaw it. A cgroup already frozen by something else gets
-// no record, since TraceGuard must not thaw it.
-func (r *Responder) recordBeforeFreezeLocked(id uint64, until time.Time) error {
-	path, err := r.freezer.Check(id)
-	if err != nil {
-		return err
+// recordBeforeFreeze returns the Freeze callback that saves a recovery record
+// for a cgroup about to be frozen, so a crash between freezing and saving can
+// never leave it frozen with nothing to thaw it. Freeze calls it only after
+// finding the cgroup not frozen, so a freeze made by something else never
+// gets a record, and a restart never thaws it. A crash after the record but
+// before the freeze leaves a record of an unfrozen cgroup, whose thaw at the
+// next start changes nothing.
+func (r *Responder) recordBeforeFreeze(id uint64, until time.Time) func(string) error {
+	return func(path string) error {
+		r.pending = &frozenCgroup{CgroupID: id, Path: path, Until: until}
+		if err := r.persistLocked(); err != nil {
+			r.pending = nil
+			return fmt.Errorf("refusing to freeze: its recovery record could not be saved: %w", err)
+		}
+		return nil
 	}
-	// Recorded even when the cgroup looks frozen already: something else may
-	// thaw it before Freeze runs, and then this run freezes it. If Freeze
-	// finds it frozen, the caller drops the record, so a restart never thaws
-	// a freeze TraceGuard did not make.
-	r.pending = &frozenCgroup{CgroupID: id, Path: path, Until: until}
-	if err := r.persistLocked(); err != nil {
-		r.pending = nil
-		return fmt.Errorf("refusing to freeze: its recovery record could not be saved: %w", err)
-	}
-	return nil
 }

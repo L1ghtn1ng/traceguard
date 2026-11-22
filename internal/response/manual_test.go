@@ -173,8 +173,8 @@ func TestAManualFreezeNeedsRecoveryState(t *testing.T) {
 	if err := unsaved.responder.Apply("cmd", policy.ResponseFreezeCgroup, "42", time.Hour); err == nil || !strings.Contains(err.Error(), "could not be saved") {
 		t.Fatalf("Apply freeze with unsaved state = %v, want it refused before freezing", err)
 	}
-	if unsaved.freezer.freezeN != 0 {
-		t.Fatal("froze before its recovery record was saved")
+	if len(unsaved.freezer.frozen) != 0 {
+		t.Fatal("froze though its recovery record could not be saved")
 	}
 	if len(unsaved.freezer.frozen) != 0 || unsaved.responder.Active() != 0 {
 		t.Fatal("the unrecoverable freeze stayed in force")
@@ -203,7 +203,7 @@ func TestTheRecoveryRecordExistsBeforeTheFreeze(t *testing.T) {
 	options := stateful(t)
 	h := newHarness(ModeEnforce, options)
 	recorded := false
-	h.freezer.onFreeze = func(uint64) {
+	h.freezer.onWrite = func() {
 		// A crash here must leave a record the next start can thaw.
 		payload, err := os.ReadFile(options.StatePath)
 		var state stateFile
