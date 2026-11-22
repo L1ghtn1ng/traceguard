@@ -123,10 +123,18 @@ For central policy, also set `TRACEGUARD_POLICY_CLIENT_CERT` and
 
 ## 3. Restart and check
 
+Run `-doctor` with the service's settings, because it does not read the env
+file itself. `CREDENTIALS_DIRECTORY` stands in for the systemd credential, and
+only matters if you set the token up as one:
+
 ```bash
-sudo traceguard -doctor     # checks the settings and file paths; it does not contact the manager
+sudo env CREDENTIALS_DIRECTORY=/etc/traceguard/credentials \
+  sh -c 'set -a; . /etc/traceguard/traceguard.env; exec traceguard -doctor'
 sudo systemctl restart traceguard
 ```
+
+`-doctor` checks the settings, certificates and file paths, but does not
+contact the manager.
 
 In the enrol dialog, *Waiting for the agent to connect* changes once the first
 heartbeat arrives, and **Fleet** then lists the agent as online. If it stays
@@ -231,7 +239,9 @@ TRACEGUARD_RESPONSE_MODE=enforce
 ## Removing an agent
 
 Stop sending first: clear `TRACEGUARD_EVENT_EXPORT_URL`,
-`TRACEGUARD_POLICY_URL` and `TRACEGUARD_COMMAND_URL`, then restart the agent.
+`TRACEGUARD_POLICY_URL`, `TRACEGUARD_POLICY_SIGNING_KEY` and
+`TRACEGUARD_COMMAND_URL`, then restart the agent. The signing key must go too,
+because the agent refuses to start with a signing key and no policy URL.
 Then disable the agent on its page in the manager, or delete it. A disabled
 agent's token is refused at once, and an agent still using it gets `401`
 replies and keeps its alerts in the spool. Deleting an agent also deletes all
