@@ -1,0 +1,47 @@
+name: zz-diag
+
+# Temporary diagnostics for the ubuntu-26.04 eBPF tracepoint failures. Not for merge.
+
+on:
+  push:
+    branches: ["fix/ebpf-tracepoints-ubuntu-2604"]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang llvm
+      - name: Environment
+        run: |
+          uname -a
+          clang --version
+          go version
+          ls /usr/bin | grep -E '^(clang|llvm-objdump)' || true
+      - run: go generate ./internal/ebpf
+      - name: Disassemble memfd program
+        run: |
+          objdump=$(command -v llvm-objdump || ls /usr/bin/llvm-objdump-* | head -n1)
+          "$objdump" -d --no-show-raw-insn -j tracepoint/syscalls/sys_enter_memfd_create internal/ebpf/traceguard_bpfel.o | head -n 200
+      - name: Integration diagnostics
+        run: |
+          sudo env "GOMODCACHE=/tmp/diag/gomod" "GOCACHE=/tmp/diag/gocache" \
+            "$(command -v go)" test -count=1 -v -tags ebpfintegration \
+            -run 'ZZDiag|TestMemfdCreateTracepoint|TestExecTracepoint|TestUnlinkatTracepoint' ./internal/ebpf
