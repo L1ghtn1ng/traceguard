@@ -250,6 +250,16 @@ func (r *Registry) IncEventExport(status string) {
 	r.incCounter(metricKey1("traceguard_event_export_total", "status", status))
 }
 
+// AddEventExport adds count records to an export status counter.
+func (r *Registry) AddEventExport(status string, count int) {
+	if count <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counters[metricKey1("traceguard_event_export_total", "status", status)] += int64(count)
+}
+
 func (r *Registry) IncEventSyslog(status string) {
 	r.incCounter(metricKey1("traceguard_event_syslog_total", "status", status))
 }
@@ -366,4 +376,39 @@ func (r *Registry) Healthy() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.unhealthy) == 0
+}
+
+// EventExportStatus summarizes HTTPS export health for heartbeats, so a
+// collector can tell when an agent is losing events.
+type EventExportStatus struct {
+	// Dropped counts routine records lost: dropped because the queue was
+	// full, or in a batch that could be neither sent nor spooled.
+	Dropped int64
+	// DroppedPriority counts alerts and other priority records lost the
+	// same ways, or because the queue and spill were both full.
+	DroppedPriority int64
+	// Rejected counts batches the collector refused outright.
+	Rejected   int64
+	SpoolFiles int64
+	QueueDepth int64
+	// LastError and LastSuccess are Unix seconds, or 0 when never.
+	LastError   int64
+	LastSuccess int64
+}
+
+func (r *Registry) EventExportStatus() EventExportStatus {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := func(status string) int64 {
+		return r.counters[metricKey1("traceguard_event_export_total", "status", status)]
+	}
+	return EventExportStatus{
+		Dropped:         count("dropped") + count("lost"),
+		DroppedPriority: count("dropped_priority") + count("lost_priority"),
+		Rejected:        count("rejected"),
+		SpoolFiles:      r.gauges["traceguard_event_export_spool_files"],
+		QueueDepth:      r.gauges["traceguard_event_export_queue_depth"],
+		LastError:       r.gauges["traceguard_event_export_last_error_timestamp_seconds"],
+		LastSuccess:     r.gauges["traceguard_event_export_last_success_timestamp_seconds"],
+	}
 }

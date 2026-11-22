@@ -10,6 +10,9 @@ import (
 const (
 	MaxResponses        = 64
 	MaxResponseDuration = 24 * time.Hour
+	// ReservedResponseID owns actions started by manager commands, so no
+	// policy response may use it.
+	ReservedResponseID = "manager-command"
 )
 
 // Response actions. Both are reversible: each lasts for its duration and is
@@ -57,6 +60,9 @@ func validateResponses(responses []Response) error {
 	for index, response := range responses {
 		if err := validateRuleID(response.ID); err != nil {
 			return fmt.Errorf("response %d: %w", index, err)
+		}
+		if response.ID == ReservedResponseID {
+			return fmt.Errorf("response %d: id %q is reserved for manager commands", index, ReservedResponseID)
 		}
 		if _, exists := ids[response.ID]; exists {
 			return fmt.Errorf("duplicate response id %q", response.ID)

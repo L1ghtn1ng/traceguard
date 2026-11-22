@@ -988,3 +988,35 @@ func TestParseResponseMode(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRefusesTheRunCounterPaths(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	for _, args := range [][]string{
+		{"-response-state-path", "/var/lib/traceguard/run-sequence"},
+		{"-response-state-path", "/var/lib/traceguard/run-sequence.lock"},
+		{"-policy-cache-path", "/var/lib/traceguard/./run-sequence"},
+		{"-log-path", "/var/lib/traceguard/run-sequence"},
+		{"-event-archive-path", "/var/lib/traceguard/run-sequence.lock"},
+	} {
+		os.Args = append([]string{"traceguard"}, args...)
+		clearPolicyEnv(t)
+		if _, err := Parse(); err == nil || !strings.Contains(err.Error(), "run counter") {
+			t.Fatalf("Parse(%v) error = %v, want the run counter refused", args, err)
+		}
+	}
+}
+
+func TestEmergencyModeStartsDespiteARunCounterPath(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	os.Args = []string{"traceguard", "-emergency-allow", "-log-path", "/var/lib/traceguard/run-sequence"}
+	clearPolicyEnv(t)
+	cfg, err := Parse()
+	if err != nil {
+		t.Fatalf("Parse in emergency mode: %v", err)
+	}
+	if !cfg.SkipRunCounter {
+		t.Fatal("SkipRunCounter = false, want the counter left alone")
+	}
+}

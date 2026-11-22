@@ -334,3 +334,76 @@ func response(status int, body string, headers map[string]string) *http.Response
 		Body:       io.NopCloser(bytes.NewBufferString(body)),
 	}
 }
+
+func TestManagerReportsRemoteDigest(t *testing.T) {
+	t.Parallel()
+	temp := t.TempDir()
+	cachePath := filepath.Join(temp, "cache.yaml")
+	manager, err := NewManager(Config{URL: "https://policy.example/v1", CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const body = "version: 1\ndns:\n  block: [remote.example]\n"
+	notModified := false
+	manager.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if notModified {
+			return response(http.StatusNotModified, "", nil), nil
+		}
+		return response(http.StatusOK, body, map[string]string{"ETag": `"v1"`}), nil
+	})
+	want := payloadDigest([]byte(body))
+	_, metadata, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.RemoteDigest != want {
+		t.Fatalf("load digest = %q, want %q", metadata.RemoteDigest, want)
+	}
+	// Nothing is reported as in force until the caller applied it.
+	if manager.RemoteDigest() != "" {
+		t.Fatal("digest published before the bundle was applied")
+	}
+	manager.SetAppliedDigest(metadata.RemoteDigest)
+	if got := manager.RemoteDigest(); got != want {
+		t.Fatalf("applied digest = %q, want %q", got, want)
+	}
+	notModified = true
+	if _, metadata, err = manager.Load(context.Background()); err != nil || metadata.RemoteDigest != want {
+		t.Fatalf("digest after 304 = %q, %v; want %q", metadata.RemoteDigest, err, want)
+	}
+
+	// A fresh start that can only read the cache reports the cache's digest.
+	restarted, err := NewManager(Config{URL: "https://policy.example/v1", CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusServiceUnavailable, "", nil), nil
+	})
+	if _, metadata, err = restarted.Load(context.Background()); err != nil || metadata.RemoteDigest != want {
+		t.Fatalf("digest from cache = %q, %v; want %q", metadata.RemoteDigest, err, want)
+	}
+}
+
+func TestCacheTouchedOnlyWhenTheCacheIsUsed(t *testing.T) {
+	t.Parallel()
+	manager, err := NewManager(Config{URL: "https://policy.example/v1", CachePath: filepath.Join(t.TempDir(), "cache.yaml")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := http.StatusOK
+	manager.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if reply == http.StatusNotModified {
+			return response(http.StatusNotModified, "", nil), nil
+		}
+		return response(http.StatusOK, "version: 1\n", map[string]string{"ETag": `"v1"`}), nil
+	})
+	_, metadata, err := manager.Load(context.Background())
+	if err != nil || !metadata.CacheTouched {
+		t.Fatalf("fetch: touched %t, %v; want the cache written", metadata.CacheTouched, err)
+	}
+	reply = http.StatusNotModified
+	if _, metadata, err = manager.Load(context.Background()); err != nil || metadata.CacheTouched {
+		t.Fatalf("304: touched %t, %v; want the cache untouched", metadata.CacheTouched, err)
+	}
+}

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/L1ghtn1ng/traceguard/internal/runid"
 )
 
 const (
@@ -42,6 +44,10 @@ const (
 	maxRingBufferSize     = 1 << 30
 )
 
+// DefaultCommandActions lists every manager command action, accepted
+// unless -command-actions narrows them.
+var DefaultCommandActions = []string{"block_peer", "freeze_cgroup", "lift_response", "refresh_policy"}
+
 type Config struct {
 	Block                        bool
 	DryRun                       bool
@@ -67,6 +73,7 @@ type Config struct {
 	EventExportAuthorization     string
 	EventExportAuthorizationFile string
 	EventExportSpool             bool
+	EventExportEvents            string
 	EventExportCAPath            string
 	EventExportClientCert        string
 	EventExportClientKey         string
@@ -76,6 +83,8 @@ type Config struct {
 	EventSyslogTimeout           time.Duration
 	EventSyslogCAPath            string
 	EventSchema                  string
+	CommandURL                   string
+	CommandActions               []string
 	ResponseMode                 string
 	ResponseStatePath            string
 	ProcessCacheTTL              time.Duration
@@ -101,6 +110,10 @@ type Config struct {
 	PrintVersion                 bool
 	Doctor                       bool
 	ReplayPath                   string
+
+	// SkipRunCounter is set when emergency mode runs with a file configured
+	// at the run counter's path, so the counter leaves that file alone.
+	SkipRunCounter bool
 }
 
 func Parse() (Config, error) {
@@ -217,6 +230,9 @@ func Parse() (Config, error) {
 	fs.StringVar(&cfg.EventExportAuthorization, "event-export-authorization", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION", ""), "optional Authorization header value for HTTPS event export, for example 'Bearer token'; prefer TRACEGUARD_EVENT_EXPORT_AUTHORIZATION, as command-line values are visible in process listings")
 	fs.StringVar(&cfg.EventExportAuthorizationFile, "event-export-authorization-file", envString("TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE", ""), "absolute path to a root-only file, such as ${CREDENTIALS_DIRECTORY}/event-export-authorization, holding the Authorization header value for HTTPS event export")
 	fs.BoolVar(&cfg.EventExportSpool, "event-export-spool", exportSpoolDefault, "durably spool failed HTTPS export batches to disk for replay")
+	fs.StringVar(&cfg.EventExportEvents, "event-export-events", envString("TRACEGUARD_EVENT_EXPORT_EVENTS", "all"), "what HTTPS event export sends: all, or alerts for detection alerts, blocks, responses, commands, errors, heartbeats and lifecycle records only")
+	fs.StringVar(&cfg.CommandURL, "command-url", envString("TRACEGUARD_COMMAND_URL", ""), "HTTPS URL to long-poll for manager commands, on the event export host and using its credentials; empty disables commands")
+	commandActions := fs.String("command-actions", envString("TRACEGUARD_COMMAND_ACTIONS", strings.Join(DefaultCommandActions, ",")), "comma-separated manager command actions to accept: "+strings.Join(DefaultCommandActions, ", "))
 	fs.StringVar(&cfg.EventExportCAPath, "event-export-ca-path", envString("TRACEGUARD_EVENT_EXPORT_CA_PATH", ""), "path to an optional CA bundle for the HTTPS event export endpoint")
 	fs.StringVar(&cfg.EventExportClientCert, "event-export-client-cert", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_CERT", ""), "path to an optional client certificate for HTTPS event export")
 	fs.StringVar(&cfg.EventExportClientKey, "event-export-client-key", envString("TRACEGUARD_EVENT_EXPORT_CLIENT_KEY", ""), "path to an optional client key for HTTPS event export")
@@ -258,6 +274,11 @@ func Parse() (Config, error) {
 	if fs.NArg() > 0 {
 		return Config{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), ", "))
 	}
+	actions, err := parseCommandActions(*commandActions)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.CommandActions = actions
 	normalizeKubernetesConfig(&cfg)
 	if cfg.PrintVersion || cfg.Doctor || cfg.Unpin {
 		return cfg, nil
@@ -319,6 +340,25 @@ func Parse() (Config, error) {
 	}
 	if cfg.ResponseStatePath != "" && !filepath.IsAbs(cfg.ResponseStatePath) {
 		return Config{}, errors.New("response-state-path must be an absolute path")
+	}
+	// The run counter's files are TraceGuard's own; another file there would
+	// be overwritten by, or overwrite, the counter.
+	written := []string{cfg.ResponseStatePath, cfg.ResponseStatePath + ".commands.json", cfg.LogPath, cfg.EventArchivePath}
+	if !cfg.EmergencyAllow {
+		// Emergency mode reads no policy cache, and must still be able to
+		// clear a pinned policy whatever the cache path says.
+		written = append(written, cfg.PolicyCachePath)
+	}
+	for _, path := range written {
+		if path != "" && runid.Reserved(path) {
+			if cfg.EmergencyAllow {
+				// Nothing may stop emergency mode clearing a pinned policy:
+				// this run keeps no count instead of writing over the file.
+				cfg.SkipRunCounter = true
+				continue
+			}
+			return Config{}, fmt.Errorf("%s is TraceGuard's run counter; choose another path", path)
+		}
 	}
 	if err := resolveAuthorizationFile("policy-authorization", cfg.PolicyAuthorization, &cfg.PolicyAuthorizationFile); err != nil {
 		return Config{}, err
@@ -382,6 +422,22 @@ func Parse() (Config, error) {
 			return Config{}, errors.New("event-export-client-cert and event-export-client-key must be set together")
 		}
 	}
+	cfg.EventExportEvents = strings.ToLower(strings.TrimSpace(cfg.EventExportEvents))
+	switch cfg.EventExportEvents {
+	case "":
+		cfg.EventExportEvents = "all"
+	case "all", "alerts":
+	default:
+		return Config{}, errors.New("event-export-events must be all or alerts")
+	}
+	if err := validateCommandURL(cfg.CommandURL, cfg.EventExportURL); err != nil {
+		return Config{}, err
+	}
+	if strings.TrimSpace(cfg.CommandURL) != "" && strings.TrimSpace(cfg.ResponseStatePath) == "" {
+		// The command journal lives beside it; without one a restart could run a command twice.
+		return Config{}, errors.New("command-url requires response-state-path, beside which the command journal is kept")
+	}
+	cfg.CommandURL = strings.TrimSpace(cfg.CommandURL)
 	if cfg.EventSyslogURL != "" {
 		if err := validateSyslogConfig(cfg); err != nil {
 			return Config{}, err

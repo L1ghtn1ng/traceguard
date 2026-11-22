@@ -2,6 +2,29 @@
 
 All notable changes to TraceGuard are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added `-event-export-events` / `TRACEGUARD_EVENT_EXPORT_EVENTS`. `alerts` sends only detection alerts, enforcement blocks and would-blocks, responses, manager commands, errors, heartbeats, and the `agent stopping` record over HTTPS export; the default, `all`, sends every record.
+- Added a priority export queue for those records, drained before routine telemetry. When the export backs up, routine telemetry is dropped first and priority records are written straight to the spool; priority records lost because the spool is off or full are counted as `traceguard_event_export_total{status="dropped_priority"}`. Previously one full queue dropped alerts and telemetry alike.
+- Added manager commands, off unless `-command-url` / `TRACEGUARD_COMMAND_URL` is set: the agent long-polls the URL, on the event export host with the event export credentials, and runs `block_peer`, `freeze_cgroup`, `lift_response`, and `refresh_policy` commands that `-command-actions` / `TRACEGUARD_COMMAND_ACTIONS` allow. Started actions follow `-response-mode` and the response safety checks, are owned by the reserved response ID `manager-command`, and survive policy changes. Each command runs at most once, is recorded, and has its result reported back.
+- Added an `agent stopping` record (`event: agent_stopping`, with `reason` `signal`, `error`, or `exited`) as the last record before the export flushes at shutdown.
+- Added `run_id`, random per process start, `run_seq`, a run counter kept in `/var/lib/traceguard/run-sequence`, and `install_id`, which names that counter file, to heartbeats and the `agent stopping` record, so a collector can tell a restart from records of one run that arrive out of order, an older run from a newer one, and a counter that started again from an old one.
+- HTTPS export batches carry a `TraceGuard-Delivery` header: `live` for a batch sent straight from the running process, which holds only that process's records, and `replay` for a batch resent from the spool, which may be from any earlier run; and a `TraceGuard-Run` header with the sending process's `run_id`.
+- Added `agent_version`, `kernel_release`, `os_name`, `response_mode`, `commands_enabled`, `policy_remote_sha256` (the SHA-256 of the remote policy document in use), export health (`export_dropped_records`, `export_dropped_alerts`, `export_rejected_batches`, `export_spool_batches`, `export_queue_depth`), and up to 64 `active_responses` to the heartbeat.
+- Response records now carry the `alert_id` of the alert that caused them, or `command_id` for command actions.
+- Added `traceguard_event_export_total{status="lost"}` and `{status="lost_priority"}` for records in batches that could be neither sent nor spooled. Previously these were counted only as one `error` per batch.
+
+### Changed
+
+- HTTPS export no longer retries a batch the collector refused with `400`, `413`, `415`, or `422`: a spooled batch is moved to `rejected/` beneath the spool directory (at most 100 files and 64 MiB) and replay continues, where before one such batch blocked every newer spooled batch.
+- With the spool on, a `429` or `503` export reply's `Retry-After`, up to 10 minutes, now pauses sending and replay.
+- Policy `responses` may no longer use the ID `manager-command`, which is reserved for manager commands.
+- Spool replay no longer holds the spool lock while a batch is being sent, and a rejected batch that cannot be moved aside is deleted rather than retried.
+- A batch that mixes priority and routine records is never larger than 50 records.
+- The heartbeat's `policy_remote_sha256` is published only once the remote document has been applied, not when it is fetched.
+
 ## [1.8.0] - 2026-10-18
 
 ### Added

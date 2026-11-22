@@ -374,6 +374,119 @@ sudo ./traceguard \
   -event-export-client-key /etc/traceguard/siem-client.key
 ```
 
+Limit HTTPS export to the records someone may need to act on with
+`-event-export-events alerts` / `TRACEGUARD_EVENT_EXPORT_EVENTS=alerts`:
+detection alerts, enforcement blocks and would-blocks, responses, manager
+commands, errors, heartbeats, and the `agent stopping` record. The default,
+`all`, sends every record, as before. Batches already in the spool when the setting
+changes are sent as they were recorded. Either way, these priority records have
+their own export queue that is drained first. When a slow collector backs both
+queues up, routine telemetry is dropped first and priority records are written
+straight to the spool; a priority record is lost only when the spool is off or
+full, and is then counted as `traceguard_event_export_total{status="dropped_priority"}`.
+
+A collector reply of `400`, `413`, `415`, or `422` means the batch itself was
+refused, so it is not retried (unless the reply carries `Retry-After`): a spooled batch is moved to
+`/var/lib/traceguard/export-spool/rejected/` (at most 100 files and 64 MiB,
+after which further rejected batches are deleted) and replay carries on with the
+next one. Every other failure, including `401`, `403`, and `429`, is retried.
+With the spool on, a `429` or `503` reply's `Retry-After`, up to 10 minutes,
+pauses sending and replay; batches made meanwhile are spooled. Replay sends
+without holding the spool, so priority records can still be spooled during a slow
+replay. Records lost because a batch could be neither sent nor spooled count
+towards `traceguard_event_export_total{status="lost"}` and `lost_priority`, and
+towards the heartbeat's `export_dropped_records` and `export_dropped_alerts`.
+
+### Sending events to TraceGuard Manager
+
+TraceGuard Manager is a
+fleet console that receives TraceGuard's HTTPS export. Each agent gets a token
+from the manager, which shows the settings to add:
+
+```bash
+# /etc/traceguard/traceguard.env
+TRACEGUARD_EVENT_EXPORT_URL=https://manager.example/api/v1/events
+TRACEGUARD_EVENT_EXPORT_AUTHORIZATION=Bearer <agent token>
+TRACEGUARD_EVENT_EXPORT_EVENTS=alerts
+TRACEGUARD_EVENT_SCHEMA=traceguard
+```
+
+The manager reads the TraceGuard format only, so keep `TRACEGUARD_EVENT_SCHEMA`
+at `traceguard`. Heartbeats tell it the agent version, kernel and OS, the
+response mode, the active responses, the remote policy digest, and whether the
+export is dropping or having batches rejected, and the `agent stopping` record
+lets it tell a stop from a host that went silent. Heartbeats and that record
+also carry `run_id` (random per start), `run_seq`, a run counter kept in
+`/var/lib/traceguard/run-sequence`, and `install_id`, a random ID made with that
+file, so the manager can order runs even when an agent's clock was wrong. If
+the file is lost, for example on a reinstall, the agent makes a new install ID
+and counts from 1 again; the manager sees the new ID and starts its count over.
+Each export batch also says how it was sent, in a `TraceGuard-Delivery` header:
+`live` when it comes straight from the running process, so its records are
+current, or `replay` when it is resent from the spool, so they may be from any
+earlier run; a `TraceGuard-Run` header carries the sending process's `run_id`,
+so a replay of its own records is told from an inherited one. The manager takes
+a live heartbeat as the running agent's, and a counter restored from a backup,
+which goes back on the same install, is corrected once the running agent's
+heartbeats have shown for a minute that it is up.
+
+The manager can also serve each agent its signed policy. Point the policy
+source at it with the same token, and give the agent the manager's public
+policy key:
+
+```bash
+TRACEGUARD_POLICY_URL=https://manager.example/api/v1/policy
+TRACEGUARD_POLICY_AUTHORIZATION=Bearer <agent token>
+TRACEGUARD_POLICY_SIGNING_KEY=/etc/traceguard/manager-policy.pub
+```
+
+#### Manager commands
+
+With `-command-url` / `TRACEGUARD_COMMAND_URL`, the agent long-polls the
+manager for commands. They are off unless this is set. The URL must be on the
+same host and port as the event export URL, because commands reuse its
+credentials and TLS settings:
+
+```bash
+TRACEGUARD_COMMAND_URL=https://manager.example/api/v1/commands
+# Optional: accept fewer actions than all four.
+TRACEGUARD_COMMAND_ACTIONS=lift_response,refresh_policy
+```
+
+| Action | What it does |
+| --- | --- |
+| `block_peer` | Blocks a peer address, as a `block_peer` response would, for 1 second to 24 hours |
+| `freeze_cgroup` | Freezes a cgroup by kernel cgroup ID, as a `freeze_cgroup` response would, for 1 second to 24 hours |
+| `lift_response` | Ends an active `block_peer` or `freeze_cgroup` action now, whether a policy or a command started it |
+| `refresh_policy` | Fetches and applies policy now, as `SIGHUP` does |
+
+`-command-actions` / `TRACEGUARD_COMMAND_ACTIONS` lists the actions the agent
+accepts; it refuses the rest. Started actions follow `-response-mode`: `off`
+refuses them, `dry-run` records `response would apply` without changing
+anything, and `enforce` applies them with the same safety checks as policy
+responses, so loopback, unspecified, multicast, and zoned IPv6 peers, the
+manager's own address, and protected or TraceGuard's own cgroups, are refused. A
+dry-run result says nothing was changed, and `refresh_policy` reports done only
+once the policy has loaded and been applied. A command action is owned by the
+reserved response ID `manager-command`, which policies may not use, so a policy
+change does not end it; it ends at its deadline, when lifted, or when
+TraceGuard stops. A failed `lift_response` undo is retried within seconds. Each
+command runs once, even if the manager delivers it again after a restart: each is
+journalled before it runs, in `<response-state-path>.commands.json`, until it can
+no longer be redelivered, so commands require `-response-state-path`. A repeated
+answer for a block or freeze from before a restart says the restart ended it.
+Commands expiring more than 24 hours ahead are refused. A `refresh_policy` that
+could only fall back to the last known policy reports failure. If the journal exists
+but cannot be read, every command is refused until it is fixed or removed and the
+agent restarted. In
+`enforce` mode a `freeze_cgroup` command is refused without a response state file,
+and its recovery record is saved before the cgroup is frozen (or the command is
+refused), so a crash can never leave a workload frozen with nothing to thaw it. Commands and results never follow
+redirects. Each is recorded as a `manager command` record and its
+result is reported back. A command without an expiry, or past it, is not run.
+Polls are at least 2 seconds apart, and back off up to 5 minutes while the
+manager fails them or will not take results.
+
 Export events to a remote syslog collector:
 
 ```bash
@@ -453,6 +566,7 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION`
 - `TRACEGUARD_EVENT_EXPORT_AUTHORIZATION_FILE`
 - `TRACEGUARD_EVENT_EXPORT_SPOOL`
+- `TRACEGUARD_EVENT_EXPORT_EVENTS`
 - `TRACEGUARD_EVENT_EXPORT_CA_PATH`
 - `TRACEGUARD_EVENT_EXPORT_CLIENT_CERT`
 - `TRACEGUARD_EVENT_EXPORT_CLIENT_KEY`
@@ -482,6 +596,8 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_EVENT_SCHEMA`
 - `TRACEGUARD_RESPONSE_MODE`
 - `TRACEGUARD_RESPONSE_STATE_PATH`
+- `TRACEGUARD_COMMAND_URL`
+- `TRACEGUARD_COMMAND_ACTIONS`
 
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
@@ -497,7 +613,8 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - metrics enabled on loopback with `TRACEGUARD_METRICS_ADDR=127.0.0.1:9091`
 - local event archive disabled unless `TRACEGUARD_EVENT_ARCHIVE_PATH` is set
 - durable HTTPS batch export disabled unless `TRACEGUARD_EVENT_EXPORT_URL` is set
-- HTTPS export sends batches of 50 events or every 5 seconds
+- HTTPS export sends batches of 50 events or every 5 seconds, and every record: `TRACEGUARD_EVENT_EXPORT_EVENTS=all`
+- manager commands disabled unless `TRACEGUARD_COMMAND_URL` is set
 - HTTPS export spooling enabled by default with `TRACEGUARD_EVENT_EXPORT_SPOOL=true`; failed batches are stored in `/var/lib/traceguard/export-spool` with a 1 MiB per-batch limit and 256 MiB total spool limit per event schema. Batches are stored as encoded, so each `-event-schema` has its own spool files and a batch is resent only while its schema is configured; at startup TraceGuard records `export spool holds batches in another event schema` with their count
 - remote syslog export disabled unless `TRACEGUARD_EVENT_SYSLOG_URL` is set; defaults: `TRACEGUARD_EVENT_SYSLOG_FACILITY=local0`, `TRACEGUARD_EVENT_SYSLOG_TAG=traceguard`, `TRACEGUARD_EVENT_SYSLOG_TIMEOUT=5s`
 - process cache TTL: `TRACEGUARD_PROCESS_CACHE_TTL=5m`

@@ -70,7 +70,7 @@ func (r *Responder) Recover() {
 				"error": "cgroup freezing is unavailable, so " + frozen.Path + " stays frozen and stays recorded for the next start",
 			})
 		}
-		r.persistLocked()
+		_ = r.persistLocked()
 		return
 	}
 	// Each thaw rewrites the state file from what is tracked, so records not
@@ -89,10 +89,10 @@ func (r *Responder) Recover() {
 		}
 		action := &active{owners: map[string]owner{}, until: r.options.Now(), applied: true, cgroupID: frozen.CgroupID, cgroupPath: frozen.Path}
 		r.active[key] = action
-		r.revertLocked(key, action, "restart")
+		r.revertLocked(key, action, "restart", nil)
 	}
 	r.retained = kept
-	r.persistLocked()
+	_ = r.persistLocked()
 }
 
 // readStateLocked returns the freezes recorded for this boot. A missing file
@@ -120,11 +120,14 @@ func (r *Responder) readStateLocked() ([]frozenCgroup, error) {
 
 // persistLocked rewrites the state file with the cgroups that are frozen,
 // including recorded ones this run cannot thaw.
-func (r *Responder) persistLocked() {
+func (r *Responder) persistLocked() error {
 	if r.options.StatePath == "" || r.stateHeld {
-		return
+		return errStateNotKept
 	}
 	state := stateFile{BootID: r.options.BootID, Frozen: slices.Clone(r.retained)}
+	if r.pending != nil {
+		state.Frozen = append(state.Frozen, *r.pending)
+	}
 	for key, action := range r.active {
 		if key.action == policy.ResponseFreezeCgroup && action.applied {
 			state.Frozen = append(state.Frozen, frozenCgroup{CgroupID: action.cgroupID, Path: action.cgroupPath, Until: action.until})
@@ -133,8 +136,14 @@ func (r *Responder) persistLocked() {
 	slices.SortFunc(state.Frozen, func(left, right frozenCgroup) int { return strings.Compare(left.Path, right.Path) })
 	if err := writeState(r.options.StatePath, state); err != nil {
 		r.record("response state not saved", map[string]any{"event": "response", "path": r.options.StatePath, "error": err.Error()})
+		return err
 	}
+	return nil
 }
+
+// errStateNotKept reports that no state file records freezes, so a crash
+// would leave them for nothing to thaw.
+var errStateNotKept = errors.New("no response state file records freezes")
 
 // writeState replaces the state file atomically, so a crash mid-write
 // leaves the previous version.

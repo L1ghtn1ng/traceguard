@@ -47,7 +47,7 @@
         "additionalProperties": false,
         "required": ["id", "rules", "action", "duration"],
         "properties": {
-          "id": {"$ref": "#/$defs/rule_id"},
+          "id": {"allOf": [{"$ref": "#/$defs/rule_id"}, {"not": {"const": "manager-command"}}]},
           "rules": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/rule_id"}},
           "action": {"enum": ["block_peer", "freeze_cgroup"]},
           "duration": {"$ref": "#/$defs/duration"}

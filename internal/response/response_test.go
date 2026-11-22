@@ -53,6 +53,10 @@ type fakeFreezer struct {
 	thawedID map[uint64]bool
 	// onThaw, when set, runs before each thaw.
 	onThaw func(id uint64, path string)
+	// onFreeze, when set, runs before each freeze.
+	onFreeze func(id uint64)
+	// onWrite, when set, runs just before a freeze is written, after any record.
+	onWrite func()
 	// thawedPaths lists each successful thaw's path in order.
 	thawedPaths []string
 }
@@ -65,11 +69,22 @@ func (f *fakeFreezer) Check(id uint64) (string, error) {
 	return fmt.Sprintf("/kubepods.slice/pod-%d", id), nil
 }
 
-func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
+func (f *fakeFreezer) Freeze(id uint64, record func(string) error) (string, bool, error) {
+	if f.onFreeze != nil {
+		f.onFreeze(id)
+	}
 	f.freezeN++
 	path, err := f.Check(id)
 	if err != nil || f.already {
 		return path, false, err
+	}
+	if record != nil {
+		if err := record(path); err != nil {
+			return "", false, err
+		}
+	}
+	if f.onWrite != nil {
+		f.onWrite()
 	}
 	f.frozen[path] = true
 	return path, true, nil
@@ -438,15 +453,15 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 		},
 	}
 	for id, want := range map[uint64]string{1: "below a top-level slice", 2: "below a top-level slice", 3: "contains TraceGuard", 6: "below a top-level slice", 9: "no longer exists"} {
-		if _, _, err := freezer.Freeze(id); err == nil || !strings.Contains(err.Error(), want) {
+		if _, _, err := freezer.Freeze(id, nil); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Freeze(%d) error = %v, want %q", id, err, want)
 		}
 	}
-	path, froze, err := freezer.Freeze(5)
+	path, froze, err := freezer.Freeze(5, nil)
 	if err != nil || !froze || path != "/kubepods.slice/pod-a" {
 		t.Fatalf("Freeze(5) = %q, %t, %v", path, froze, err)
 	}
-	if again, froze, err := freezer.Freeze(5); err != nil || froze || again != path {
+	if again, froze, err := freezer.Freeze(5, nil); err != nil || froze || again != path {
 		t.Fatalf("Freeze of a frozen cgroup = %q, %t, %v; want it left to whoever froze it", again, froze, err)
 	}
 	state, err := os.ReadFile(filepath.Join(root, path, "cgroup.freeze")) //nolint:gosec // test path
@@ -475,14 +490,14 @@ func TestCgroupFreezerRefusesCriticalGroups(t *testing.T) {
 	// The daemon's cgroup is read at each freeze, so a moved daemon is
 	// still protected.
 	self = "/kubepods.slice/pod-a/traceguard"
-	if _, _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "contains TraceGuard") {
+	if _, _, err := freezer.Freeze(5, nil); err == nil || !strings.Contains(err.Error(), "contains TraceGuard") {
 		t.Fatalf("Freeze after the daemon moved = %v, want a refusal", err)
 	}
 
 	nested := &CgroupFreezer{Root: root, self: func() (string, error) { return "/x", nil }, scan: func(context.Context, string) ([]cgroupinfo.Entry, error) {
 		return []cgroupinfo.Entry{{ID: 1, Path: "/", Level: 1}, {ID: 5, Path: "/pod-a", Level: 2}}, nil
 	}}
-	if _, _, err := nested.Freeze(5); err == nil || !strings.Contains(err.Error(), "cgroup v2 root") {
+	if _, _, err := nested.Freeze(5, nil); err == nil || !strings.Contains(err.Error(), "cgroup v2 root") {
 		t.Fatalf("non-root cgroup path error = %v", err)
 	}
 }
@@ -669,6 +684,50 @@ func TestAlreadyFrozenCgroupIsLeftFrozen(t *testing.T) {
 	}
 }
 
+func TestAFreezeIsRecordedEvenWhenTheCgroupLooksFrozenAlready(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "b"})
+	// Something else has it frozen, then thaws it just before TraceGuard freezes it.
+	h.freezer.already = true
+	h.freezer.onFreeze = func(uint64) { h.freezer.already = false }
+	recordedFirst := false
+	h.freezer.onWrite = func() {
+		payload, _ := os.ReadFile(state) //nolint:gosec // test path
+		recordedFirst = strings.Contains(string(payload), `"cgroup_id":2`)
+	}
+	if err := h.responder.Apply("cmd-1", policy.ResponseFreezeCgroup, "2", time.Hour); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !recordedFirst {
+		t.Fatal("the cgroup was frozen before its recovery record was saved, so a crash would leave it frozen")
+	}
+	if payload, _ := os.ReadFile(state); !strings.Contains(string(payload), `"cgroup_id":2`) { //nolint:gosec // test path
+		t.Fatalf("state %s does not record the freeze this run made", payload)
+	}
+}
+
+func TestAManualFreezeOfAnotherFreezeLeavesNoRecord(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "b"})
+	h.freezer.already = true
+	// Not even for a moment: a crash at any point must not leave a record of it.
+	everRecorded := false
+	h.freezer.onFreeze = func(uint64) {
+		payload, _ := os.ReadFile(state) //nolint:gosec // test path
+		everRecorded = strings.Contains(string(payload), `"cgroup_id"`)
+	}
+	if err := h.responder.Apply("cmd-1", policy.ResponseFreezeCgroup, "2", time.Hour); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if payload, _ := os.ReadFile(state); everRecorded || strings.Contains(string(payload), `"cgroup_id"`) { //nolint:gosec // test path
+		t.Fatalf("state %s recorded a freeze TraceGuard did not make, so a restart could thaw it", payload)
+	}
+}
+
 func TestFailedExtensionKeepsTheRecordedDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -705,7 +764,7 @@ func TestFreezeRefusesAReplacedCgroup(t *testing.T) {
 		// The path now belongs to a new cgroup with another ID.
 		idOf: func(*os.File) (uint64, error) { return 50, nil },
 	}
-	if _, _, err := freezer.Freeze(5); err == nil || !strings.Contains(err.Error(), "no longer exists") {
+	if _, _, err := freezer.Freeze(5, nil); err == nil || !strings.Contains(err.Error(), "no longer exists") {
 		t.Fatalf("Freeze of a replaced cgroup = %v, want a refusal", err)
 	}
 	if state, _ := os.ReadFile(filepath.Join(root, "kubepods.slice", "pod-a", "cgroup.freeze")); string(state) != "0" { //nolint:gosec // test path
@@ -745,7 +804,7 @@ func TestTransientCgroupErrorIsNotARefusal(t *testing.T) {
 		},
 		idOf: func(*os.File) (uint64, error) { return 0, errors.New("resource temporarily unavailable") },
 	}
-	_, _, err := freezer.Freeze(5)
+	_, _, err := freezer.Freeze(5, nil)
 	var refused *RefusedError
 	if err == nil || errors.As(err, &refused) {
 		t.Fatalf("Freeze with a transient error = %v, want a plain error so the next alert retries", err)

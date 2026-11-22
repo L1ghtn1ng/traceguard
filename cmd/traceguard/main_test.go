@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"syscall"
 	"testing"
@@ -31,5 +33,21 @@ func TestForwardReloadSignalsStopsAndForwards(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("signal forwarder did not stop")
+	}
+}
+
+func TestStoppingFields(t *testing.T) {
+	t.Parallel()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := stoppingFields(canceled, nil); got["reason"] != "signal" || got["event"] != "agent_stopping" {
+		t.Fatalf("signal stop = %v", got)
+	}
+	if got := stoppingFields(context.Background(), errors.New("ring buffer closed")); got["reason"] != "error" || got["error"] != "ring buffer closed" {
+		t.Fatalf("error stop = %v", got)
+	}
+	if got := stoppingFields(context.Background(), nil); got["reason"] != "exited" {
+		t.Fatalf("plain exit = %v", got)
 	}
 }
