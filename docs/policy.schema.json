@@ -398,7 +398,7 @@
               "type": "array",
               "maxItems": 8,
               "uniqueItems": true,
-              "description": "Process-identity fields require contemporaneous identity on every selected event; DNS, blocked DNS, sockops, and inbound TCP connection cache attribution are not eligible.",
+              "description": "Process-identity fields require contemporaneous identity on every selected event; DNS, blocked DNS, sockops, file_integrity, and inbound TCP connection cache attribution are not eligible.",
               "items": {
                 "enum": ["cgroup", "executable", "program", "uid", "domain", "destination", "peer", "path"]
               }
@@ -431,7 +431,18 @@
     "detection_sequence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "severity", "key", "within", "steps", "message"],
+      "required": ["id"],
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "properties": {"enabled": {"const": false}},
+              "required": ["enabled"]
+            }
+          },
+          "then": {"required": ["severity", "key", "within", "steps", "message"]}
+        }
+      ],
       "properties": {
         "id": {"$ref": "#/$defs/rule_id"},
         "enabled": {"type": "boolean"},
@@ -488,7 +499,7 @@
         "protocols": {"type": "array", "items": {"enum": ["tcp", "udp"]}},
         "uids": {
           "$ref": "#/$defs/uid_list",
-          "description": "Requires contemporaneous event-time identity; unavailable for DNS, blocked DNS, sockops, and inbound TCP connection cache attribution."
+          "description": "Requires contemporaneous event-time identity; unavailable for DNS, blocked DNS, sockops, file_integrity, and inbound TCP connection cache attribution."
         },
         "domains": {"$ref": "#/$defs/string_list"},
         "domain_suffixes": {"$ref": "#/$defs/string_list"},
@@ -524,7 +535,7 @@
         "operations": {
           "type": "array",
           "maxItems": 256,
-          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset", "unlink", "rmdir", "rename", "chmod", "chown", "truncate"]},
+          "items": {"enum": ["traceme", "poketext", "pokedata", "pokeuser", "attach", "seize", "read", "write", "init_module", "finit_module", "setns", "unshare", "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid", "capset", "unlink", "rmdir", "rename", "link", "symlink", "chmod", "chown", "truncate"]},
           "description": "Event operation; valid only with ptrace, process_vm, module_load, namespace_change, privilege_change, and file_change events."
         }
       }

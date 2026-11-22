@@ -17,7 +17,7 @@ User=root
 Group=root
 UMask=0027
 # On kernels 6.19 to 7.1 the agent keeps one perf event descriptor per syscall
-# tracepoint (about 45) per online CPU, so the limit must scale with CPU count.
+# tracepoint (up to 43) per online CPU, so the limit must scale with CPU count.
 LimitNOFILE=131072
 # CAP_SYS_PTRACE is deliberately omitted (least privilege). Without it,
 # readlink(/proc/<pid>/exe) fails for processes owned by other users, so the
