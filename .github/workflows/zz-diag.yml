@@ -44,4 +44,4 @@ jobs:
         run: |
           sudo env "GOMODCACHE=/tmp/diag/gomod" "GOCACHE=/tmp/diag/gocache" \
             "$(command -v go)" test -count=1 -v -tags ebpfintegration \
-            -run 'ZZDiag|TestMemfdCreateTracepoint|TestExecTracepoint|TestUnlinkatTracepoint' ./internal/ebpf
+            -run 'ZZDiagPerCPU|ZZDiagCounter|TestMemfdCreateTracepoint|TestExecTracepoint|TestUnlinkatTracepoint' ./internal/ebpf

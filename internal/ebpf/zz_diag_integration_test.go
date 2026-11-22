@@ -222,3 +222,47 @@ func TestZZDiagTraceguardMemfd(t *testing.T) {
 		t.Logf("DIAG record len=%d err=%v kind=%d pid=%d (want %d) filename=%q comm=%q", len(record.RawSample), err, event.Kind, event.PID, os.Getpid(), event.Filename, event.Comm)
 	}
 }
+
+func TestZZDiagPerCPU(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var original unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &original); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.SchedSetaffinity(0, &original) }()
+	counter, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer counter.Close()
+	prog := diagCounterProgram(t, ebpf.TracePoint, counter)
+	defer prog.Close()
+	attached, err := link.Tracepoint("syscalls", "sys_enter_memfd_create", prog, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attached.Close()
+	for cpu := range runtime.NumCPU() {
+		var set unix.CPUSet
+		set.Set(cpu)
+		if err := unix.SchedSetaffinity(0, &set); err != nil {
+			t.Logf("DIAG setaffinity %d: %v", cpu, err)
+			continue
+		}
+		before := diagCount(t, counter)
+		for range 10 {
+			fd, err := unix.MemfdCreate("traceguard-diag", unix.MFD_CLOEXEC)
+			if err == nil {
+				_ = unix.Close(fd)
+			}
+		}
+		t.Logf("DIAG percpu cpu=%d memfd tracepoint runs=%d of 10", cpu, diagCount(t, counter)-before)
+	}
+}
