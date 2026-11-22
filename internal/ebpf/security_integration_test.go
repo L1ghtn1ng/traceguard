@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -79,19 +80,26 @@ func TestSyscallTracepointRunsOnEveryCPUForIntegration(t *testing.T) {
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	var original unix.CPUSet
-	if err := unix.SchedGetaffinity(0, &original); err != nil {
+	// Size the masks for every possible CPU: the fixed unix.CPUSet holds
+	// only 1024, and the kernel rejects masks smaller than nr_cpu_ids.
+	possible, err := ebpf.PossibleCPU()
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = unix.SchedSetaffinity(0, &original) }()
+	maskSize := max(possible, slices.Max(cpus)+1)
+	original := unix.NewCPUSet(maskSize)
+	if err := unix.SchedGetaffinityDynamic(0, original); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.SchedSetaffinityDynamic(0, original) }()
 	want := make(map[string]int, len(cpus))
 	for _, cpu := range cpus {
 		if !original.IsSet(cpu) {
 			continue
 		}
-		var set unix.CPUSet
+		set := unix.NewCPUSet(maskSize)
 		set.Set(cpu)
-		if err := unix.SchedSetaffinity(0, &set); err != nil {
+		if err := unix.SchedSetaffinityDynamic(0, set); err != nil {
 			t.Fatalf("pin to CPU %d: %v", cpu, err)
 		}
 		name := "traceguard-cpu-" + strconv.Itoa(cpu)
