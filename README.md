@@ -418,8 +418,12 @@ towards the heartbeat's `export_dropped_records` and `export_dropped_alerts`.
 ### Sending events to TraceGuard Manager
 
 TraceGuard Manager is a
-fleet console that receives TraceGuard's HTTPS export. Each agent gets a token
-from the manager, which shows the settings to add:
+fleet console that receives TraceGuard's HTTPS export. For step-by-step setup,
+including TLS, keeping the token in a systemd credential, central policy,
+commands and troubleshooting, see
+[Connecting an agent to TraceGuard Manager](docs/manager.md).
+
+Each agent gets a token from the manager, which shows the settings to add:
 
 ```bash
 # /etc/traceguard/traceguard.env
