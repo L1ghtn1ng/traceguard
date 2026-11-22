@@ -122,10 +122,15 @@ The merge order is:
 | Egress rules | A local rule replaces a remote rule with the same `id`. Other remote rules remain. |
 | Exec, file, bind, unix, and sockopt rules | A local rule replaces a remote rule with the same `id`. Other remote rules remain. |
 | Detection rules | A local rule replaces a remote rule with the same `id`. `enabled: false` is a convenient way to replace and disable one. |
+| Detection sequences | A local sequence replaces a remote sequence with the same `id`. `enabled: false` replaces and disables one. |
 | `egress.default` | The local value wins when it is present; otherwise the remote value is retained. The final default is `allow` when neither source sets it. |
 | New enforcement defaults | The local section value wins when present; otherwise the remote value remains. All final defaults are `allow` when unset. Exec and file do not permit `default: block`. |
 | `builtin_profiles` | Values from both sources are combined. |
 | `disabled_rule_ids` | Values from both sources are combined, then applied to the merged rules and built-in detections. |
+
+Replacement is by `id` across every section, not only within one: a local
+rule or sequence in any section removes every remote rule or sequence with
+the same `id`, whichever section that is in.
 
 Policy commits are atomic across all kernel enforcement maps: hooks see either
 the previous complete policy or the next complete policy. A failed refresh or
@@ -754,7 +759,7 @@ Process-identity availability is validated when policy is loaded:
 
 | Event scope | Detection process identity |
 | --- | --- |
-| `exec`, `resolver`, `resolver_blocked`, `file_access`, `file_created`, security events, and enforcement decisions | Contemporaneous kernel snapshot. |
+| `exec`, `resolver`, `resolver_blocked`, `file_access`, `file_created`, `file_change`, security events, and enforcement decisions | Contemporaneous kernel snapshot. |
 | Outbound `connection`, or UDP `connection` in either direction | Contemporaneous kernel snapshot. |
 | Inbound TCP `connection` | Listener-cache telemetry only; UID matching and process-identity grouping require the rule to exclude this scope. |
 | `dns`, `blocked`, `tcp_sockops`, `file_integrity` | Unavailable or cache-only; UID matching and process-identity grouping are rejected. A `file_integrity` change carries its triggering process as `actor_*` fields, but rescan findings have none. |
@@ -861,7 +866,7 @@ Supported `group_by` values are:
 | `domain` | DNS domain. |
 | `destination` | Peer address. |
 | `peer` | Peer address; the remote source address for inbound connections. Equivalent to `destination`. |
-| `path` | Kernel-resolved enforcement path. |
+| `path` | The event's path: the kernel-resolved path of an exec or file decision, the requested socket path of a unix decision, or a `file_integrity` change's path. |
 
 Policy loading rejects process-identity group fields for event scopes without
 a contemporaneous snapshot. A configured numeric match never treats a missing
@@ -869,7 +874,8 @@ field as zero. For an otherwise supported event with a missing cgroup ID,
 grouping falls back to its event-time PID, process start ticks, and program
 instead of collapsing unrelated processes.
 
-Threshold counts are limited to 10,000. TraceGuard keeps at most 16,384 active
+Threshold counts are limited to 10,000, and the counts of all custom detection
+rules together must not exceed 65,536. TraceGuard keeps at most 16,384 active
 detection groups and 65,536 retained timestamps globally, evicting old samples
 and group state at those caps. Count-one rules without cooldown do not allocate
 persistent group state.
@@ -1036,7 +1042,7 @@ detection_exceptions:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `id` | Yes | Exception ID, unique among exceptions, using the rule ID format. |
-| `rules` | Yes | Built-in or custom detection rule IDs the exception applies to. Naming a rule that is neither built in nor defined is an error; naming a disabled rule is allowed, and an exception for a disabled custom rule or sequence stays dormant until it returns. |
+| `rules` | Yes | Built-in or custom detection rule IDs the exception applies to. Naming a rule that is neither built in nor defined is an error. Naming a rule listed in `disabled_rule_ids` is allowed, and the exception stays dormant until the rule returns; a custom rule or sequence turned off with `enabled: false` is dropped in the merge, so an exception naming it is rejected. |
 | `reason` | Yes | Why the exception exists, up to 512 bytes. |
 | `expires` | No | RFC 3339 instant after which the exception stops applying. Without it the exception never expires. |
 | `match` | Yes | Conditions using the same fields as a rule's `match`. It must not be empty, and it must only use fields that every event of each named rule carries at event time. |
@@ -1123,8 +1129,8 @@ a live `detection_alert`. A summary goes to standard error: records read,
 evaluated, skipped, and malformed, then every rule that alerted with its alert
 count, noisiest first, and each exception's suppressed count and expiry state.
 
-`-policy-path` supplies detection rules, `disabled_rule_ids`, exceptions, and
-`builtin_profiles`; without it only the built-in baseline runs. Archives ending in `.gz` are read
+`-policy-path` supplies detection rules, sequences, `disabled_rule_ids`,
+exceptions, `builtin_profiles`, and threat intelligence feeds; without it only the built-in baseline runs. Archives ending in `.gz` are read
 as gzip. Records that are not kernel events, such as alerts, heartbeats, and
 daemon status, are skipped. Replay sees fields only as the archive recorded
 them: strings over the 4 KiB telemetry limit are truncated and fields beyond a
@@ -1238,13 +1244,13 @@ detection rules:
 | Field | Meaning |
 | --- | --- |
 | `path` | The watched path. |
-| `change` | `created`, `modified` (content or file type), `deleted`, or `attributes` (mode, owner, or group). |
-| `changed` | Which of `content`, `type`, `mode`, `owner`, and `group` differ. |
+| `change` | `created`, `modified` (content or file type), `deleted`, or `attributes` (mode, owner, group, or a regular file's modification time). |
+| `changed` | Which of `content`, `type`, `mode`, `owner`, `group`, and `mtime` differ. |
 | `detection_source` | `event` for a queued check, `rescan` for a periodic finding. |
 | `file_type`, `mode`, `owner_uid`, `owner_gid`, `size`, `mtime`, `link_target` | The current state. |
 | `sha256`, or `hash_skipped` | The digest, or why there is none: `disabled`, `size`, `not_regular`, or `unreadable`. |
 | `previous_*` | The same fields from the baseline. |
-| `actor_*` | The triggering event's `event`, `operation`, `pid`, `program`, `kernel_uid`, `cgroup_id`, `process_start_ticks`, and `current_*` enrichment, for `detection_source=event`. |
+| `actor_*` | The triggering event's `event`, `operation`, `pid`, `program`, `kernel_uid`, `cgroup_id`, `process_start_ticks`, and `current_*` enrichment, for `detection_source=event`. `actor_ambiguous` is `true` when another process also touched the path before the check, so the actor may not be the one that made the change. |
 
 Content comparison uses digests when both states were hashed and falls back to
 size and modification time otherwise. A hashed file that can no longer be read
@@ -1354,6 +1360,7 @@ A response runs a reversible action when one of its rules alerts:
 
 ```yaml
 version: 1
+builtin_profiles: [runtime]
 responses:
   - id: block-ssh-scanner
     rules: [baseline.inbound-ssh-bruteforce]
@@ -1368,7 +1375,7 @@ responses:
 | Field | Meaning |
 | --- | --- |
 | `id` | Response ID, unique among responses. `manager-command` is reserved for actions started by manager commands. |
-| `rules` | Detection rule, sequence, or `threat_intel.<feed>` IDs. A name that nothing defines rejects the policy. |
+| `rules` | Detection rule, sequence, or `threat_intel.<feed>` IDs. A name that nothing defines rejects the policy. A rule from a built-in profile that is not enabled is accepted but never alerts. |
 | `action` | `block_peer` or `freeze_cgroup`. |
 | `duration` | How long the action lasts, at most `24h`. |
 
@@ -1405,8 +1412,8 @@ responses apply the same action to the same target, it lasts as long as the
 latest one asks and is listed under each `response_ids`. At most 1,024 actions
 are active at once. Responses run in the background, with up to 256 alerts
 waiting; an alert that finds the queue full is skipped. A cgroup that is
-refused, or has gone, is not rescanned for the same response until its
-deadline.
+refused, or has gone, is not tried again by any response until that attempt's
+deadline or the next policy change.
 
 Each action is undone when it expires, when every response holding it is
 removed from the policy or changed, or when TraceGuard stops. An undo that
@@ -1420,8 +1427,8 @@ start; a file that cannot be read is left unchanged and reported as
 names the frozen cgroup, so a replacement at the same path is left alone.
 Every step is recorded as an `event=response` record: `response applied` or
 `response would apply`, `response extended`, `response reverted` with its
-`reason` (`expired`, `policy_removed`, `policy_changed`, `shutdown`, or
-`restart`), `response skipped` with its `reason`, and `response failed` or
+`reason` (`expired`, `policy_removed`, `policy_changed`, `shutdown`,
+`restart`, or `lifted` by a manager command, with its `command_id`), `response skipped` with its `reason`, and `response failed` or
 `response revert failed` with the error.
 `traceguard_response_actions_total{action,step}` and
 `traceguard_response_active` report the same.
@@ -1516,7 +1523,7 @@ Publish `traceguard.yaml` and `traceguard.yaml.sig` together, and keep the
 private key off the policy server. A missing, malformed, or non-verifying
 signature fails that fetch like any other refresh error: the last validated
 policy stays active. The signature is cached beside the policy cache as
-`policy.yaml.sig`, and a stale cache is used only if it still verifies.
+`<policy-cache-path>.sig` (`/var/lib/traceguard/policy.yaml.sig` by default), and a stale cache is used only if it still verifies.
 
 Signing applies to the remote base only. A local `-policy-path` overlay is
 trusted through its file ownership, and the signing key requires
@@ -1697,6 +1704,12 @@ Its fields are:
 | `ringbuf_degraded` | Whether the ring buffer drop rate last exceeded `-ringbuf-unhealthy-drop-rate`; always `false` when that is `0`. |
 | `detection_rules`, `detection_state_groups` | Active detection rules, and threshold groups plus in-progress sequence keys. |
 | `detection_exceptions`, `expired_detection_exceptions` | Installed exception count and the IDs that have expired. |
+| `run_id`, `run_seq`, `install_id` | A random ID for this process start, the run counter kept in `/var/lib/traceguard/run-sequence`, and the random install ID made with that file. `run_seq` and `install_id` are left out when the counter is unavailable. |
+| `agent_version`, `kernel_release`, `os_name` | The TraceGuard version, kernel release, and the host's `PRETTY_NAME` from os-release. |
+| `response_mode`, `commands_enabled` | `-response-mode`, and whether manager commands are enabled. |
+| `policy_remote_sha256` | With `-policy-url`, the SHA-256 of the remote policy document in use, once it has been applied. |
+| `export_dropped_records`, `export_dropped_alerts`, `export_rejected_batches`, `export_spool_batches`, `export_queue_depth` | With `-event-export-url`: records lost, priority records lost, batches the collector refused, spooled batches, and queued records. |
+| `active_responses`, `active_responses_truncated` | Up to 64 active response actions, each with `action`, `target`, `applied`, `manual` (started by a manager command), and `until`; `active_responses_truncated` is `true` when more are active. |
 
 A host whose heartbeats stop, whose digest differs from its peers, or whose
 `unavailable_hooks` is not empty needs attention, and a SIEM can alert on each

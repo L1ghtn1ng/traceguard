@@ -11,7 +11,7 @@ TraceGuard is a Go 1.27 Linux security utility that uses the kernel eBPF subsyst
 - detect configured DNS-over-HTTPS resolver connections
 - trace `execve` and `execveat` activity so newly spawned programs are visible
 - observe memfd creation, ptrace and cross-process memory access, kernel module and BPF program loads, io_uring setup, mounts, namespace changes, and privilege changes
-- audit file access through open-style syscall tracepoints when enabled, and path-based unlink, rename, chmod, chown, and truncate requests
+- audit file access through open-style syscall tracepoints when enabled, and path-based unlink, rmdir, rename, link, symlink, chmod, chown, and truncate requests
 - monitor file integrity for policy-selected paths: SHA-256 and attribute baselines, change attribution to the acting process, and periodic rescans
 - optionally block DNS lookups defined by local or remote YAML policy
 - enforce exact and suffix DNS policies, with allow rules taking precedence
@@ -49,6 +49,8 @@ failures retain that in-memory policy instead of rolling back to an older cache.
 TraceGuard uses a set of eBPF programs:
 
 - `cgroup_skb/egress` parses outbound UDP and TCP DNS packets on port 53, emits DNS telemetry, and drops matching queries when blocking is enabled
+- `cgroup_skb/ingress` and `cgroup/recvmsg4`/`recvmsg6` observe inbound connections and UDP receives, and the `cgroup_skb` programs drop traffic from peers a `block_peer` response has blocked
+- `cgroup/post_bind4` and `cgroup/post_bind6` record listening sockets so inbound connections can be attributed
 - `cgroup/connect4` and `cgroup/connect6` observe resolver endpoint connections for DoT and configured DoH endpoints and block matching endpoints when blocking is enabled
 - `cgroup/connect4`, `cgroup/connect6`, `cgroup/sendmsg4`, and `cgroup/sendmsg6` enforce outbound TCP/UDP egress policy by UID, cgroup ID, destination CIDR, port, and protocol
 - MAC LSM `bprm_check_security` and `file_open` programs enforce explicit executable and file-open path rules
@@ -58,6 +60,7 @@ TraceGuard uses a set of eBPF programs:
 - an observe-only `sockops` program reports selected TCP lifecycle callbacks
 - `tracepoint/syscalls/sys_enter_execve*` emits process execution events
 - `tracepoint/syscalls/sys_enter_open*` and `sys_enter_creat` emit file access audit events when file auditing is enabled
+- path-change syscall-entry tracepoints for the `unlink`, `rmdir`, `rename`, `link`, `symlink`, `chmod`, `chown`, and `truncate` families emit file change events
 - observe-only syscall-entry tracepoints for `memfd_create`, `ptrace`, `process_vm_readv`/`writev`, `init_module`/`finit_module`, `bpf`, `io_uring_setup`, `mount`, `setns`, `unshare`, the `set*id` family, and `capset` emit security events when enabled
 
 The user-space service:
@@ -95,6 +98,7 @@ See [kernel support](docs/kernel-support.md) for what each feature needs from th
 - `CAP_SYS_PTRACE` is intentionally not granted by the packaged systemd unit; without it TraceGuard cannot read `/proc/<pid>/exe` for processes owned by other users, so the `current_exe` and `current_parent_exe` enrichment fields are empty for those processes. Operators who accept the additional privilege may add `CAP_SYS_PTRACE` to the unit's `AmbientCapabilities` and `CapabilityBoundingSet` to restore full executable-path enrichment
 - Go 1.27.x
 - `clang` for `go generate`
+- a C toolchain for `make build`, which links with cgo, external linking, and LTO
 
 Notes:
 
@@ -136,10 +140,10 @@ Notes:
 - enforced suffix matching checks every possible DNS label boundary and hashes at most 64 wire-format bytes per suffix candidate; configured block or allow suffixes over that limit are rejected in enforced block mode, and exact rules are unaffected
 - event archive and export use the same structured event records as the logger
 - event export can use custom trust roots, client certificates, and durable retry spooling
-- on Linux 7.1 or newer, TraceGuard automatically tries an enhanced telemetry eBPF object that adds event source and kernel feature-set fields; if the kernel or verifier rejects that object, TraceGuard falls back to the standard object without user configuration
+- on Linux 7.1 or newer, TraceGuard automatically tries an enhanced telemetry eBPF object that adds `socket_cookie` to socket events and reports `kernel_feature_set=linux71`; if the kernel or verifier rejects that object, TraceGuard falls back to the standard object without user configuration
 - outbound egress policy defaults to allow; explicit allow rules win over block rules, and DNS plus egress are independent enforcement gates
 - cgroup selectors use cgroup v2 paths relative to the configured root; prefixes are matched against kernel cgroup ancestry through level 63, and block or dry-run mode reserves both exact and prefix selectors for fail-closed allow rules
-- the detection engine is alert-only, caps state at 16,384 threshold groups and 65,536 retained timestamps, and enables three baseline rules by default
+- the detection engine is alert-only, caps state at 16,384 threshold groups, 16,384 in-progress sequences, and 65,536 retained timestamps, and enables four baseline rules by default
 - bpffs pinning is disabled by default and requires real `bpf_link` attachments; unpinned startup rejects an existing TraceGuard pin root until `traceguard -unpin` removes it, and host-wide LSM links remain lifecycle-bound
 - eBPF runtime statistics are disabled by default because kernel runtime accounting has a system-wide performance cost
 - events that cannot be queued because the event ring buffer (16 MiB by default; see [sizing the ring buffer](#sizing-the-ring-buffer)) is full are counted in the kernel per event kind and exported as `traceguard_ringbuf_dropped_total{kind}`, with `traceguard_ringbuf_size_bytes` and `traceguard_ringbuf_unread_bytes` for occupancy; any new drops are also recorded as an `eBPF ring buffer full; events dropped` error event with `dropped_events` and `dropped_<kind>` counts, checked every five seconds. Enforcement decisions are unaffected by drops; only their telemetry is lost
@@ -160,12 +164,22 @@ make build
 Common targets:
 
 ```bash
-make generate
+make generate     # go generate ./internal/ebpf (needs clang)
 make fmt-check
 make lint
-make test
+make test         # go test ./..., then again with -race
+make test-ebpf-c  # clang checks of the eBPF C sources
 make build
-make snapshot
+make snapshot     # goreleaser release --snapshot --clean
+make fix          # go fix ./...
+make tidy         # go mod tidy
+```
+
+Kernel integration tests load and attach the real eBPF programs, so they need
+root on a supported kernel:
+
+```bash
+sudo make test-ebpf
 ```
 
 `make build` produces a hardened Linux binary with PIE enabled and the C
@@ -295,10 +309,12 @@ sudo ./traceguard \
 ```
 
 When running in Kubernetes, `-kubernetes-enrich` can infer the API URL from
-`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT_HTTPS`, and it uses the
+`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT_HTTPS` (or
+`KUBERNETES_SERVICE_PORT`, then `443`), falling back to
+`https://kubernetes.default.svc:443` when the host is not set, and it uses the
 standard service-account token and CA paths by default. Set
-`TRACEGUARD_KUBERNETES_NODE_NAME`, or expose `NODE_NAME` through the downward API,
-to scope pod metadata listing to one node.
+`TRACEGUARD_KUBERNETES_NODE_NAME`, or expose `NODE_NAME` (or `KUBE_NODE_NAME`)
+through the downward API, to scope pod metadata listing to one node.
 
 Use the packaged JSON output and metrics defaults:
 
@@ -386,12 +402,14 @@ straight to the spool; a priority record is lost only when the spool is off or
 full, and is then counted as `traceguard_event_export_total{status="dropped_priority"}`.
 
 A collector reply of `400`, `413`, `415`, or `422` means the batch itself was
-refused, so it is not retried (unless the reply carries `Retry-After`): a spooled batch is moved to
+refused, so it is not retried: a spooled batch is moved to
 `/var/lib/traceguard/export-spool/rejected/` (at most 100 files and 64 MiB,
 after which further rejected batches are deleted) and replay carries on with the
-next one. Every other failure, including `401`, `403`, and `429`, is retried.
-With the spool on, a `429` or `503` reply's `Retry-After`, up to 10 minutes,
-pauses sending and replay; batches made meanwhile are spooled. Replay sends
+next one. A `413` that carries `Retry-After` is the exception: it is retried,
+and a spooled batch is set aside only after three such replies. Every other
+failure, including `401`, `403`, and `429`, is retried. With the spool on, a
+`413`, `429`, or `503` reply's `Retry-After`, up to 10 minutes, pauses sending
+and replay; batches made meanwhile are spooled. Replay sends
 without holding the spool, so priority records can still be spooled during a slow
 replay. Records lost because a batch could be neither sent nor spooled count
 towards `traceguard_event_export_total{status="lost"}` and `lost_priority`, and
@@ -517,7 +535,7 @@ sudo ./traceguard \
 | `module_load`, `bpf_prog_load` | Kernel Extension Activity (1002) |
 | `file_access`, `file_created`, `file_*block*`, `file_change`, `file_integrity`, `mount` | File System Activity (1001) |
 | `detection_alert` | Detection Finding (2004), with ATT&CK techniques and tactics in `attacks` |
-| Heartbeats and daemon status | Base Event (0) |
+| Heartbeats, responses, manager commands, and other daemon records | Base Event (0) |
 
 Fields that map to an OCSF attribute move there: the acting process's
 event-time PID, program, and user to `actor` (from the socket cache's
@@ -599,6 +617,9 @@ Environment variables can be used instead of flags:
 - `TRACEGUARD_COMMAND_URL`
 - `TRACEGUARD_COMMAND_ACTIONS`
 
+The one-shot flags `-v`, `-doctor`, `-unpin`, `-replay`, `-noisy-rules`, and
+`-noisy-rules-window` have no environment variable.
+
 By default, TraceGuard logs in JSON. Use `-log-format text` or `TRACEGUARD_LOG_FORMAT=text` to switch back to text output. Both formats include the OS hostname captured at startup. The same protected `hostname` field is retained in the local event archive, blocked-event log, HTTPS export records, and JSON syslog payloads; RFC5424 syslog headers use that value too.
 
 Packaged defaults in `/etc/traceguard/traceguard.env`:
@@ -625,6 +646,8 @@ Packaged defaults in `/etc/traceguard/traceguard.env`:
 - every DNS query and a file audit event every five minutes per request: `TRACEGUARD_DNS_FIRST_SEEN=false`, `TRACEGUARD_FILE_AUDIT_FIRST_SEEN=false`
 - a 16 MiB event ring buffer that never marks health degraded: `TRACEGUARD_RINGBUF_SIZE=16MiB`, `TRACEGUARD_RINGBUF_UNHEALTHY_DROP_RATE=0`
 - policy responses recorded but not applied: `TRACEGUARD_RESPONSE_MODE=dry-run`
+- `TRACEGUARD_RESPONSE_STATE_PATH` is not in the env file, so frozen cgroups are recorded in the built-in default `/var/lib/traceguard/responses.json` for a restart to thaw, and the manager command journal is kept beside it; an empty value disables both
+- manager commands accept every action when enabled: `TRACEGUARD_COMMAND_ACTIONS=block_peer,freeze_cgroup,lift_response,refresh_policy`
 - strict hook mode disabled and heartbeats every five minutes: `TRACEGUARD_STRICT_HOOKS=false`, `TRACEGUARD_HEARTBEAT_INTERVAL=5m`
 - remote policy signatures not required unless `TRACEGUARD_POLICY_SIGNING_KEY` is set
 - Kubernetes enrichment disabled: `TRACEGUARD_KUBERNETES_ENRICH=false`; when enabled without an explicit API URL, TraceGuard auto-detects the in-cluster API endpoint

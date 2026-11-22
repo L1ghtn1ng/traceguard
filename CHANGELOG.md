@@ -18,12 +18,17 @@ All notable changes to TraceGuard are documented in this file.
 
 ### Changed
 
-- HTTPS export no longer retries a batch the collector refused with `400`, `413`, `415`, or `422`: a spooled batch is moved to `rejected/` beneath the spool directory (at most 100 files and 64 MiB) and replay continues, where before one such batch blocked every newer spooled batch.
-- With the spool on, a `429` or `503` export reply's `Retry-After`, up to 10 minutes, now pauses sending and replay.
+- HTTPS export no longer retries a batch the collector refused with `400`, `413`, `415`, or `422`: a spooled batch is moved to `rejected/` beneath the spool directory (at most 100 files and 64 MiB) and replay continues, where before one such batch blocked every newer spooled batch. A `413` with `Retry-After` is still retried, and a spooled batch is set aside after three such replies.
+- With the spool on, a `413`, `429`, or `503` export reply's `Retry-After`, up to 10 minutes, now pauses sending and replay.
 - Policy `responses` may no longer use the ID `manager-command`, which is reserved for manager commands.
 - Spool replay no longer holds the spool lock while a batch is being sent, and a rejected batch that cannot be moved aside is deleted rather than retried.
 - A batch that mixes priority and routine records is never larger than 50 records.
 - The heartbeat's `policy_remote_sha256` is published only once the remote document has been applied, not when it is fetched.
+- The packaged systemd unit raises `LimitNOFILE` from 16384 to 131072 for the per-CPU tracepoint events below.
+
+### Fixed
+
+- On Linux 6.19 up to 7.2, kernels carrying the stable backport of "tracing: perf: Fix stale head for perf syscall tracing", such as Ubuntu's 7.0 kernels, ran syscall tracepoint programs only for syscalls made on one CPU, so events for syscalls that read user memory, such as `execve`, `openat`, `unlinkat`, and `memfd_create`, were lost on every other CPU. TraceGuard now opens a counting perf event for each syscall tracepoint on every online CPU on those kernels. This costs one file descriptor per tracepoint per CPU, and a CPU brought online later is covered from the next start.
 
 ## [1.8.0] - 2026-10-18
 
