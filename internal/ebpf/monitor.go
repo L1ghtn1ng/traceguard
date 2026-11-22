@@ -244,6 +244,9 @@ type Monitor struct {
 	daemonNamespaceErr error
 	// freshPinPath is the pin root this process created, until KeepPins.
 	freshPinPath string
+	// tracepointCPUEvents keep syscall tracepoint programs running on every
+	// CPU. They are not programs, so AttachedPrograms does not count them.
+	tracepointCPUEvents []io.Closer
 }
 
 type RuntimeMetrics interface {
@@ -524,20 +527,21 @@ func NewMonitor(cgroupPath string, opts Options) (*Monitor, error) {
 		return nil, failAfterPin(errors.Join(fmt.Errorf("create ring buffer reader: %w", err), optional.Close()))
 	}
 
-	links, err := attachMonitorPrograms(cgroupPath, opts, objects, defaultAttachmentFunctions())
+	attached, err := attachMonitorPrograms(cgroupPath, opts, objects, defaultAttachmentFunctions())
 	if err != nil {
 		return nil, failAfterPin(errors.Join(err, reader.Close(), optional.Close(), objects.Close()))
 	}
 	optionalLinks, attachState := attachOptionalPrograms(cgroupPath, opts, optional, defaultAttachmentFunctions())
 	if err := finalizePinMetadata(opts, features.SelectedObject); err != nil {
-		return nil, failAfterPin(errors.Join(err, reader.Close(), closeClosers(links), closeClosers(optionalLinks), optional.Close(), objects.Close()))
+		return nil, failAfterPin(errors.Join(err, reader.Close(), closeClosers(attached.cpuEvents), closeClosers(attached.links),
+			closeClosers(optionalLinks), optional.Close(), objects.Close()))
 	}
 
 	return &Monitor{
-		objects: objects, optional: optional, links: links, optionalLinks: optionalLinks,
+		objects: objects, optional: optional, links: attached.links, optionalLinks: optionalLinks,
 		reader: reader, features: features, cgroupPath: filepath.Clean(cgroupPath),
 		activePolicySlot: initialSettings.ActivePolicySlot, policyGeneration: initialSettings.PolicyGeneration,
-		attachState: attachState, statsCloser: statsCloser,
+		attachState: attachState, statsCloser: statsCloser, tracepointCPUEvents: attached.cpuEvents,
 		daemonNamespaceErr: hostNamespaceError("/proc/self/ns"),
 		freshPinPath:       freshPinPath(freshPinSet, opts),
 	}, nil
@@ -710,6 +714,7 @@ func (m *Monitor) Close() error {
 	if m.reader != nil {
 		errs = append(errs, m.closeReader())
 	}
+	errs = append(errs, closeClosers(m.tracepointCPUEvents))
 	for _, lnk := range m.links {
 		if lnk != nil {
 			errs = append(errs, lnk.Close())
