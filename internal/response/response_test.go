@@ -53,6 +53,8 @@ type fakeFreezer struct {
 	thawedID map[uint64]bool
 	// onThaw, when set, runs before each thaw.
 	onThaw func(id uint64, path string)
+	// onFreeze, when set, runs before each freeze.
+	onFreeze func(id uint64)
 	// thawedPaths lists each successful thaw's path in order.
 	thawedPaths []string
 }
@@ -66,6 +68,9 @@ func (f *fakeFreezer) Check(id uint64) (string, error) {
 }
 
 func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
+	if f.onFreeze != nil {
+		f.onFreeze(id)
+	}
 	f.freezeN++
 	path, err := f.Check(id)
 	if err != nil || f.already {
@@ -73,6 +78,10 @@ func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
 	}
 	f.frozen[path] = true
 	return path, true, nil
+}
+
+func (f *fakeFreezer) Frozen(_ uint64, path string) (bool, error) {
+	return f.already || f.frozen[path], nil
 }
 
 func (f *fakeFreezer) Thaw(id uint64, path string) error {

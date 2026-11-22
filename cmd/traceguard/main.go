@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/hardening"
 	"github.com/L1ghtn1ng/traceguard/internal/logging"
 	"github.com/L1ghtn1ng/traceguard/internal/replay"
+	"github.com/L1ghtn1ng/traceguard/internal/runid"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/version"
 )
@@ -137,6 +139,7 @@ func run() (exitCode int) {
 		ExportAuthorization:     cfg.EventExportAuthorization,
 		ExportAuthorizationFile: cfg.EventExportAuthorizationFile,
 		ExportSpool:             cfg.EventExportSpool,
+		ExportEvents:            cfg.EventExportEvents,
 		ExportCAPath:            cfg.EventExportCAPath,
 		ExportClientCert:        cfg.EventExportClientCert,
 		ExportClientKey:         cfg.EventExportClientKey,
@@ -158,11 +161,39 @@ func run() (exitCode int) {
 		}
 	}()
 
-	if err := app.Run(ctx, cfg, recorder, metrics, reloadCh); err != nil {
-		reportLoggerError(logger, "traceguard", err)
+	// Counted in TraceGuard's state directory, so a collector can order runs.
+	if cfg.SkipRunCounter {
+		recorder.Error("count agent runs", errors.New("a configured file uses the run counter's path, so this run is not counted; choose another path"), nil)
+	} else if err := runid.Start(runid.DefaultPath); err != nil {
+		recorder.Error("count agent runs", err, nil)
+	}
+	runErr := app.Run(ctx, cfg, recorder, metrics, reloadCh)
+	// The last record before the recorder flushes, so a collector can tell
+	// a deliberate stop from a host that went silent.
+	recorder.Info("agent stopping", stoppingFields(ctx, runErr))
+	if runErr != nil {
+		reportLoggerError(logger, "traceguard", runErr)
 		return 1
 	}
 	return 0
+}
+
+// stoppingFields describes why the agent is stopping: a signal, or an
+// error that ended the run.
+func stoppingFields(ctx context.Context, runErr error) map[string]any {
+	fields := map[string]any{"event": "agent_stopping", "reason": "signal", "run_id": runid.ID}
+	if runid.Sequence > 0 {
+		fields["run_seq"] = runid.Sequence
+		fields["install_id"] = runid.Install
+	}
+	switch {
+	case runErr != nil:
+		fields["reason"] = "error"
+		fields["error"] = runErr.Error()
+	case ctx.Err() == nil:
+		fields["reason"] = "exited"
+	}
+	return fields
 }
 
 func reportLoggerError(logger *logging.Logger, message string, err error) {

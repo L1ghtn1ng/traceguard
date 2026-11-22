@@ -61,6 +61,9 @@ type Freezer interface {
 	Freeze(id uint64) (string, bool, error)
 	// Thaw unfreezes the cgroup at path if it is still the cgroup with id.
 	Thaw(id uint64, path string) error
+	// Frozen reports whether the cgroup at path, still the one with id, is
+	// frozen now.
+	Frozen(id uint64, path string) (bool, error)
 }
 
 // RefusedError reports a cgroup that will not be frozen: a protected group,
@@ -110,6 +113,8 @@ type active struct {
 	peer          netip.Addr
 	cgroupID      uint64
 	cgroupPath    string
+	// liftedBy is the command whose lift is waiting on a retried undo.
+	liftedBy string
 }
 
 type refusal struct {
@@ -138,6 +143,11 @@ type Responder struct {
 	// stateHeld stops writes to a state file that could not be read, so
 	// its records survive for the next start.
 	stateHeld bool
+	// durableFreeze, set by Apply, makes a new freeze save its recovery
+	// record before freezing, and refuse when it cannot.
+	durableFreeze bool
+	// pending is that record while the freeze is under way.
+	pending *frozenCgroup
 }
 
 // New returns a responder in mode. A nil blocker or freezer makes that
@@ -182,6 +192,10 @@ func (r *Responder) Configure(responses []policy.Response) {
 		for id, held := range action.owners {
 			response, kept := current[id]
 			switch {
+			case id == ManualResponseID:
+				// A manager command is not part of the policy, so a policy
+				// change never ends it; its deadline or a lift does.
+				remaining[id] = held
 			case !kept:
 				reason = "policy_removed"
 			case !reflect.DeepEqual(response, previous[id]):
@@ -191,7 +205,7 @@ func (r *Responder) Configure(responses []policy.Response) {
 			}
 		}
 		if len(remaining) == 0 && reason != "" {
-			r.revertLocked(key, action, reason)
+			r.revertLocked(key, action, reason, nil)
 			continue
 		}
 		action.owners = remaining
@@ -235,10 +249,14 @@ func (r *Responder) Submit(alert detection.Alert) {
 	select {
 	case r.queue <- alert:
 	default:
-		r.record("response skipped", map[string]any{
+		fields := map[string]any{
 			"event": "response", "detection_rule_id": alert.RuleID, "mode": r.mode,
 			"reason": fmt.Sprintf("%d alerts are already waiting for a response", queueSize),
-		})
+		}
+		if alert.ID != "" {
+			fields["alert_id"] = alert.ID
+		}
+		r.record("response skipped", fields)
 	}
 }
 
@@ -269,81 +287,87 @@ func (r *Responder) Handle(alert detection.Alert) {
 			continue
 		}
 		until := r.options.Now().Add(response.Duration.Duration)
+		// Failures are recorded where they happen.
 		switch response.Action {
 		case policy.ResponseBlockPeer:
-			r.blockPeerLocked(response, alert, until)
+			_ = r.blockPeerLocked(response, alert, until)
 		case policy.ResponseFreezeCgroup:
-			r.freezeCgroupLocked(response, alert, until)
+			_ = r.freezeCgroupLocked(response, alert, until)
 		}
 	}
 }
 
 func (r *Responder) fields(response policy.Response, alert detection.Alert, target string, until time.Time) map[string]any {
-	return map[string]any{
+	fields := map[string]any{
 		"event": "response", "response_id": response.ID, "action": response.Action,
 		"target": target, "detection_rule_id": alert.RuleID, "mode": r.mode,
 		"until": until.UTC().Format(time.RFC3339Nano),
 	}
+	// The alert that caused the response, so a collector can link the two.
+	// A command action has no alert, only the command that started it.
+	switch {
+	case response.ID == ManualResponseID:
+		fields["command_id"] = alert.ID
+	case alert.ID != "":
+		fields["alert_id"] = alert.ID
+	}
+	return fields
 }
 
-func (r *Responder) skip(response policy.Response, alert detection.Alert, reason string) {
+// skip records a response that was not applied, and returns why.
+func (r *Responder) skip(response policy.Response, alert detection.Alert, reason string) error {
 	fields := r.fields(response, alert, "", time.Time{})
 	delete(fields, "until")
 	delete(fields, "target")
 	fields["reason"] = reason
 	r.record("response skipped", fields)
+	return errors.New(reason)
 }
 
-func (r *Responder) blockPeerLocked(response policy.Response, alert detection.Alert, until time.Time) {
+func (r *Responder) blockPeerLocked(response policy.Response, alert detection.Alert, until time.Time) error {
 	address, ok := peerAddress(alert.Fields)
 	if !ok {
-		r.skip(response, alert, "the alert has no peer address")
-		return
+		return r.skip(response, alert, "the alert has no peer address")
 	}
 	if address.IsLoopback() || address.IsUnspecified() || address.IsMulticast() {
-		r.skip(response, alert, "the peer address is loopback, unspecified, or multicast")
-		return
+		return r.skip(response, alert, "the peer address is loopback, unspecified, or multicast")
 	}
 	target := address.String()
-	if !r.admitLocked(response, alert, policy.ResponseBlockPeer, target, until) {
-		return
+	if apply, err := r.admitLocked(response, alert, policy.ResponseBlockPeer, target, until); !apply {
+		return err
 	}
 	applied := false
 	if r.mode == ModeEnforce {
 		if r.blocker == nil {
-			r.skip(response, alert, "peer blocking is unavailable")
-			return
+			return r.skip(response, alert, "peer blocking is unavailable")
 		}
 		if err := r.blocker.BlockPeer(address, until); err != nil {
-			r.failed(response, alert, target, err)
-			return
+			return r.failed(response, alert, target, err)
 		}
 		applied = true
 	}
 	r.track(response, alert, policy.ResponseBlockPeer, target, until, &active{peer: address, applied: applied})
+	return nil
 }
 
-func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection.Alert, until time.Time) {
+func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection.Alert, until time.Time) error {
 	id, ok := cgroupID(alert.Fields)
 	if !ok {
-		r.skip(response, alert, "the alert has no event-time cgroup")
-		return
+		return r.skip(response, alert, "the alert has no event-time cgroup")
 	}
 	target := fmt.Sprint(id)
 	key := actionKey{action: policy.ResponseFreezeCgroup, target: target}
 	if refused, ok := r.refused[key]; ok && r.options.Now().Before(refused.until) {
 		// Retrying would rescan the cgroup hierarchy only to refuse again.
-		r.skip(response, alert, refused.reason)
-		return
+		return r.skip(response, alert, refused.reason)
 	}
-	if !r.admitLocked(response, alert, policy.ResponseFreezeCgroup, target, until) {
-		return
+	if apply, err := r.admitLocked(response, alert, policy.ResponseFreezeCgroup, target, until); !apply {
+		return err
 	}
 	// Dry-run runs the same safety checks, so its records show only freezes
 	// enforce would make.
 	if r.freezer == nil {
-		r.skip(response, alert, "cgroup freezing is unavailable")
-		return
+		return r.skip(response, alert, "cgroup freezing is unavailable")
 	}
 	var (
 		path string
@@ -351,7 +375,36 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 	)
 	froze := false
 	if r.mode == ModeEnforce {
+		if r.durableFreeze {
+			if err := r.recordBeforeFreezeLocked(id, until); err != nil {
+				return r.failed(response, alert, target, err)
+			}
+		}
+		recorded := r.pending != nil
 		path, froze, err = r.freezer.Freeze(id)
+		r.pending = nil
+		if err != nil && recorded {
+			// No freeze happened: drop the intent from disk too, so a later
+			// restart cannot thaw a freeze someone else makes meanwhile.
+			_ = r.persistLocked()
+		}
+		if err == nil && froze && r.durableFreeze && !recorded {
+			// The cgroup looked frozen already but was thawed before Freeze
+			// ran, so this run froze it with no record yet: save one now, or
+			// undo it.
+			state := &active{cgroupID: id, cgroupPath: path, applied: true}
+			r.track(response, alert, policy.ResponseFreezeCgroup, target, until, state)
+			if persistErr := r.persistLocked(); persistErr != nil {
+				r.revertLocked(key, state, "state_not_saved", nil)
+				if still, ok := r.active[key]; ok {
+					// The thaw failed too: retry it on the next tick, not at
+					// the deadline.
+					still.until = r.options.Now()
+				}
+				return r.failed(response, alert, target, fmt.Errorf("its recovery record could not be saved: %w", persistErr))
+			}
+			return nil
+		}
 	} else {
 		path, err = r.freezer.Check(id)
 	}
@@ -360,17 +413,19 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 		if errors.As(err, &refused) && len(r.refused) < MaxActive {
 			r.refused[key] = refusal{until: until, reason: refused.Reason}
 		}
-		r.failed(response, alert, target, err)
-		return
+		return r.failed(response, alert, target, err)
 	}
 	state := &active{cgroupID: id, cgroupPath: path, applied: froze, alreadyFrozen: r.mode == ModeEnforce && !froze}
 	r.track(response, alert, policy.ResponseFreezeCgroup, target, until, state)
-	r.persistLocked()
+	_ = r.persistLocked()
+	return nil
 }
 
 // admitLocked adds the response to an action that is already active,
-// extending it, and reports whether a new action should be applied.
-func (r *Responder) admitLocked(response policy.Response, alert detection.Alert, action, target string, until time.Time) bool {
+// extending it, and reports whether a new action should be applied. When
+// it should not, err is nil if the existing action now covers the
+// response, and says why otherwise.
+func (r *Responder) admitLocked(response policy.Response, alert detection.Alert, action, target string, until time.Time) (bool, error) {
 	key := actionKey{action: action, target: target}
 	if existing, ok := r.active[key]; ok {
 		if until.After(existing.until) {
@@ -378,26 +433,26 @@ func (r *Responder) admitLocked(response policy.Response, alert detection.Alert,
 			// recorded deadlines matching it.
 			if action == policy.ResponseBlockPeer && existing.applied && r.blocker != nil {
 				if err := r.blocker.BlockPeer(existing.peer, until); err != nil {
-					r.failed(response, alert, target, err)
-					return false
+					return false, r.failed(response, alert, target, err)
 				}
 			}
 			existing.until = until
+			// A newer response holds it now; a pending lift no longer applies.
+			existing.liftedBy = ""
 			r.record("response extended", r.fields(response, alert, target, until))
 			if action == policy.ResponseFreezeCgroup {
-				r.persistLocked()
+				_ = r.persistLocked()
 			}
 		}
 		if held, ok := existing.owners[response.ID]; !ok || until.After(held.until) {
 			existing.owners[response.ID] = owner{ruleID: alert.RuleID, until: until}
 		}
-		return false
+		return false, nil
 	}
 	if len(r.active) >= MaxActive {
-		r.skip(response, alert, fmt.Sprintf("%d actions are already active", MaxActive))
-		return false
+		return false, r.skip(response, alert, fmt.Sprintf("%d actions are already active", MaxActive))
 	}
-	return true
+	return true, nil
 }
 
 func (r *Responder) track(response policy.Response, alert detection.Alert, action, target string, until time.Time, state *active) {
@@ -415,11 +470,12 @@ func (r *Responder) track(response policy.Response, alert detection.Alert, actio
 	r.record(message, fields)
 }
 
-func (r *Responder) failed(response policy.Response, alert detection.Alert, target string, err error) {
+func (r *Responder) failed(response policy.Response, alert detection.Alert, target string, err error) error {
 	fields := r.fields(response, alert, target, time.Time{})
 	delete(fields, "until")
 	fields["error"] = err.Error()
 	r.record("response failed", fields)
+	return err
 }
 
 // Expire reverts actions whose deadline has passed, retrying undos that
@@ -429,7 +485,12 @@ func (r *Responder) Expire(now time.Time) {
 	defer r.mu.Unlock()
 	for key, action := range r.active {
 		if !now.Before(action.until) {
-			r.revertLocked(key, action, "expired")
+			if action.liftedBy != "" {
+				// A lift whose first undo failed, retried under its command.
+				r.revertLocked(key, action, "lifted", map[string]any{"command_id": action.liftedBy})
+				continue
+			}
+			r.revertLocked(key, action, "expired", nil)
 		}
 	}
 	for key, refused := range r.refused {
@@ -449,7 +510,7 @@ func (r *Responder) RevertAll() {
 		}
 		r.mu.Lock()
 		for key, action := range r.active {
-			r.revertLocked(key, action, "shutdown")
+			r.revertLocked(key, action, "shutdown", nil)
 		}
 		remaining := len(r.active)
 		r.mu.Unlock()
@@ -484,8 +545,9 @@ func (r *Responder) actionFields(key actionKey, action *active, reason string) m
 
 // revertLocked undoes an action. An action whose undo fails stays tracked so
 // the next Expire retries it.
-func (r *Responder) revertLocked(key actionKey, action *active, reason string) {
+func (r *Responder) revertLocked(key actionKey, action *active, reason string, extra map[string]any) {
 	fields := r.actionFields(key, action, reason)
+	maps.Copy(fields, extra)
 	if action.applied {
 		var err error
 		switch key.action {
@@ -506,7 +568,7 @@ func (r *Responder) revertLocked(key actionKey, action *active, reason string) {
 	}
 	delete(r.active, key)
 	if key.action == policy.ResponseFreezeCgroup {
-		r.persistLocked()
+		_ = r.persistLocked()
 	}
 	r.record("response reverted", fields)
 }
@@ -534,4 +596,26 @@ func cgroupID(fields map[string]any) (uint64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// recordBeforeFreezeLocked saves a recovery record for a cgroup about to be
+// frozen, so a crash between freezing and saving can never leave it frozen
+// with nothing to thaw it. A cgroup already frozen by something else gets
+// no record, since TraceGuard must not thaw it.
+func (r *Responder) recordBeforeFreezeLocked(id uint64, until time.Time) error {
+	path, err := r.freezer.Check(id)
+	if err != nil {
+		return err
+	}
+	if frozen, err := r.freezer.Frozen(id, path); err != nil {
+		return err
+	} else if frozen {
+		return nil
+	}
+	r.pending = &frozenCgroup{CgroupID: id, Path: path, Until: until}
+	if err := r.persistLocked(); err != nil {
+		r.pending = nil
+		return fmt.Errorf("refusing to freeze: its recovery record could not be saved: %w", err)
+	}
+	return nil
 }

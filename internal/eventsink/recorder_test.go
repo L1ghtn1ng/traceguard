@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1008,7 +1009,7 @@ func TestExportSinkSpoolsAndReplays(t *testing.T) {
 
 	failMode.Store(false)
 	if err := sink.spool.Replay(func(payload []byte) error {
-		if err := sink.sendPayload(context.Background(), payload); err != nil {
+		if err := sink.sendPayload(context.Background(), payload, deliveryLive); err != nil {
 			metrics.SetEventExportLastError()
 			return err
 		}
@@ -1542,6 +1543,26 @@ func TestBoundValueDoesNotTraverseUnknownContainers(t *testing.T) {
 	value, truncated := boundValue(map[string]any{"large": strings.Repeat("x", 1<<20)})
 	if !truncated || value != "[value truncated]" {
 		t.Fatalf("boundValue() = %#v, %t, want placeholder and truncation", value, truncated)
+	}
+}
+
+func TestBoundValueKeepsSmallFlatObjects(t *testing.T) {
+	t.Parallel()
+
+	small := map[string]any{"action": "block_peer", "target": "203.0.113.9", "applied": true}
+	value, truncated := boundValue([]any{small})
+	list, ok := value.([]any)
+	if truncated || !ok || len(list) != 1 || !reflect.DeepEqual(list[0], small) {
+		t.Fatalf("boundValue() = %#v, %t, want the object kept", value, truncated)
+	}
+	for name, object := range map[string]map[string]any{
+		"nested":     {"inner": map[string]any{"a": 1}},
+		"list":       {"items": []any{1}},
+		"long value": {"x": strings.Repeat("y", maxSmallObjectStringBytes+1)},
+	} {
+		if value, truncated := boundValue(object); !truncated || value != "[value truncated]" {
+			t.Errorf("%s: boundValue() = %#v, %t, want placeholder", name, value, truncated)
+		}
 	}
 }
 

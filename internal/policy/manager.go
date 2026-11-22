@@ -3,8 +3,10 @@ package policy
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/safefile"
@@ -59,6 +62,17 @@ type LoadMetadata struct {
 	RemoteError       string
 	StaleFallback     bool
 	CachePersistError string
+	// RemoteDigest is the SHA-256 of the remote document in the loaded
+	// bundle, exactly as served. Pass it to SetAppliedDigest once the
+	// bundle is in force.
+	RemoteDigest string
+	// Sequence numbers loads in the order they ran, so a caller applying
+	// bundles from more than one goroutine can refuse an older one.
+	Sequence uint64
+	// CacheTouched reports that this load wrote the cache, or used it,
+	// after the policy validated; CachePersistError says whether a write
+	// failed. A load that never reached the cache leaves it false.
+	CacheTouched bool
 }
 
 type Manager struct {
@@ -70,6 +84,33 @@ type Manager struct {
 	etag       string
 	modified   string
 	lastRemote *Document
+	// cacheDigest is the SHA-256 of the cache payload readCache last read.
+	cacheDigest string
+	// acceptedDigest is the SHA-256 of lastRemote's bytes.
+	acceptedDigest string
+	// loads counts Load calls, under mu.
+	loads uint64
+	// appliedDigest is the digest of the remote document in force,
+	// published apart from mu so a heartbeat never waits on a fetch.
+	appliedDigest atomic.Pointer[string]
+}
+
+// RemoteDigest returns the hex SHA-256 of the remote policy document in
+// force, exactly as served, or "" before one has been applied. A policy
+// server can compare it with what it serves to spot agents that have not
+// taken a new policy.
+func (m *Manager) RemoteDigest() string {
+	if digest := m.appliedDigest.Load(); digest != nil {
+		return *digest
+	}
+	return ""
+}
+
+// SetAppliedDigest records that the bundle whose LoadMetadata.RemoteDigest
+// is digest is now in force. A bundle that loaded but failed to apply must
+// not be reported as in use.
+func (m *Manager) SetAppliedDigest(digest string) {
+	m.appliedDigest.Store(&digest)
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -151,8 +192,10 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.loads++
 	remote := Document{Version: Version}
-	metadata := LoadMetadata{RemoteSource: LoadSourceNone}
+	metadata := LoadMetadata{RemoteSource: LoadSourceNone, Sequence: m.loads}
+	digest := ""
 	var fetched *remoteResponse
 	if strings.TrimSpace(m.cfg.URL) != "" {
 		document, response, source, err := m.fetch(ctx)
@@ -178,6 +221,14 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 		}
 		remote = document
 		metadata.RemoteSource = source
+		switch {
+		case fetched != nil:
+			digest = payloadDigest(fetched.payload)
+		case source == LoadSourceLastKnown || (source == LoadSourceNotChanged && m.lastRemote != nil):
+			digest = m.acceptedDigest
+		default:
+			digest = m.cacheDigest
+		}
 	}
 
 	local := Document{Version: Version}
@@ -206,6 +257,7 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 		// Commit remote state only after the effective policy validated, so a
 		// rejected document is neither cached nor suppressed by a later 304.
 		if fetched != nil {
+			metadata.CacheTouched = true
 			if err := m.writeCache(fetched); err != nil {
 				metadata.CachePersistError = err.Error()
 			}
@@ -214,6 +266,11 @@ func (m *Manager) Load(ctx context.Context) (Bundle, LoadMetadata, error) {
 		}
 		copy := remote
 		m.lastRemote = &copy
+		m.acceptedDigest = digest
+		metadata.RemoteDigest = digest
+		if metadata.RemoteSource == LoadSourceCache {
+			metadata.CacheTouched = true
+		}
 	}
 	return bundle, metadata, nil
 }
@@ -365,6 +422,7 @@ func (m *Manager) readCache() (Document, error) {
 	if err != nil {
 		return Document{}, fmt.Errorf("read policy cache %q: %w", m.cfg.CachePath, err)
 	}
+	m.cacheDigest = payloadDigest(payload)
 	if m.signingKey != nil {
 		signature, err := safefile.ReadFile(m.cfg.CachePath+SignatureSuffix, maxSignatureBytes)
 		if err != nil {
@@ -451,4 +509,9 @@ func validatePath(path, name string) error {
 		return fmt.Errorf("%s %q must be absolute", name, path)
 	}
 	return nil
+}
+
+func payloadDigest(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }

@@ -1367,7 +1367,7 @@ responses:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Response ID, unique among responses. |
+| `id` | Response ID, unique among responses. `manager-command` is reserved for actions started by manager commands. |
 | `rules` | Detection rule, sequence, or `threat_intel.<feed>` IDs. A name that nothing defines rejects the policy. |
 | `action` | `block_peer` or `freeze_cgroup`. |
 | `duration` | How long the action lasts, at most `24h`. |

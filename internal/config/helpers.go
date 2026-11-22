@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ const maxSyslogTagBytes = 48
 var urlValueFlags = map[string]struct{}{
 	"policy-url":         {},
 	"event-export-url":   {},
+	"command-url":        {},
 	"event-syslog-url":   {},
 	"kubernetes-api-url": {},
 }
@@ -371,4 +373,67 @@ func (f byteSizeFlag) Set(value string) error {
 	}
 	*f.value = parsed
 	return nil
+}
+
+// parseCommandActions reads a comma-separated list of manager command
+// actions. An empty list accepts none, which keeps commands polled but
+// refuses every one.
+func parseCommandActions(value string) ([]string, error) {
+	actions := []string{}
+	for _, item := range strings.Split(value, ",") {
+		action := strings.ToLower(strings.TrimSpace(item))
+		if action == "" {
+			continue
+		}
+		if !slices.Contains(DefaultCommandActions, action) {
+			return nil, fmt.Errorf("command-actions: unknown action %q; use %s", action, strings.Join(DefaultCommandActions, ", "))
+		}
+		if !slices.Contains(actions, action) {
+			actions = append(actions, action)
+		}
+	}
+	return actions, nil
+}
+
+// validateCommandURL checks the manager command URL. Commands reuse the
+// event export credentials, so they must go to the same origin as the
+// export, never to another host.
+func validateCommandURL(commandURL, exportURL string) error {
+	commandURL = strings.TrimSpace(commandURL)
+	if commandURL == "" {
+		return nil
+	}
+	if strings.TrimSpace(exportURL) == "" {
+		return errors.New("command-url requires event-export-url, whose credentials it uses")
+	}
+	command, err := neturl.Parse(commandURL)
+	if err != nil {
+		return errors.New("command-url is not a valid URL")
+	}
+	if command.Scheme != "https" || command.Host == "" {
+		return errors.New("command-url must use https://")
+	}
+	if command.User != nil || command.RawQuery != "" || command.ForceQuery || command.Fragment != "" {
+		return errors.New("command-url must not contain credentials, a query or a fragment")
+	}
+	export, err := neturl.Parse(strings.TrimSpace(exportURL))
+	if err != nil || !sameOrigin(command, export) {
+		return errors.New("command-url must use the same host and port as event-export-url")
+	}
+	return nil
+}
+
+// sameOrigin compares scheme, host name and effective port, so an explicit
+// :443 matches an https URL that leaves the port out.
+func sameOrigin(a, b *neturl.URL) bool {
+	port := func(u *neturl.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if strings.EqualFold(u.Scheme, "https") {
+			return "443"
+		}
+		return "80"
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }

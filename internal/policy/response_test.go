@@ -44,3 +44,12 @@ func TestParseRejectsInvalidResponses(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseRejectsReservedID(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]byte("version: 1\nresponses:\n  - id: manager-command\n    rules: [baseline.inbound-ssh-bruteforce]\n    action: block_peer\n    duration: 1h\n"))
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("Parse() error = %v, want the reserved id refused", err)
+	}
+}

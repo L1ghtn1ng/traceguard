@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/L1ghtn1ng/traceguard/internal/blocklist"
+	"github.com/L1ghtn1ng/traceguard/internal/commands"
 	"github.com/L1ghtn1ng/traceguard/internal/config"
 	"github.com/L1ghtn1ng/traceguard/internal/detection"
 	"github.com/L1ghtn1ng/traceguard/internal/ebpf"
@@ -21,8 +23,10 @@ import (
 	"github.com/L1ghtn1ng/traceguard/internal/kubeinfo"
 	policyconfig "github.com/L1ghtn1ng/traceguard/internal/policy"
 	"github.com/L1ghtn1ng/traceguard/internal/processinfo"
+	"github.com/L1ghtn1ng/traceguard/internal/runid"
 	"github.com/L1ghtn1ng/traceguard/internal/telemetry"
 	"github.com/L1ghtn1ng/traceguard/internal/threatintel"
+	"github.com/L1ghtn1ng/traceguard/internal/version"
 )
 
 const (
@@ -177,6 +181,8 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	policyController := newPolicyController(ctx, cfg, monitor, recorder, metrics, detector, integrity, intel, responder, feedLoader)
 
 	var yamlManager *policyconfig.Manager
+	// policyApply orders the periodic refresh and reloads.
+	var policyApply policyApplier
 	// watchRemote refreshes the remote policy; it starts after detection
 	// is armed.
 	var watchRemote func()
@@ -203,6 +209,9 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		source := yamlPolicySource(metadata, cfg)
 		metrics.IncPolicySourceLoad(source, loadErr == nil)
 		setYAMLPolicyHealth(metrics, cfg, metadata, loadErr)
+		if cfg.PolicyURL != "" {
+			policyApply.cacheHealth(metrics, metadata)
+		}
 		if metadata.CachePersistError != "" {
 			recorder.Error("persist fetched YAML policy cache", errors.New(metadata.CachePersistError), nil)
 		}
@@ -215,12 +224,15 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 		if err := policyController.ApplyBundle(bundle); err != nil {
 			return fmt.Errorf("apply YAML policy: %w", err)
 		}
+		policyApply.applied = metadata.Sequence
+		yamlManager.SetAppliedDigest(metadata.RemoteDigest)
 		if cfg.PolicyURL != "" {
 			watchRemote = func() {
 				yamlManager.Watch(ctx, func(bundle policyconfig.Bundle, metadata policyconfig.LoadMetadata, loadErr error) {
 					source := yamlPolicySource(metadata, cfg)
 					metrics.IncPolicySourceLoad(source, loadErr == nil)
-					setYAMLPolicyHealth(metrics, cfg, metadata, loadErr)
+					policyApply.cacheHealth(metrics, metadata)
+					policyApply.health(metadata, func() { setYAMLPolicyHealth(metrics, cfg, metadata, loadErr) })
 					if metadata.CachePersistError != "" {
 						recorder.Error("persist fetched YAML policy cache", errors.New(metadata.CachePersistError), nil)
 					}
@@ -231,9 +243,7 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 						recorder.ErrorDedup("refresh YAML policy", loadErr, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
 						return
 					}
-					if err := applyPolicyWithHealth(metrics, func() error {
-						return policyController.ApplyBundle(bundle)
-					}); err != nil {
+					if err := policyApply.apply(metrics, policyController, yamlManager, bundle, metadata); err != nil {
 						recorder.ErrorDedup("apply refreshed YAML policy", err, map[string]any{"source": source}, policyRefreshErrorDedupeTTL)
 					}
 				})
@@ -277,8 +287,15 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	if watchRemote != nil {
 		workers.Go(watchRemote)
 	}
-	if reloadCh != nil && yamlManager != nil {
-		workers.Go(func() { runPolicyReloads(ctx, reloadCh, yamlManager, policyController, cfg, recorder, metrics) })
+	// Reloads come from SIGHUP and from manager refresh_policy commands.
+	reloads := make(chan reloadRequest, 1)
+	if reloadCh != nil {
+		workers.Go(func() { forwardReloads(ctx, reloadCh, reloads) })
+	}
+	if yamlManager != nil {
+		workers.Go(func() {
+			runPolicyReloads(ctx, &policyApply, reloads, yamlManager, policyController, cfg, recorder, metrics)
+		})
 	}
 	if yamlManager != nil {
 		workers.Go(func() { runCgroupReconciliation(ctx, policyController, recorder, metrics) })
@@ -291,12 +308,48 @@ func Run(ctx context.Context, cfg config.Config, recorder *eventsink.Recorder, m
 	exceptions.collect(time.Now())
 	workers.Go(func() { runEvery(ctx, ringBufferStatsPollInterval, exceptions.collect) })
 
+	// Built before the pins are kept, so a failure here still removes them.
+	var poller *commands.Poller
+	if cfg.CommandURL != "" {
+		connected := func() (netip.Addr, bool) {
+			if poller == nil {
+				return netip.Addr{}, false
+			}
+			return poller.ConnectedPeer()
+		}
+		poller, err = newCommandPoller(cfg, recorder, commandHandler{
+			responder: responder,
+			protected: managerAddresses(cfg, connected),
+			refresh: func() error {
+				if yamlManager == nil {
+					return errors.New("this agent has no policy source to refresh")
+				}
+				return requestReload(ctx, reloads, "command")
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("initialize manager commands: %w", err)
+		}
+	}
+
 	started = true
 	monitor.KeepPins()
+	if poller != nil {
+		workers.Go(func() { poller.Run(ctx) })
+	}
 	if cfg.HeartbeatInterval > 0 {
 		status := heartbeatStatus{
 			started: time.Now(), mode: policyMode(cfg), policyDigest: policyController.Digest,
 			unavailableHooks: unavailableHooks, ringBuffer: ringBuffer, detector: detector, healthy: metrics.Healthy,
+			runID: runid.ID, runSequence: runid.Sequence, install: runid.Install, version: version.Program, kernelRelease: kernelFeatures.Release, osName: osPrettyName("/etc/os-release"),
+			responseMode: cfg.ResponseMode, commands: cfg.CommandURL != "",
+			responses: responder.ActiveActions,
+		}
+		if cfg.EventExportURL != "" {
+			status.export = metrics.EventExportStatus
+		}
+		if yamlManager != nil && cfg.PolicyURL != "" {
+			status.remoteDigest = yamlManager.RemoteDigest
 		}
 		workers.Go(func() { runHeartbeat(ctx, cfg.HeartbeatInterval, recorder, status) })
 	}

@@ -13,6 +13,7 @@ const (
 	maxRecordStringBytes     = 4096
 	maxRecordFields          = 128
 	maxRecordSliceItems      = 128
+	maxRecordObjectFields    = 16
 	maxRecordFieldBytes      = 24 << 10
 	maxSerializedRecordBytes = 32 << 10
 	maxRecordEnvelopeBytes   = 1 << 10
@@ -130,6 +131,14 @@ func boundValue(value any) (any, bool) {
 			truncated = truncated || itemTruncated
 		}
 		return bounded, truncated
+	case map[string]any:
+		// Unknown containers are not walked. The one exception is a small
+		// flat object, such as an entry of a heartbeat's active responses,
+		// which passes unchanged or not at all.
+		if smallFlatObject(typed) {
+			return typed, false
+		}
+		return "[value truncated]", true
 	case nil, bool,
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64,
@@ -182,4 +191,35 @@ func truncateJSONString(value string, limit int) (string, int, bool) {
 		return "", 0, false
 	}
 	return prefix, len(encoded), true
+}
+
+const (
+	maxSmallObjectKeyBytes    = 64
+	maxSmallObjectStringBytes = 256
+)
+
+// smallFlatObject reports whether an object has at most
+// maxRecordObjectFields fields, each with a short key and a scalar value.
+func smallFlatObject(object map[string]any) bool {
+	if len(object) > maxRecordObjectFields {
+		return false
+	}
+	for key, value := range object {
+		if len(key) > maxSmallObjectKeyBytes {
+			return false
+		}
+		switch typed := value.(type) {
+		case string:
+			if len(typed) > maxSmallObjectStringBytes || !utf8.ValidString(typed) {
+				return false
+			}
+		case nil, bool,
+			int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64, json.Number:
+		default:
+			return false
+		}
+	}
+	return true
 }

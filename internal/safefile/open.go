@@ -146,6 +146,9 @@ func openBeneathAt(dirfd int, name string, flags int, mode os.FileMode) (*os.Fil
 	return file, nil
 }
 
+// ErrTooLarge reports a file longer than the caller's limit.
+var ErrTooLarge = errors.New("file is too large")
+
 func ReadFile(path string, maxBytes int64) (payload []byte, readErr error) {
 	file, err := OpenAbsolute(path, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
@@ -219,7 +222,7 @@ func readRegular(file *os.File, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(payload)) > maxBytes {
-		return nil, fmt.Errorf("file exceeds %d bytes", maxBytes)
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrTooLarge, maxBytes)
 	}
 	return payload, nil
 }

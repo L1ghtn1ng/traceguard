@@ -284,7 +284,7 @@ func TestExportSendStopsDrainingAStalledReply(t *testing.T) {
 	server := stalledCollector(t, true)
 	sink := &exportSink{client: server.Client(), target: server.URL, drainTimeout: 50 * time.Millisecond}
 	started := time.Now()
-	if err := sink.sendPayload(t.Context(), []byte("[]")); err != nil {
+	if err := sink.sendPayload(t.Context(), []byte("[]"), deliveryLive); err != nil {
 		t.Fatalf("sendPayload returned error: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {

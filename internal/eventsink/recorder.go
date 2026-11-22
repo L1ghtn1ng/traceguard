@@ -48,14 +48,17 @@ type Config struct {
 	// Authorization header value. It excludes ExportAuthorization.
 	ExportAuthorizationFile string
 	ExportSpool             bool
-	ExportCAPath            string
-	ExportClientCert        string
-	ExportClientKey         string
-	SyslogURL               string
-	SyslogFacility          string
-	SyslogTag               string
-	SyslogTimeout           time.Duration
-	SyslogCAPath            string
+	// ExportEvents chooses what the HTTPS export sends: ExportEventsAll
+	// (the default) or ExportEventsAlerts.
+	ExportEvents     string
+	ExportCAPath     string
+	ExportClientCert string
+	ExportClientKey  string
+	SyslogURL        string
+	SyslogFacility   string
+	SyslogTag        string
+	SyslogTimeout    time.Duration
+	SyslogCAPath     string
 	// Schema selects the record format for HTTPS export and syslog:
 	// SchemaTraceGuard (the default) or SchemaOCSF. Local sinks always use
 	// the TraceGuard format.
