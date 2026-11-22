@@ -61,9 +61,6 @@ type Freezer interface {
 	Freeze(id uint64) (string, bool, error)
 	// Thaw unfreezes the cgroup at path if it is still the cgroup with id.
 	Thaw(id uint64, path string) error
-	// Frozen reports whether the cgroup at path, still the one with id, is
-	// frozen now.
-	Frozen(id uint64, path string) (bool, error)
 }
 
 // RefusedError reports a cgroup that will not be frozen: a protected group,
@@ -383,27 +380,10 @@ func (r *Responder) freezeCgroupLocked(response policy.Response, alert detection
 		recorded := r.pending != nil
 		path, froze, err = r.freezer.Freeze(id)
 		r.pending = nil
-		if err != nil && recorded {
-			// No freeze happened: drop the intent from disk too, so a later
-			// restart cannot thaw a freeze someone else makes meanwhile.
+		if recorded && (err != nil || !froze) {
+			// No freeze of TraceGuard's: drop the intent from disk too, so a
+			// later restart cannot thaw a freeze someone else made.
 			_ = r.persistLocked()
-		}
-		if err == nil && froze && r.durableFreeze && !recorded {
-			// The cgroup looked frozen already but was thawed before Freeze
-			// ran, so this run froze it with no record yet: save one now, or
-			// undo it.
-			state := &active{cgroupID: id, cgroupPath: path, applied: true}
-			r.track(response, alert, policy.ResponseFreezeCgroup, target, until, state)
-			if persistErr := r.persistLocked(); persistErr != nil {
-				r.revertLocked(key, state, "state_not_saved", nil)
-				if still, ok := r.active[key]; ok {
-					// The thaw failed too: retry it on the next tick, not at
-					// the deadline.
-					still.until = r.options.Now()
-				}
-				return r.failed(response, alert, target, fmt.Errorf("its recovery record could not be saved: %w", persistErr))
-			}
-			return nil
 		}
 	} else {
 		path, err = r.freezer.Check(id)
@@ -607,11 +587,10 @@ func (r *Responder) recordBeforeFreezeLocked(id uint64, until time.Time) error {
 	if err != nil {
 		return err
 	}
-	if frozen, err := r.freezer.Frozen(id, path); err != nil {
-		return err
-	} else if frozen {
-		return nil
-	}
+	// Recorded even when the cgroup looks frozen already: something else may
+	// thaw it before Freeze runs, and then this run freezes it. If Freeze
+	// finds it frozen, the caller drops the record, so a restart never thaws
+	// a freeze TraceGuard did not make.
 	r.pending = &frozenCgroup{CgroupID: id, Path: path, Until: until}
 	if err := r.persistLocked(); err != nil {
 		r.pending = nil

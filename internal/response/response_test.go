@@ -80,10 +80,6 @@ func (f *fakeFreezer) Freeze(id uint64) (string, bool, error) {
 	return path, true, nil
 }
 
-func (f *fakeFreezer) Frozen(_ uint64, path string) (bool, error) {
-	return f.already || f.frozen[path], nil
-}
-
 func (f *fakeFreezer) Thaw(id uint64, path string) error {
 	if f.onThaw != nil {
 		f.onThaw(id, path)
@@ -675,6 +671,44 @@ func TestAlreadyFrozenCgroupIsLeftFrozen(t *testing.T) {
 	}
 	if payload, _ := os.ReadFile(state); strings.Contains(string(payload), `"cgroup_id"`) { //nolint:gosec // test path
 		t.Fatalf("state %s records a freeze TraceGuard did not make", payload)
+	}
+}
+
+func TestAFreezeIsRecordedEvenWhenTheCgroupLooksFrozenAlready(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "b"})
+	// Something else has it frozen, then thaws it just before TraceGuard freezes it.
+	h.freezer.already = true
+	recordedFirst := false
+	h.freezer.onFreeze = func(uint64) {
+		h.freezer.already = false
+		payload, _ := os.ReadFile(state) //nolint:gosec // test path
+		recordedFirst = strings.Contains(string(payload), `"cgroup_id":2`)
+	}
+	if err := h.responder.Apply("cmd-1", policy.ResponseFreezeCgroup, "2", time.Hour); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !recordedFirst {
+		t.Fatal("the cgroup was frozen before its recovery record was saved, so a crash would leave it frozen")
+	}
+	if payload, _ := os.ReadFile(state); !strings.Contains(string(payload), `"cgroup_id":2`) { //nolint:gosec // test path
+		t.Fatalf("state %s does not record the freeze this run made", payload)
+	}
+}
+
+func TestAManualFreezeOfAnotherFreezeLeavesNoRecord(t *testing.T) {
+	t.Parallel()
+
+	state := filepath.Join(t.TempDir(), "responses.json")
+	h := newHarness(ModeEnforce, Options{StatePath: state, BootID: "b"})
+	h.freezer.already = true
+	if err := h.responder.Apply("cmd-1", policy.ResponseFreezeCgroup, "2", time.Hour); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if payload, _ := os.ReadFile(state); strings.Contains(string(payload), `"cgroup_id"`) { //nolint:gosec // test path
+		t.Fatalf("state %s records a freeze TraceGuard did not make, so a restart would thaw it", payload)
 	}
 }
 
